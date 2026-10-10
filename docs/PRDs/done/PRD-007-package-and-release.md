@@ -23,9 +23,9 @@ PRDs 001 to 006 produce a working package from the repository. This PRD proves t
 - [x] AC-3 [local]: The tarball contains no `.py`, `.sh`, test, or fixture files. proof: `npm pack --dry-run` — Evidence: smoke forbidden-file check passes; application allowlist is `dist/`, `SKILL.md`, `references/`, `README.md`, plus npm metadata and the license.
 - [x] AC-4 [local]: The root `README.md` documents every command in architecture.md "Entry points", plus the cache path and `--no-plan-usage`. proof: review against architecture.md — Evidence: every entry point, the cache path, and `--no-plan-usage` are present.
 
-## Blocked on
+## Publication
 
-- Publishing to npm — owner gate. João runs `npm publish` after the package-name check. Local preparation is complete; no other work remains.
+- Published `token-furnace@0.1.0` to the public npm registry on 2026-10-10 under João's explicit publication authorization. `latest` is `0.1.0`; the downloaded public tarball matches the tested artifact (SHA-256 `c6ac0a04ef0daefac1601e26fff56ff38d7bba16514b64388dbdd3f74eb12edb`, 293,744 bytes, 16 files). Installed-tarball checks pass on Node 22.13.0 and 24.16.0. The remaining large-corpus cold performance target is tracked separately in active PRD-009; it is not claimed complete.
 
 ## Integration Ledger
 

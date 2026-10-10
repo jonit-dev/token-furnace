@@ -1,6 +1,6 @@
 # Architecture — npx restructure
 
-**Status:** IMPLEMENTED — archived; npm publish pending the package owner.
+**Status:** IMPLEMENTED — archived; published as token-furnace@0.1.0 on npm.
 **Date:** 2026-10-09
 
 ## Goal

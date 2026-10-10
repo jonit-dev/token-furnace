@@ -1,6 +1,6 @@
 # Epic: npx restructure
 
-**Status:** IMPLEMENTED — archived; npm publish pending the package owner.
+**Status:** IMPLEMENTED — archived; published as token-furnace@0.1.0 on npm.
 
 Move token-furnace from Python scripts to one Node/TypeScript npm package. The package has a CLI, a local SQLite cache, an Express server, and a React dashboard.
 

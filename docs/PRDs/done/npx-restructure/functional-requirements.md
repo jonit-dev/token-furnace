@@ -1,6 +1,6 @@
 # Functional requirements — npx restructure
 
-**Status:** IMPLEMENTED — archived; npm publish pending the package owner.
+**Status:** IMPLEMENTED — archived; published as token-furnace@0.1.0 on npm.
 **Date:** 2026-10-09
 
 Each requirement names the PRD that delivers it. "Same as Python" means the behavior of `scripts/burn.py` at commit `f3442b5`.
