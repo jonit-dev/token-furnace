@@ -3,7 +3,7 @@
  * which scripts/burn.py wrote on this same fixture before PRD-003 deleted it.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -128,19 +128,55 @@ describe("--full", () => {
 describe("network", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("makes no call without --plan-usage", async () => {
-    const fetchSpy = vi.fn(() => {
+  const throwing = () =>
+    vi.fn(() => {
       throw new Error("fetch must not be called");
     });
+
+  it("makes no call with --no-plan-usage, even with a login on the machine", async () => {
+    const fetchSpy = throwing();
+    vi.stubGlobal("fetch", fetchSpy);
+    writeJson(join(leaksRoot, ".credentials.json"), { claudeAiOauth: { accessToken: "t" } });
+    try {
+      const run1 = await run(["--no-plan-usage"], leaksRoot);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(run1.out).toContain("the subscription usage was unavailable");
+    } finally {
+      rmSync(join(leaksRoot, ".credentials.json"));
+    }
+  });
+
+  it("makes no call when no login is on the machine", async () => {
+    const fetchSpy = throwing();
     vi.stubGlobal("fetch", fetchSpy);
     const run1 = await run([], leaksRoot);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(run1.code).toBe(1);
-    // No saved reading and no opt-in: the report says the subscription reading was unavailable.
     expect(run1.out).toContain("the subscription usage was unavailable");
   });
 
-  it("uses a saved subscription reading without --plan-usage and without a call", async () => {
+  it("calls api.anthropic.com once by default when a login exists, and uses the answer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-login-"));
+    buildFull(root, now);
+    writeJson(join(root, ".credentials.json"), { claudeAiOauth: { accessToken: "tok-1" } });
+    const resets = new Date(now.getTime() + 3 * 86_400_000).toISOString();
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ seven_day: { utilization: 55, resets_at: resets } }),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const run1 = await run(["--json"], root);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, { headers: Record<string, string> }];
+    expect(url).toBe("https://api.anthropic.com/api/oauth/usage");
+    expect(init.headers.Authorization).toBe("Bearer tok-1");
+    expect(JSON.parse(run1.out).burns.claude.used).toBe(55);
+    // The answer is saved, so the next run in the 5-minute window makes no call.
+    await run(["--json"], root);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a saved subscription reading without a call", async () => {
     const fetchSpy = vi.fn(() => {
       throw new Error("fetch must not be called");
     });

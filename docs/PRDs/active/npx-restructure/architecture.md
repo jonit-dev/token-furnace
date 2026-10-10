@@ -37,7 +37,7 @@ src/
     sqlite-repo.ts      SqliteSessionRepository  (node:sqlite cache)
   services/
     report-service.ts   ReportService: refresh() + getReport(days, source)
-    usage-client.ts     plan usage call to api.anthropic.com (opt-in only)
+    usage-client.ts     plan usage call to api.anthropic.com (when a login exists; `--no-plan-usage` disables)
   compose.ts            composition root: builds every object once
   cli.ts                node:util parseArgs -> commands
   server.ts             Express 5: /api/report + static dashboard
@@ -99,7 +99,7 @@ Tests call `new ReportService([fixtureSource], new MemorySessionRepository())` d
 | `token-furnace [days] [--source claude\|codex]` | Ranked verdict on stdout. Exit 1 on leaks or no data (same as `burn.py --doctor`). |
 | `token-furnace --full` | Full text report (old `burn.py` default output). |
 | `token-furnace --list-sources` | Each agent, its path, and its transcript count. |
-| `--weekly-budget M`, `--no-cache`, `--plan-usage` | Burn goal, skip the cache (PRD-004), opt in to the plan-usage network call. |
+| `--weekly-budget M`, `--no-cache`, `--no-plan-usage` | Burn goal, skip the cache (PRD-004), `--no-plan-usage` disables the plan-usage network call. |
 | `token-furnace --json` | `Report` JSON on stdout, for agents and scripts. |
 | `token-furnace --html <path>` | Writes a static report: one HTML file with the JSON inlined. |
 | `token-furnace serve [--port 8765]` | Express on `127.0.0.1`. Opens the dashboard. |
@@ -112,7 +112,7 @@ Tests call `new ReportService([fixtureSource], new MemorySessionRepository())` d
 - The server rejects requests whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>`. This blocks DNS-rebinding pages from reading the report. The server sends no CORS headers.
 - Transcript lines are untrusted JSON. A source skips a malformed line and counts it. A bad line never stops the scan.
 - The cache stores token counts, timestamps, models, tool names, and file paths. It never stores message text.
-- No network calls by default. The plan-usage call that sends the Claude OAuth token goes behind `--plan-usage`.
+- One network call: plan usage, to `api.anthropic.com` only. It runs when a Claude login exists on the machine, at most once a minute and only when the saved reading is over 5 minutes old. `--no-plan-usage` turns it off.
 
 ## Tech stack
 
@@ -147,3 +147,4 @@ Runtime dependencies: `express` only. React, Tailwind, and Zustand are build-tim
 - 2026-10-09 (João): Repository pattern and composition. Chosen: interfaces at two boundaries plus manual constructor injection. tsyringe was not chosen: it needs `reflect-metadata` and `emitDecoratorMetadata`. esbuild (used by tsup and Vite) does not emit decorator metadata, so injection fails at runtime in the bundled npx build.
 - 2026-10-09 (Claude): The plan-usage network call becomes opt-in (`--plan-usage`). Reason: `SKILL.md` says "no network", but `plan_week()` sends the OAuth token on every run.
 - 2026-10-09 (João): The product, package, CLI binary, and folder name is `token-furnace`. It matches `SKILL.md` and the existing `~/.cache/token-furnace` cache directory.
+- 2026-10-09 (João): The plan-usage call is on by default when a login exists. The opt-in made the dashboard ignore the subscription and show tokens/h. Supersedes the entry above.

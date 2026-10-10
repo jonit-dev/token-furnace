@@ -21,7 +21,7 @@ PRDs 001 to 006 produce a working package from the repository. This PRD proves t
 - [ ] AC-1 [local]: `npm run smoke` on Node 22.13 runs `npx ./token-furnace-*.tgz --json` against fixtures and gets a valid `Report`. proof: `npm run smoke` — Evidence: pending.
 - [ ] AC-2 [local]: The same smoke run passes on Node 24. proof: `npx -p node@24 npm run smoke` — Evidence: pending.
 - [ ] AC-3 [local]: The tarball contains no `.py`, `.sh`, test, or fixture files. proof: `npm pack --dry-run` — Evidence: pending.
-- [ ] AC-4 [local]: The root `README.md` documents every command in architecture.md "Entry points", plus the cache path and `--plan-usage`. proof: review against architecture.md — Evidence: pending.
+- [ ] AC-4 [local]: The root `README.md` documents every command in architecture.md "Entry points", plus the cache path and `--no-plan-usage`. proof: review against architecture.md — Evidence: pending.
 
 ## Blocked on
 
@@ -44,5 +44,5 @@ PRDs 001 to 006 produce a working package from the repository. This PRD proves t
 #### Phase 2: User README
 **Status:** NOT STARTED
 **Files:** `README.md`
-**Implementation:** Install, commands, privacy statement, cache path, how to delete the cache, and the opt-in network flag.
+**Implementation:** Install, commands, privacy statement, cache path, how to delete the cache, and the opt-out network flag.
 **Verification:** Compare with architecture.md "Entry points" — AC-4.

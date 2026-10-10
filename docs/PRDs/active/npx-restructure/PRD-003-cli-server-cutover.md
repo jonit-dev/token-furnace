@@ -19,7 +19,7 @@
 
 - `src/services/report-service.ts`: `ReportService(sources, repo)` with `refresh()` and `getReport(days, source, opts)`, as in architecture.md "Data flow".
 - `src/repo/session-repo.ts` (interface) and `src/repo/memory-repo.ts`. PRD-004 adds SQLite.
-- `src/services/usage-client.ts`: port of `plan_week()`, called only with `--plan-usage`.
+- `src/services/usage-client.ts`: port of `plan_week()`, called by default when a login exists; `--no-plan-usage` turns it off (changed 2026-10-09).
 - `src/compose.ts`: the composition root from architecture.md.
 - `src/render/text.ts`: port of `print_doctor` and `print_text`, same strings.
 - `src/cli.ts`: `node:util` `parseArgs`. Commands and flags from architecture.md "Entry points", plus `--full` (old `burn.py` default text), `--list-sources`, `--weekly-budget`, and `--plan-usage`. Exit codes are the same as Python.
@@ -31,7 +31,7 @@
 - [x] AC-1 [local]: `token-furnace --json` on the fixture prints JSON that equals `toView(buildReport(...))`, and nothing else on stdout. proof: `npx vitest run test/cli.test.ts` — Evidence: 10 tests pass; stdout is one JSON line equal to `tsReport(...)`, and the built `node dist/cli.js --json` prints 1 line with all Report keys.
 - [x] AC-2 [local]: The default command prints the same verdict text as `burn.py --doctor` on the same fixture (captured into the test before Python is deleted). It exits 1 with leaks, 1 with no data, and 0 on a clean fixture. proof: `npx vitest run test/cli.test.ts` — Evidence: masked output equals `test/golden/doctor.txt`; exit 1 on leaks, 1 on no data, 0 on the clean fixture. `node dist/cli.js` on the live fixture printed 14 leaks and exited 1.
 - [x] AC-3 [local]: `GET /api/report` returns the `Report`. A request with `Host: evil.example:8765` gets 403. The server listens on `127.0.0.1` only. proof: `npx vitest run test/server.test.ts` — Evidence: 6 tests pass; 403 on the evil Host for all three routes, ECONNREFUSED on the LAN address. Live `serve --port 18765` returned the report JSON and 403 for `Host: evil.example:18765`.
-- [x] AC-4 [local]: A run without `--plan-usage` makes no network call. proof: test stubs `fetch` to throw, and the run passes — `npx vitest run test/cli.test.ts` — Evidence: the `fetch` stub was never called and the run still exited 1 with "the subscription usage was unavailable".
+- [x] AC-4 [local]: A run with `--no-plan-usage`, or with no login on the machine, makes no network call. proof: test stubs `fetch` to throw, and the run passes — `npx vitest run test/cli.test.ts` — Evidence: the `fetch` stub was never called and the run still exited 1 with "the subscription usage was unavailable".
 - [x] AC-5 [local]: `--html out.html` writes a file that shows the report when opened from disk. proof: open the file in a browser, and the leak list is visible — Evidence: 70 KB page written; headless Chrome render shows the KPI tiles plus "Sessions compact too late", "The caller reads files and logs itself" and 8 more leaks with Copy fix buttons.
 - [x] AC-6 [local]: `burn.py`, `test_burn.py`, `doctor`, and `scripts/__pycache__` are deleted. `SKILL.md` and `references/` name `npx token-furnace` instead of `scripts/doctor` and `burn.py`. proof: `git ls-files scripts` lists only PRD-006 files, and `grep -rn "burn.py\|scripts/doctor" SKILL.md references` returns no lines — Evidence: the four Python files, `test/parity.test.ts` and the Python-only golden-capture test are gone; the grep returns nothing; `npm test` passes 37 tests with only `/usr/bin:/bin` on PATH (no python3).
 
@@ -43,7 +43,7 @@
 | Agent JSON | `npx token-furnace --json` | none (new) | AC-1 |
 | Live report | `token-furnace serve` → `server.ts` | `burn.py --serve`, deleted | AC-3 |
 | Static report | `--html` → `web/legacy/dashboard.html` | `render_html`, deleted | AC-5 |
-| Plan usage | `--plan-usage` → `usage-client.ts` | `plan_week` (was always on) | AC-4 |
+| Plan usage | default when a login exists → `usage-client.ts` | `plan_week` (was always on) | AC-4 |
 
 ## Execution Phases
 

@@ -19,9 +19,10 @@ against the ideal pace to the plan's weekly reset, and the leaks.
 The Dashboard tab opens with the KPI tiles and trends, then what to act on now; Leaks, Baseline
 and Details follow.
 
-The weekly reading comes from the subscription usage endpoint, which rate-limits, so the call
-is opt-in: only `--plan-usage` makes it. A status line can feed it instead, and its saved
-reading is used by every run: write `{"fetched": <epoch>, "seven_day": {"utilization": <used %>,
+The weekly reading comes from the subscription usage endpoint, which rate-limits. When a Claude
+login exists on the machine, a run refreshes the reading from it at most once a minute (the
+token goes to api.anthropic.com only); `--no-plan-usage` turns the call off. A status line can
+feed it instead, and its saved reading is used by every run: write `{"fetched": <epoch>, "seven_day": {"utilization": <used %>,
 "resets_at": <epoch>}}` from its `rate_limits.seven_day` input to
 `${XDG_CACHE_HOME:-~/.cache}/token-furnace/usage.json`. A reading under 5 minutes old wins.
 

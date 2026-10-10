@@ -9,9 +9,8 @@ import type { Env } from "../sources/agent-source";
 const REUSE_SECONDS = 300;
 const RETRY_SECONDS = 60;
 
-/** Last call in this process: one call a minute, so a server does not burn the rate limit. */
+/** Last network call in this process: one a minute, so a server does not burn the rate limit. */
 let lastTry = 0;
-let lastWeek: Week | null = null;
 
 /** The saved reading, in the file burn.py writes and a status line can feed. */
 export function usageCachePath(env: Env): string {
@@ -20,35 +19,33 @@ export function usageCachePath(env: Env): string {
 }
 
 /**
- * The subscription's 7-day window, or null when unavailable. The saved reading is always used: it
- * is a local file and a status line can feed it. The login token goes to api.anthropic.com and
- * nowhere else, and only when `network` is true (--plan-usage). Any failure keeps the last good
- * reading.
+ * The subscription's 7-day window, or null when unavailable. The saved reading is a local file a
+ * status line can feed. With `network` true, a login on this machine (the credentials file or the
+ * macOS Keychain) triggers one call to api.anthropic.com when the reading is over 5 minutes old,
+ * at most once a minute. The token goes there and nowhere else. A failed call keeps the saved
+ * reading. No login on the machine means no call.
  */
 export async function planWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
   const at = now.getTime() / 1000;
-  if (!network) return toWeek(readJson(usageCachePath(env))?.seven_day ?? null, now);
-  if (at - lastTry < RETRY_SECONDS) return lastWeek;
-  lastTry = at;
-
   const path = usageCachePath(env);
   const saved = readJson(path);
   let data = saved?.seven_day ?? null;
-  if (!data || at - (saved?.fetched ?? 0) >= REUSE_SECONDS) {
-    const fresh = await fetchWeek(env);
-    if (fresh) {
-      data = fresh;
-      writeJson(path, { fetched: at, seven_day: data });
+  const stale = !data || at - (saved?.fetched ?? 0) >= REUSE_SECONDS;
+  if (network && stale && at - lastTry >= RETRY_SECONDS) {
+    const token = accessToken(env);
+    if (token) {
+      lastTry = at;
+      const fresh = await fetchWeek(token);
+      if (fresh) {
+        data = fresh;
+        writeJson(path, { fetched: at, seven_day: data });
+      }
     }
   }
-
-  lastWeek = toWeek(data, now);
-  return lastWeek;
+  return toWeek(data, now);
 }
 
-async function fetchWeek(env: Env): Promise<Record<string, any> | null> {
-  const token = accessToken(env);
-  if (!token) return null;
+async function fetchWeek(token: string): Promise<Record<string, any> | null> {
   try {
     const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },

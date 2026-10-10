@@ -28,7 +28,7 @@ Where the token budget actually went. Reads local Claude Code and Codex transcri
   --html <path>        also write a self-contained HTML report
   --list-sources       each agent, its path and its transcript count
   --weekly-budget <M>  weekly budget in millions of weighted tokens
-  --plan-usage         refresh the subscription window from api.anthropic.com (opt-in network call; a saved reading is always used)
+  --no-plan-usage      never call api.anthropic.com for the subscription window (a saved reading is still used)
   --no-cache           parse every file, write no cache
   serve [--port 8765]  live report on http://127.0.0.1:<port>, rebuilt per request
   -h, --help           this text
@@ -57,7 +57,8 @@ export async function main(argv: string[] = process.argv.slice(2), app: App = co
       html: { type: "string" },
       "list-sources": { type: "boolean" },
       "weekly-budget": { type: "string" },
-      "plan-usage": { type: "boolean" },
+      "plan-usage": { type: "boolean" }, // the default now; accepted so old scripts keep working
+      "no-plan-usage": { type: "boolean" },
       "no-cache": { type: "boolean" },
       port: { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -95,7 +96,7 @@ export async function main(argv: string[] = process.argv.slice(2), app: App = co
     html: parsed.values.html ?? null,
     listSources: Boolean(parsed.values["list-sources"]),
     weeklyBudget,
-    planUsage: Boolean(parsed.values["plan-usage"]),
+    planUsage: !parsed.values["no-plan-usage"],
     port,
   };
 

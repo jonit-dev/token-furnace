@@ -44,7 +44,7 @@ Each requirement names the PRD that delivers it. "Same as Python" means the beha
 |---|---|---|
 | FR-19 | A second run parses only files whose `mtime` or `size` changed. | 004 |
 | FR-20 | `--no-cache` or `TOKEN_FURNACE_NO_CACHE=1` uses the in-memory repository and writes no cache file. | 004 |
-| FR-21 | No network call by default. `--plan-usage` enables the Claude plan-usage call to `api.anthropic.com`. | 003 |
+| FR-21 | The only network call is the Claude plan-usage call to `api.anthropic.com`. It runs only when a Claude login exists on the machine, and `--no-plan-usage` turns it off. | 003 |
 
 ## Install and hook
 
