@@ -13,12 +13,14 @@
 
 ## Where it goes
 
-One choke point: `ReportService.refresh()` at `src/services/report-service.ts:30`. It is a synchronous loop with one `source.parse()` per changed file. Every cold scan runs through it. Three callers wait on it today: `src/server.ts:73` (warm-up), `src/server.ts:83` (every request), `src/cli.ts:112`.
+One choke point: `ReportService.refresh()` in `src/services/report-service.ts`. Every cold scan runs through it. The CLI awaits the scan. The server starts it in the background and serves the previous report during later rescans.
 
 | Piece | File | Change |
 |---|---|---|
 | `ScanProgress` type | `src/core/model.ts` | Type only. No I/O in `core/`. |
-| Progress state, async loop, single-flight | `src/services/report-service.ts` | `refresh()` becomes `async`. It yields (`setImmediate`) every 25 files or 50 ms. It keeps one in-flight promise, so overlapping requests share one scan. |
+| Progress state, async loop, single-flight | `src/services/report-service.ts` | `refresh()` is async. It uses the parse pool for more than 16 changed files, or yields in-process every 50 ms. Overlapping requests share one scan. |
+| Parallel transcript parsing | `src/services/parse-pool.ts`, `src/scan-worker.ts`, `src/compose.ts`, `tsup.config.ts` | Built CLI runs use up to 8 worker threads. Source runs and `TOKEN_FURNACE_WORKERS=0` use the in-process path. |
+| Background rescan | `src/server.ts` | After 5 seconds, a request starts a rescan and serves the previous report. Later polls see the refreshed report. |
 | `GET /api/status`, 202 path | `src/server.ts` (before `/api/report`, line 54) | Read `app.reports.progress`. Never await the scan. |
 | Loading page for `/` | `src/render/loading.ts` (new) | One string of inline HTML, CSS and JS. It polls `/api/status` and calls `location.reload()` when ready. |
 | Progress on stderr | `src/cli.ts:112` | `await app.reports.refresh(onProgress)`. Draw only when `process.stderr.isTTY`. |
@@ -26,11 +28,13 @@ One choke point: `ReportService.refresh()` at `src/services/report-service.ts:30
 - `filesTotal` counts **changed** files, not all files. A warm cache gives total 0 and no spinner at all.
 - The React page (PRD-005) never sees the scanning state, because `/` serves the loading page until the report is ready. PRD-008 does not touch `web/`.
 - Conflict risk: PRD-004 edits `report-service.ts` (batched saves) and `cli.ts` (`--no-cache`). Run PRD-008 after PRD-004 merges. PRD-005 edits `server.ts` (serve the bundle). Expect a small merge there.
-- Ceiling: one very large transcript still blocks the loop while it parses. Per-file yield is enough for the spinner. Move the scan to a `worker_threads` worker only if a single file is measured above 1 s.
+- The in-process fallback can block while one large transcript parses. The built worker pool keeps parsing off the server event loop.
+- Earlier measurement on the 1.7 GB snapshot: 83.9 seconds in-process and 36.0 seconds with 8 workers. These are historical timing results from the handoff; output parity and acceptance checks must pass again before closure.
 
 ## Solution
 
-- The scan yields between files, so the event loop keeps answering.
+- The built worker pool parses files in parallel. The in-process fallback yields between files, so the event loop can answer between parses.
+- Rescans use stale-while-revalidate: a request receives the existing report while the background scan refreshes it.
 - `ScanProgress { phase: "scanning" | "ready", filesDone, filesTotal, bytesDone, bytesTotal, startedAt, updatedAt }`.
 - `GET /api/status` returns it at any time.
 - `GET /api/report` returns `202` with `{ status: "scanning", progress }` while no report exists. It returns `200` with the `Report` when ready. A warm cache returns `200` at once.
@@ -40,7 +44,7 @@ One choke point: `ReportService.refresh()` at `src/services/report-service.ts:30
 
 ## Acceptance Criteria
 
-- [x] AC-1 [local]: During a scan over a slow fake repository, `GET /api/status` answers in under 200 ms and `filesDone` rises between two reads. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: `/api/status` answers in under 500 ms mid-scan and `filesDone` rises.
+- [x] AC-1 [local]: During a scan over a slow fake repository, `GET /api/status` answers in under 200 ms and `filesDone` rises between two reads. proof: `npx vitest run test/progress.test.ts` — Evidence: re-run on 2026-10-09 with the assertion tightened to 200 ms; both progress tests pass and `filesDone` rises.
 - [x] AC-2 [local]: While scanning, `GET /api/report` returns 202 with `status: "scanning"`. After the scan it returns 200 and the `Report`. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: 202 `scanning`, then 200 with the same Report as the blocking scan.
 - [x] AC-3 [local]: While scanning, `GET /` returns 200 HTML that contains the progress bar and the text "Please wait". After the scan it returns the dashboard. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: `/` returns the loading page mid-scan and the dashboard after.
 - [x] AC-4 [local]: The loading page contains the bar, the spinner, `/api/status` polling and `location.reload()`, and it needs no bundle file. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: the page holds `progressbar`, `/api/status` polling and `location.reload()`.
@@ -49,6 +53,8 @@ One choke point: `ReportService.refresh()` at `src/services/report-service.ts:30
 - [x] AC-7 [local]: On João's real transcripts with an empty cache, `/api/status` shows `phase: "scanning"` and `filesTotal > 0` within 2 seconds of `serve` start. proof: `rm` the cache file, start `serve`, `curl /api/status` — Evidence: 2026-10-09 on 7,231 real files (13.3 GB): `/api/status` answered in 82 ms with `filesTotal: 7231` 2 s after start, and `/` served the loading page in 0.16 s.
 
 ## Integration Ledger
+
+Verification on 2026-10-09, Node 24.16.0: typecheck, all 49 tests and build pass. Two sequential in-process CLI runs and an 8-worker run produce byte-identical JSON on the frozen 1.7 GB snapshot with plan usage disabled. The earlier Codex week mismatch did not reproduce; no cause is claimed. The fixture test selects an explicit Codex rate-limit reading and compares full reports. Worker exits with code 0 or 1 fall back without losing report data, and an unreadable fallback transcript rejects the scan. Re-run the acceptance checks after the SQLite and React merges.
 
 | Item | Source | Target | AC |
 |---|---|---|---|
@@ -70,10 +76,7 @@ One choke point: `ReportService.refresh()` at `src/services/report-service.ts:30
 **Implementation:** Add `/api/status`, the 202 path, and the loading page for `/` while scanning.
 **Verification:** `npx vitest run test/progress.test.ts` — AC-2, AC-3, AC-4.
 
-### Phase 3: CLI progress
+### Phase 3: CLI progress and real-data check
 **Files:** `src/cli.ts`
 **Implementation:** Draw TTY progress on stderr from the `onProgress` callback.
-**Verification:** `npx vitest run test/cli.test.ts` — AC-5.
-
-### Phase 4: real-data check
-**Implementation:** The caller runs AC-7 on the real transcripts.
+**Verification:** `npx vitest run test/cli.test.ts` — AC-5. Run AC-7 on the real transcripts after integration.
