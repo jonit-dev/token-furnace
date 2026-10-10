@@ -1,6 +1,6 @@
 # PRD-005 — React dashboard replaces `dashboard.html`
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — dependencies installed; whole-port worker timed out; bounded app-shell worker active, dashboard port and integration pending
 **Priority:** P2 — AC-1 and AC-4 remove the CDN dependency and type the dashboard against the `Report` contract.
 **Complexity:** 6 (MEDIUM)
 **Owner:** João

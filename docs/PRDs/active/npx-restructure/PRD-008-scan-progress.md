@@ -1,6 +1,6 @@
 # PRD-008 — Scan progress and a cold start that never looks frozen
 
-**Status:** IN PROGRESS — built on `feat/npx-restructure` ahead of PRD-004 because the first load blocked for minutes; AC-1 to AC-7 verified, merge with PRD-004's `report-service.ts` and `cli.ts` edits pending
+**Status:** IN PROGRESS — built on `feat/npx-restructure` ahead of PRD-004 because the first load blocked for minutes; SQLite integrated; 56 tests pass; final React integration checks pending
 **Priority:** P1 — João's request on 2026-10-09: the first load took minutes with a dead page.
 **Complexity:** 5 (MEDIUM)
 **Owner:** João

@@ -1,6 +1,6 @@
 # PRD-006 — Port the installer and the churn hook
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — installer and hook port exist in the task checkout; hook threshold and malformed-input tests pass; installer review corrections and integration pending
 **Priority:** P2 — AC-1 to AC-4 remove the last Python and `jq` requirements from the install path.
 **Complexity:** 3 (LOW)
 **Owner:** João

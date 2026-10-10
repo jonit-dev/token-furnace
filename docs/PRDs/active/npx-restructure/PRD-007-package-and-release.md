@@ -1,6 +1,6 @@
 # PRD-007 — Package smoke test and release
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — package smoke, README and release-note preparation delegated; requires React/setup integration before acceptance
 **Priority:** P2 — AC-1 and AC-2 prove the `npx` install path that the epic exists to deliver.
 **Complexity:** 2 (LOW)
 **Owner:** João
