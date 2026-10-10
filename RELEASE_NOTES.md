@@ -22,5 +22,7 @@ First release of `token-furnace` as one npm package.
 ### Notes
 
 - Publishing to npm is pending the package owner.
-- The packaged React dashboard (PRD-005) is still being landed. Until then, `--html` and `serve`
-  use the legacy page with its external CDN links.
+- The dashboard is a React + Vite + TypeScript single-file build (PRD-005). `--html` and `serve`
+  both use it, with no external CDN links.
+- The Node.js 24 smoke test passed: `npm pack`, a temporary install, and `npx` runs of the CLI,
+  `--html`, and `serve` all matched. Node.js 22.13 is still under investigation.

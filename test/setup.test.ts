@@ -12,19 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import { compose } from "../src/compose";
 
 describe("token-furnace setup", () => {
   let testHome: string;
   let out: string;
-
-  // The built-CLI smoke test needs dist/, and dist/ is gitignored. Build it once here so a
-  // fresh checkout never depends on a stale ignored artifact.
-  beforeAll(() => {
-    execFileSync("npm", ["run", "build"], { stdio: "inherit" });
-  }, 120_000);
 
   beforeEach(() => {
     testHome = mkdtempSync(join(tmpdir(), "tf-setup-test-"));

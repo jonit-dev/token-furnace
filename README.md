@@ -92,6 +92,10 @@ trace.
 
 ## Release status
 
-Version 0.1.0. The `setup` and `hook` commands are integrated and tested (PRD-006). The bundled
-React dashboard (PRD-005) is still pending, so `--html` and `serve` use the legacy page and keep
-its external CDN links. Publishing to npm is pending the package owner.
+Version 0.1.0. The `setup` and `hook` commands are integrated and tested (PRD-006). The dashboard
+is a React + Vite + TypeScript single-file build (PRD-005). `--html` writes one file and `serve`
+serves the same page. Both load no external URL: no CDN `<script>` or `<link>`.
+
+The Node.js 24 smoke test passed: `npm pack`, a temporary install, and `npx` runs of the CLI,
+`--html`, and `serve` all matched. Node.js 22.13 is still under investigation. Publishing to npm
+is pending the package owner.
