@@ -70,7 +70,7 @@ async function run(argv: string[], root: string): Promise<{ code: number; out: s
   process.stdout.write = ((chunk: unknown) => (out.push(String(chunk)), true)) as typeof process.stdout.write;
   process.stderr.write = ((chunk: unknown) => (err.push(String(chunk)), true)) as typeof process.stderr.write;
   try {
-    return { code: await main(argv, compose(env(root))), out: out.join(""), err: err.join("") };
+    return { code: await main(argv, compose(env(root), { noCache: argv.includes("--no-cache") })), out: out.join(""), err: err.join("") };
   } finally {
     process.stdout.write = stdout;
     process.stderr.write = stderr;
@@ -199,14 +199,14 @@ describe("scan progress", () => {
 
   it("draws progress on a TTY stderr and keeps --json stdout to one JSON value", async () => {
     setTty(true);
-    const run1 = await run(["--json", "--no-plan-usage"], leaksRoot);
+    const run1 = await run(["--json", "--no-plan-usage", "--no-cache"], leaksRoot);
     expect(run1.err).toContain("\x1b[K");
     expect(() => JSON.parse(run1.out)).not.toThrow();
   });
 
   it("writes nothing to stderr when it is not a TTY", async () => {
     setTty(false);
-    const run1 = await run(["--json", "--no-plan-usage"], leaksRoot);
+    const run1 = await run(["--json", "--no-plan-usage", "--no-cache"], leaksRoot);
     expect(run1.err).toBe("");
   });
 });

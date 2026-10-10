@@ -107,7 +107,7 @@ export class ReportService {
         for (const item of todo) {
           save(item, item.source.parse(item.file.path));
           done(item);
-          if (Date.now() - lastYield >= 50) {
+          if (Date.now() - lastYield >= 25) {
             await new Promise<void>((next) => setImmediate(next)); // let requests through
             lastYield = Date.now();
           }

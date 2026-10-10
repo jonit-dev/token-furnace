@@ -46,7 +46,7 @@ interface Options {
   port: number;
 }
 
-export async function main(argv: string[] = process.argv.slice(2), app: App = compose()): Promise<number> {
+export async function main(argv: string[] = process.argv.slice(2), app?: App): Promise<number> {
   const parsed = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -68,6 +68,10 @@ export async function main(argv: string[] = process.argv.slice(2), app: App = co
   if (parsed.values.help) {
     process.stdout.write(USAGE);
     return 0;
+  }
+
+  if (!app) {
+    app = compose(process.env, { noCache: Boolean(parsed.values["no-cache"]) });
   }
 
   const serveMode = parsed.positionals[0] === "serve";

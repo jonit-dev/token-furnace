@@ -18,7 +18,7 @@ One choke point: `ReportService.refresh()` in `src/services/report-service.ts`. 
 | Piece | File | Change |
 |---|---|---|
 | `ScanProgress` type | `src/core/model.ts` | Type only. No I/O in `core/`. |
-| Progress state, async loop, single-flight | `src/services/report-service.ts` | `refresh()` is async. It uses the parse pool for more than 16 changed files, or yields in-process every 50 ms. Overlapping requests share one scan. |
+| Progress state, async loop, single-flight | `src/services/report-service.ts` | `refresh()` is async. It uses the parse pool for more than 16 changed files, or yields in-process every 25 ms. Overlapping requests share one scan. |
 | Parallel transcript parsing | `src/services/parse-pool.ts`, `src/scan-worker.ts`, `src/compose.ts`, `tsup.config.ts` | Built CLI runs use up to 8 worker threads. Source runs and `TOKEN_FURNACE_WORKERS=0` use the in-process path. |
 | Background rescan | `src/server.ts` | After 5 seconds, a request starts a rescan and serves the previous report. Later polls see the refreshed report. |
 | `GET /api/status`, 202 path | `src/server.ts` (before `/api/report`, line 54) | Read `app.reports.progress`. Never await the scan. |
