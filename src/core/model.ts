@@ -162,6 +162,7 @@ export interface SessionRow {
   source: Source;
   project: string;
   id: string;
+  fullId?: string;
   title: string | null;
   path: string | null;
   share: number;
@@ -175,6 +176,7 @@ export interface ActiveSession {
   source: Source;
   project: string;
   id: string;
+  fullId?: string;
   title: string | null;
   share: number;
   turns: number;

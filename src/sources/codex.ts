@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import type { ParsedFile, SourceFile, Turn, Wake, Week } from "../core/model";
 import {
   classifyPrompt,
+  extractCodexTitle,
   isRead,
   jsonParse,
   num,
@@ -63,6 +64,7 @@ export class CodexSource implements AgentSource {
     let pendingReads = 0;
     let wakes: Wake[] = [];
     let messageWakes: [string, Wake][] = [];
+    let title: string | null = null;
     const eventMessages = new Map<string, number>();
     const seenCalls = new Set<string>();
     let lastTotal: number | null = null;
@@ -114,12 +116,26 @@ export class CodexSource implements AgentSource {
         const text = Array.isArray(payload.content)
           ? payload.content.map((c: any) => typeof c.text === "string" ? c.text : "").join("\n")
           : "";
+        if (!title && Array.isArray(payload.content)) {
+          for (const c of payload.content) {
+            if (typeof c?.text === "string") {
+              const candidate = extractCodexTitle(c.text);
+              if (candidate) {
+                title = candidate;
+                break;
+              }
+            }
+          }
+        }
         const wake = classifyPrompt(text);
         if (wake) messageWakes.push([text.trim(), wake]);
         continue;
       }
       if (payload.type === "user_message") {
         const text = String(payload.message || "").trim();
+        if (!title) {
+          title = extractCodexTitle(text);
+        }
         const wake = classifyPrompt(text);
         if (wake) wakes.push(wake);
         eventMessages.set(text, (eventMessages.get(text) ?? 0) + 1);
@@ -164,7 +180,7 @@ export class CodexSource implements AgentSource {
       messageWakes = [];
       eventMessages.clear();
     }
-    return { turns, title: null, badLines: bad };
+    return { turns, title, badLines: bad };
   }
 
   /**

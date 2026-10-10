@@ -54,6 +54,30 @@ export function classifyPrompt(text: string): "human" | "teammate" | "task" | "p
   return "human";
 }
 
+/** Extract clean fallback title for Codex sessions, skipping AGENTS/prompt preamble. */
+export function extractCodexTitle(text: string): string | null {
+  if (!text) return null;
+  const trimmed = text.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("<") ||
+    trimmed.startsWith("# AGENTS.md") ||
+    trimmed.startsWith("# CLAUDE.md") ||
+    trimmed.startsWith("Base directory for this skill") ||
+    trimmed.startsWith("This session is being continued")
+  ) {
+    return null;
+  }
+  for (const line of trimmed.split(/\r?\n/)) {
+    const l = line.trim();
+    if (l && !l.startsWith("#") && !l.startsWith("<")) {
+      const single = l.split(/\s+/).join(" ");
+      return single.slice(0, 80) || null;
+    }
+  }
+  return null;
+}
+
 /** ISO time to a Date, or null when it is not a time. burn.py:74 */
 export function parseTime(value: unknown): Date | null {
   if (typeof value !== "string") return null;

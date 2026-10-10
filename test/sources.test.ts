@@ -117,7 +117,7 @@ describe("CodexSource", () => {
   it("parses the fixture like codex_turns", () => {
     const parsed = source.parse(CODEX_FILE);
     expect(plain(parsed.turns)).toEqual(CODEX_TURNS);
-    expect(parsed.title).toBeNull();
+    expect(parsed.title).toBe("write the parser");
     expect(parsed.badLines).toBe(1);
   });
 

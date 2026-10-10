@@ -228,7 +228,14 @@ export function Sessions({ r }: { r: Partial<Report> }) {
       headers: ["Project", "ID", "Title", "Share", "Turns", "Peak", "Hours"],
       rows: (r.topSessions ?? []).map((s) => [
         s.project ?? "?",
-        s.id ?? "",
+        <div key="id" className="flex items-center gap-1">
+          <span>{s.id ?? ""}</span>
+          <CopyButton
+            text={s.fullId || s.id || ""}
+            label="Copy ID"
+            className="text-[10px] px-1 py-0.5 bg-chip rounded border border-line hover:border-accent"
+          />
+        </div>,
         <div key="title" className="truncate max-w-[22rem]" title={s.title || s.id}>
           {s.title || s.id}
         </div>,

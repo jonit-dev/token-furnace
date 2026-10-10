@@ -17,7 +17,7 @@ export const PROVIDERS = {
   codex: {
     label: "Codex",
     cacheWrites: false,
-    parserVersion: 2,
+    parserVersion: 3,
     compaction: `model_auto_compact_token_limit = ${CONTEXT_TARGET.codex} in ~/.codex/config.toml`,
   },
 } as const;
