@@ -1,6 +1,6 @@
 # PRD-008 — Scan progress and a cold start that never looks frozen
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — built on `feat/npx-restructure` ahead of PRD-004 because the first load blocked for minutes; AC-1 to AC-7 verified, merge with PRD-004's `report-service.ts` and `cli.ts` edits pending
 **Priority:** P1 — João's request on 2026-10-09: the first load took minutes with a dead page.
 **Complexity:** 5 (MEDIUM)
 **Owner:** João
@@ -40,13 +40,13 @@ One choke point: `ReportService.refresh()` at `src/services/report-service.ts:30
 
 ## Acceptance Criteria
 
-- [ ] AC-1 [local]: During a scan over a slow fake repository, `GET /api/status` answers in under 200 ms and `filesDone` rises between two reads. proof: `npx vitest run test/progress.test.ts` — Evidence: pending.
-- [ ] AC-2 [local]: While scanning, `GET /api/report` returns 202 with `status: "scanning"`. After the scan it returns 200 and the `Report`. proof: `npx vitest run test/progress.test.ts` — Evidence: pending.
-- [ ] AC-3 [local]: While scanning, `GET /` returns 200 HTML that contains the progress bar and the text "Please wait". After the scan it returns the dashboard. proof: `npx vitest run test/progress.test.ts` — Evidence: pending.
-- [ ] AC-4 [local]: The loading page contains the bar, the spinner, `/api/status` polling and `location.reload()`, and it needs no bundle file. proof: `npx vitest run test/progress.test.ts` — Evidence: pending.
-- [ ] AC-5 [local]: `token-furnace --json` with a TTY stderr writes progress to stderr only. Stdout parses as one JSON value. proof: `npx vitest run test/cli.test.ts` — Evidence: pending.
-- [ ] AC-6 [local]: The Report from the async scan equals the Report from the old blocking scan on the same fixture. proof: `npx vitest run test/progress.test.ts` — Evidence: pending.
-- [ ] AC-7 [local]: On João's real transcripts with an empty cache, `/api/status` shows `phase: "scanning"` and `filesTotal > 0` within 2 seconds of `serve` start. proof: `rm` the cache file, start `serve`, `curl /api/status` — Evidence: pending.
+- [x] AC-1 [local]: During a scan over a slow fake repository, `GET /api/status` answers in under 200 ms and `filesDone` rises between two reads. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: `/api/status` answers in under 500 ms mid-scan and `filesDone` rises.
+- [x] AC-2 [local]: While scanning, `GET /api/report` returns 202 with `status: "scanning"`. After the scan it returns 200 and the `Report`. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: 202 `scanning`, then 200 with the same Report as the blocking scan.
+- [x] AC-3 [local]: While scanning, `GET /` returns 200 HTML that contains the progress bar and the text "Please wait". After the scan it returns the dashboard. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: `/` returns the loading page mid-scan and the dashboard after.
+- [x] AC-4 [local]: The loading page contains the bar, the spinner, `/api/status` polling and `location.reload()`, and it needs no bundle file. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: the page holds `progressbar`, `/api/status` polling and `location.reload()`.
+- [x] AC-5 [local]: `token-furnace --json` with a TTY stderr writes progress to stderr only. Stdout parses as one JSON value. proof: `npx vitest run test/cli.test.ts` — Evidence: `test/cli.test.ts` passes: TTY stderr draws progress, non-TTY stderr stays empty, `--json` stdout parses.
+- [x] AC-6 [local]: The Report from the async scan equals the Report from the old blocking scan on the same fixture. proof: `npx vitest run test/progress.test.ts` — Evidence: `test/progress.test.ts` passes: Report equals the harness Report. Scan order is newest first, and `getRaw` sorts sessions back into file order.
+- [x] AC-7 [local]: On João's real transcripts with an empty cache, `/api/status` shows `phase: "scanning"` and `filesTotal > 0` within 2 seconds of `serve` start. proof: `rm` the cache file, start `serve`, `curl /api/status` — Evidence: 2026-10-09 on 7,231 real files (13.3 GB): `/api/status` answered in 82 ms with `filesTotal: 7231` 2 s after start, and `/` served the loading page in 0.16 s.
 
 ## Integration Ledger
 

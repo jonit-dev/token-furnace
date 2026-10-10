@@ -192,6 +192,25 @@ describe("network", () => {
   });
 });
 
+describe("scan progress", () => {
+  const setTty = (value: boolean | undefined) =>
+    Object.defineProperty(process.stderr, "isTTY", { value, configurable: true });
+  afterEach(() => setTty(undefined));
+
+  it("draws progress on a TTY stderr and keeps --json stdout to one JSON value", async () => {
+    setTty(true);
+    const run1 = await run(["--json", "--no-plan-usage"], leaksRoot);
+    expect(run1.err).toContain("\x1b[K");
+    expect(() => JSON.parse(run1.out)).not.toThrow();
+  });
+
+  it("writes nothing to stderr when it is not a TTY", async () => {
+    setTty(false);
+    const run1 = await run(["--json", "--no-plan-usage"], leaksRoot);
+    expect(run1.err).toBe("");
+  });
+});
+
 describe("--html", () => {
   it("writes one self-contained page with the report inlined", async () => {
     const run1 = await run(["--html", htmlPath], leaksRoot);

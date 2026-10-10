@@ -13,7 +13,7 @@ import { reportView } from "./core/analyze/view";
 import { renderHtml } from "./render/html";
 import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
-import type { RawReport, Source } from "./core/model";
+import type { RawReport, ScanProgress, Source } from "./core/model";
 import { planWeek } from "./services/usage-client";
 
 const USAGE = `Usage: token-furnace [days] [options]
@@ -110,7 +110,7 @@ export async function main(argv: string[] = process.argv.slice(2), app: App = co
   }
 
   const now = app.now();
-  app.reports.refresh();
+  await app.reports.refresh(stderrProgress());
   const plan = await planWeek(app.env, now, options.planUsage);
   const report = app.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
@@ -137,6 +137,16 @@ export async function main(argv: string[] = process.argv.slice(2), app: App = co
   }
   process.stdout.write(printDoctor(report, htmlPath));
   return topIssues(report).length ? 1 : 0;
+}
+
+/** A redrawn `Scanning 3,412 / 7,700 files (44%)` line on a terminal's stderr. Nothing otherwise. */
+function stderrProgress(): ((progress: ScanProgress) => void) | undefined {
+  if (!process.stderr.isTTY) return undefined;
+  return (p) => {
+    if (!p.filesTotal) return;
+    const text = p.phase === "ready" ? "" : `Scanning ${p.filesDone.toLocaleString()} / ${p.filesTotal.toLocaleString()} files (${Math.round((100 * p.bytesDone) / Math.max(1, p.bytesTotal))}%)`;
+    process.stderr.write(`\r\x1b[K${text}`);
+  };
 }
 
 /** `--weekly-budget M`, or TOKEN_FURNACE_WEEKLY_BUDGET, in millions of weighted tokens. */

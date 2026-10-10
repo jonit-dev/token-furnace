@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
-import type { ConfigInput, RawReport, Report, Source, Week } from "../core/model";
+import type { ConfigInput, RawReport, Report, ScanProgress, Source, Week } from "../core/model";
 import type { SessionRepository } from "../repo/session-repo";
 import type { AgentSource, Env } from "../sources/agent-source";
 
@@ -26,24 +26,67 @@ export class ReportService {
     private readonly env: Env,
   ) {}
 
-  /** Parse every file whose mtime or size changed since the last scan, one file at a time. */
-  refresh(): void {
+  /** Where the scan stands. `/api/status` and the CLI read it. */
+  progress: ScanProgress = { phase: "idle", filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, startedAt: 0, updatedAt: 0 };
+
+  /** True once one full scan has finished: from then on a report is always there to serve. */
+  hasScanned = false;
+
+  private inflight: Promise<void> | null = null;
+
+  /** Each path's place in the sources' own file order, so scanning newest first changes no report. */
+  private order = new Map<string, number>();
+
+  /**
+   * Parse every file whose mtime or size changed since the last scan, newest first. It yields to
+   * the event loop between files, so a server keeps answering during a cold scan of gigabytes.
+   * Overlapping calls share one scan.
+   */
+  refresh(onProgress?: (progress: ScanProgress) => void): Promise<void> {
+    this.inflight ??= this.scan(onProgress).finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
+
+  private async scan(onProgress?: (progress: ScanProgress) => void): Promise<void> {
     const live = this.sources.filter((agent) => existsSync(agent.root())); // not installed
     const files = live.flatMap((source) => source.files().map((file) => ({ source, file })));
+    this.order = new Map(files.map(({ file }, index) => [file.path, index]));
     const changed = new Set(this.repo.changed(files.map(({ file }) => file)).map((file) => file.path));
-    for (const { source, file } of files) {
-      if (!changed.has(file.path)) continue;
-      const parsed = source.parse(file.path);
-      this.repo.save(
-        {
-          source: source.name,
-          path: file.path,
-          mtimeMs: file.mtimeMs,
-          title: parsed.title,
-          turns: parsed.turns,
-        },
-        file.size,
-      );
+    const todo = files.filter(({ file }) => changed.has(file.path)).sort((a, b) => b.file.mtimeMs - a.file.mtimeMs);
+    const progress = this.progress;
+    Object.assign(progress, {
+      phase: "scanning",
+      filesDone: 0,
+      filesTotal: todo.length,
+      bytesDone: 0,
+      bytesTotal: todo.reduce((sum, { file }) => sum + file.size, 0),
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    let lastYield = Date.now();
+    try {
+      for (const { source, file } of todo) {
+        const parsed = source.parse(file.path);
+        this.repo.save(
+          { source: source.name, path: file.path, mtimeMs: file.mtimeMs, title: parsed.title, turns: parsed.turns },
+          file.size,
+        );
+        progress.filesDone += 1;
+        progress.bytesDone += file.size;
+        if (Date.now() - lastYield >= 50) {
+          progress.updatedAt = Date.now();
+          onProgress?.(progress);
+          await new Promise<void>((next) => setImmediate(next)); // let requests through
+          lastYield = Date.now();
+        }
+      }
+    } finally {
+      progress.phase = "ready";
+      progress.updatedAt = Date.now();
+      this.hasScanned = true;
+      onProgress?.(progress);
     }
   }
 
@@ -64,7 +107,9 @@ export class ReportService {
       days,
       weeklyBudget: opts.weeklyBudget,
       live,
-      sessions: this.repo.all(),
+      sessions: this.repo
+        .all()
+        .sort((a, b) => (this.order.get(a.path) ?? Infinity) - (this.order.get(b.path) ?? Infinity)),
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,

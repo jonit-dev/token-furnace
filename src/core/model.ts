@@ -54,6 +54,17 @@ export interface WakeCounts {
   peer: number;
 }
 
+/** Where a transcript scan stands. Epoch milliseconds, because the scan is I/O and reads the clock. */
+export interface ScanProgress {
+  phase: "idle" | "scanning" | "ready";
+  filesDone: number;
+  filesTotal: number;
+  bytesDone: number;
+  bytesTotal: number;
+  startedAt: number;
+  updatedAt: number;
+}
+
 /** The subscription's or Codex's 7-day window, as burn.py's week dict. */
 export interface Week {
   start: Date;

@@ -34,19 +34,19 @@ function parseLog(app: App): string[] {
 }
 
 describe("refresh", () => {
-  it("parses a changed file once and leaves the rest alone", () => {
+  it("parses a changed file once and leaves the rest alone", async () => {
     const app = fixtureApp();
     const seen = parseLog(app);
-    app.reports.refresh();
+    await app.reports.refresh();
     expect(seen).toHaveLength(4); // three Claude sessions and one Codex rollout
-    app.reports.refresh();
+    await app.reports.refresh();
     expect(seen).toHaveLength(4); // nothing changed since the last scan
     appendFileSync(seen[0], `${JSON.stringify({ type: "user", message: { content: "again" } })}\n`);
-    app.reports.refresh();
+    await app.reports.refresh();
     expect(seen).toHaveLength(5); // only the file that grew is reparsed
   });
 
-  it("drops a file that is gone from disk", () => {
+  it("drops a file that is gone from disk", async () => {
     const repo = new MemorySessionRepository();
     const file = { path: "/tmp/gone.jsonl", mtimeMs: 1, size: 10 };
     repo.save({ source: "claude", path: file.path, mtimeMs: 1, title: null, turns: [] }, 10);
@@ -60,9 +60,9 @@ describe("refresh", () => {
 });
 
 describe("getReport", () => {
-  it("reads the same files as the test harness, and the same cached plan week", () => {
+  it("reads the same files as the test harness, and the same cached plan week", async () => {
     const app = fixtureApp();
-    app.reports.refresh();
+    await app.reports.refresh();
     const root = String(app.env.CLAUDE_CONFIG_DIR);
     const week = planWeek(root, now);
     expect(app.reports.getReport(7, "all", { weeklyBudget: null, planWeek: week, now })).toEqual(
@@ -73,15 +73,15 @@ describe("getReport", () => {
     );
   });
 
-  it("has no report when no agent is installed, and the plan week is opt-in", () => {
+  it("has no report when no agent is installed, and the plan week is opt-in", async () => {
     const root = mkdtempSync(join(tmpdir(), "tf-service-empty-"));
     const app = compose({ ...harnessEnv(root, now), CLAUDE_CONFIG_DIR: join(root, "none") });
-    app.reports.refresh();
+    await app.reports.refresh();
     expect(app.reports.getRaw(7, "all", { weeklyBudget: null, now })).toBeNull();
     expect(app.reports.live("all")).toEqual([]);
 
     const withData = fixtureApp();
-    withData.reports.refresh();
+    await withData.reports.refresh();
     const root2 = String(withData.env.CLAUDE_CONFIG_DIR);
     saveUsageReading(root2, now);
     const opts = { weeklyBudget: null, now };
@@ -92,9 +92,9 @@ describe("getReport", () => {
     ).not.toBeNull();
   });
 
-  it("counts the leak the fixture plants, from both agents", () => {
+  it("counts the leak the fixture plants, from both agents", async () => {
     const app = fixtureApp();
-    app.reports.refresh();
+    await app.reports.refresh();
     const report = app.reports.getReport(7, "all", { weeklyBudget: null, now })!;
     expect(report.issues.map((i) => i.title)).toContain("Sessions compact too late");
     expect(Object.keys(report.burns).sort()).toEqual(["claude", "codex"]);

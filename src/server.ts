@@ -9,6 +9,7 @@ import type { Server } from "node:http";
 import express from "express";
 import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
+import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source } from "./core/model";
 import { planWeek } from "./services/usage-client";
@@ -32,6 +33,7 @@ export interface LiveServer {
 export async function serve(app: App, options: ServeOptions): Promise<void> {
   const live = await startServer(app, options);
   console.log(`Token Furnace live on ${live.url} (Ctrl-C to stop)`);
+  console.log("The first scan reads every transcript once. The page shows its progress.");
   await new Promise<void>(() => {}); // the server keeps the loop alive
 }
 
@@ -51,7 +53,17 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     next();
   });
 
+  web.get("/api/status", (_req, res) => {
+    if (!app.reports.hasScanned) warm(app);
+    res.set("Cache-Control", "no-store").json(app.reports.progress);
+  });
+
   web.get("/api/report", async (req, res) => {
+    if (!app.reports.hasScanned) {
+      warm(app);
+      res.status(202).json({ status: "scanning", progress: app.reports.progress });
+      return;
+    }
     const report = await build(app, options, req.query);
     res.type("application/json").send(JSON.stringify(report ? reportView(report, app.now()) : null));
   });
@@ -61,6 +73,11 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   });
 
   web.use(async (req, res) => {
+    if (!app.reports.hasScanned) {
+      warm(app);
+      res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
+      return;
+    }
     const report = await build(app, options, req.query);
     res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
   });
@@ -68,11 +85,15 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   const http = await new Promise<Server>((ready) => {
     const bound = web.listen(options.port, "127.0.0.1", () => ready(bound));
   });
-  // Warm the parse cache after the port is bound, so the URL prints at once and early requests
-  // queue on the socket. A cold scan of thousands of transcripts takes minutes.
-  setImmediate(() => app.reports.refresh());
+  // Scan after the port is bound. The scan yields, so requests are answered while it runs.
+  warm(app);
   const port = (http.address() as { port: number }).port;
   return { url: `http://127.0.0.1:${port}`, port, close: () => new Promise((done) => http.close(() => done())) };
+}
+
+/** Start or join the scan without waiting. A failed scan is logged, not an unhandled rejection. */
+function warm(app: App): void {
+  app.reports.refresh().catch((error) => console.error("token-furnace: scan failed:", error));
 }
 
 /** One report per request, from the transcripts as they are now. */
@@ -80,7 +101,7 @@ async function build(app: App, options: ServeOptions, query: Record<string, unkn
   const now = app.now();
   const days = positiveInt(query.days, options.days);
   const source = query.source === "claude" || query.source === "codex" ? query.source : options.source;
-  app.reports.refresh();
+  await app.reports.refresh();
   return app.reports.getRaw(days, source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: await planWeek(app.env, now, options.planUsage),
