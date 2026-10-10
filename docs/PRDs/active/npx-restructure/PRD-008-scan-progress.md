@@ -80,3 +80,5 @@ Verification on 2026-10-09, Node 24.16.0: typecheck, all 56 tests and build pass
 **Files:** `src/cli.ts`
 **Implementation:** Draw TTY progress on stderr from the `onProgress` callback.
 **Verification:** `npx vitest run test/cli.test.ts` — AC-5. Run AC-7 on the real transcripts after integration.
+
+Final cache opt-out integration verified: `--no-cache` also suppresses writes of a freshly fetched plan reading (`usage.json`) while preserving the default-enabled plan call. The effective opt-out travels through composed Env without changing process.env. Four offline tests use synthetic credentials and a mocked `api.anthropic.com` response; all nine usage-client and SQLite tests pass, along with typecheck. No real credentials or network were used for these checks.

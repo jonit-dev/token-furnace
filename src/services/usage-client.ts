@@ -38,7 +38,9 @@ export async function planWeek(env: Env, now: Date, network: boolean): Promise<W
       const fresh = await fetchWeek(token);
       if (fresh) {
         data = fresh;
-        writeJson(path, { fetched: at, seven_day: data });
+        if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0")) {
+          writeJson(path, { fetched: at, seven_day: data });
+        }
       }
     }
   }

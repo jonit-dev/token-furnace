@@ -26,15 +26,16 @@ export function sqliteCachePath(env: Env): string {
 
 /** The composition root: the only place that calls `new`. architecture.md */
 export function compose(env: Env = process.env, opts?: { noCache?: boolean }): App {
-  const sources: AgentSource[] = [new ClaudeSource(env), new CodexSource(env)];
   const noCache = opts?.noCache ?? Boolean(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0");
-  const repo = noCache ? new MemorySessionRepository() : new SqliteSessionRepository(sqliteCachePath(env));
+  const effective: Env = { ...env, TOKEN_FURNACE_NO_CACHE: noCache ? "1" : "0" };
+  const sources: AgentSource[] = [new ClaudeSource(effective), new CodexSource(effective)];
+  const repo = noCache ? new MemorySessionRepository() : new SqliteSessionRepository(sqliteCachePath(effective));
   return {
-    env,
+    env: effective,
     sources,
     repo,
-    reports: new ReportService(sources, repo, env, workers(env)),
-    now: () => new Date(env.TOKEN_FURNACE_NOW || Date.now()),
+    reports: new ReportService(sources, repo, effective, workers(effective)),
+    now: () => new Date(effective.TOKEN_FURNACE_NOW || Date.now()),
   };
 }
 
