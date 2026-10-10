@@ -39,7 +39,8 @@ const okFetch = (body: unknown) =>
 
 beforeEach(() => {
   window.__REPORT__ = fixtureReport;
-  useUi.setState({ tab: "dashboard", source: "claude", online: true, modal: null });
+  localStorage.clear();
+  useUi.setState({ tab: "dashboard", source: "claude", hourlySource: "all", pins: {}, online: true, modal: null });
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
   vi.stubGlobal("fetch", okFetch(fixtureReport));
   Object.defineProperty(navigator, "clipboard", {
@@ -93,7 +94,7 @@ describe("App", () => {
     expect(within(table).getByText("Codex active")).toBeTruthy();
     expect(within(table).getByText("10.00 %/h")).toBeTruthy();
     expect(within(table).getByText("5.00 %/h")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
     expect(within(table).getByText("Claude active")).toBeTruthy();
     expect(within(table).getByText("Codex active")).toBeTruthy();
     expect(within(table).getByText("10.00 %/h")).toBeTruthy();
@@ -142,11 +143,77 @@ describe("App", () => {
 
   it("switches the burn source when both sources are present", () => {
     render(<App />);
-    const codex = screen.getByRole("button", { name: "Codex" });
-    expect(codex.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(codex);
+    const selector = screen.getByRole("combobox", { name: "Combustion rate provider" }) as HTMLSelectElement;
+    expect(selector.value).toBe("claude");
+    fireEvent.change(selector, { target: { value: "codex" } });
     expect(useUi.getState().source).toBe("codex");
-    expect(screen.getByRole("button", { name: "Codex" }).getAttribute("aria-pressed")).toBe("true");
+    expect(selector.value).toBe("codex");
+  });
+
+  it("filters hourly bars independently and only draws the selected provider's goal", () => {
+    render(<App />);
+    const hourly = screen.getByRole("combobox", { name: "Hourly spend provider" });
+    const card = hourly.closest("section")!;
+    expect(card.querySelector(".stroke-ok")).toBeNull();
+    fireEvent.change(hourly, { target: { value: "codex" } });
+    expect(useUi.getState().source).toBe("claude");
+    expect(card.querySelectorAll("g")).toHaveLength(fixtureReport.timelines!.codex!.length);
+    expect(card.querySelector(".stroke-ok") !== null).toBe(Boolean(fixtureReport.burns.codex?.goal));
+    const bars = card.querySelector('svg[aria-label="Hourly spend"]')!.innerHTML;
+    fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
+    expect(card.querySelector('svg[aria-label="Hourly spend"]')!.innerHTML).toBe(bars);
+    fireEvent.change(hourly, { target: { value: "claude" } });
+    expect(card.querySelector('svg[aria-label="Hourly spend"]')!.innerHTML).not.toBe(bars);
+  });
+
+  it("restores pinned providers after hydration and forgets unpinned selections", async () => {
+    render(<App />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pin combustion rate provider" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Hourly spend provider" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pin hourly spend provider" }));
+    const saved = localStorage.getItem("token-furnace-provider-pins")!;
+    useUi.setState({ source: "claude", hourlySource: "all", pins: {} });
+    localStorage.setItem("token-furnace-provider-pins", saved);
+    await act(async () => { await useUi.persist.rehydrate(); });
+    expect(useUi.getState().source).toBe("codex");
+    expect(useUi.getState().hourlySource).toBe("claude");
+    fireEvent.click(screen.getByRole("button", { name: "Pin hourly spend provider" }));
+    expect(JSON.parse(localStorage.getItem("token-furnace-provider-pins")!).state.pins).toEqual({ source: "codex" });
+  });
+
+  it("keeps controls usable when storage is unavailable and falls back for old snapshots", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("storage denied"); });
+    window.__REPORT__ = { ...fixtureReport, timelines: undefined };
+    render(<App />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pin combustion rate provider" }));
+    expect(useUi.getState().source).toBe("codex");
+    expect(screen.getByRole("combobox", { name: "Hourly spend provider" }).querySelectorAll("option")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "Hourly spend" })).toBeTruthy();
+  });
+
+  it("shows provider spend and full-window activity statistics", () => {
+    render(<App />);
+    for (const source of ["claude", "codex"] as const) {
+      const label = source === "claude" ? "Claude Code spend" : "Codex spend";
+      expect(screen.getByText(label).closest(".card")!.textContent).toContain("7 d");
+    }
+    expect(screen.getByText("Projects").closest(".card")!.textContent).toContain(String(fixtureReport.projectCount));
+    expect(screen.getByText("Tool calls").closest(".card")!.textContent).toContain(String(fixtureReport.toolCalls));
+    hasText("Tokens / turn");
+  });
+
+  it("falls back from a missing pinned provider and lets the visible provider be pinned", () => {
+    useUi.setState({ source: "codex", hourlySource: "codex", pins: { source: "codex", hourlySource: "codex" } });
+    window.__REPORT__ = { ...fixtureReport, burns: { claude: fixtureReport.burns.claude },
+      timelines: { claude: fixtureReport.timelines!.claude } };
+    render(<App />);
+    expect((screen.getByRole("combobox", { name: "Combustion rate provider" }) as HTMLSelectElement).value).toBe("claude");
+    expect((screen.getByRole("combobox", { name: "Hourly spend provider" }) as HTMLSelectElement).value).toBe("all");
+    fireEvent.click(screen.getByRole("button", { name: "Pin combustion rate provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pin hourly spend provider" }));
+    expect(useUi.getState().pins).toEqual({ source: "claude", hourlySource: "all" });
   });
 
   it("copies the issue prompt to the clipboard", () => {

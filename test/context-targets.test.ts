@@ -47,6 +47,11 @@ describe("shared provider context targets", () => {
     const view = reportView(raw, now);
     expect(view.overTarget).toBe(50);
     expect(view.timeline[0][1]).toBe(view.timeline[0][2]);
+    expect(view.timelines?.claude).toEqual([[view.timeline[0][0], view.timeline[0][1], 0]]);
+    expect(view.timelines?.codex).toEqual([[view.timeline[0][0], 0, view.timeline[0][2]]]);
+    for (const column of [1, 2] as const) {
+      expect(view.timelines!.claude![0][column] + view.timelines!.codex![0][column]).toBe(view.timeline[0][column]);
+    }
     expect(view.buckets[0].aboveTargetShare).toBe(50);
     expect(view.contextTargets).toEqual({ claude: 400000, codex: 300000 });
     expect(raw.bench_total).toBeCloseTo(raw.total * (650000 / 700000));

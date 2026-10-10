@@ -1,6 +1,6 @@
 {
   "name": "token-furnace",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Where the token budget actually went. Reads local coding-agent transcripts and reports token leaks.",
   "license": "MIT",
   "type": "module",
@@ -22,7 +22,8 @@
     "smoke": "node scripts/smoke.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "prepack": "npm run build 1>&2"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -47,5 +48,22 @@
     "reflect-metadata": "^0.2.2",
     "routing-controllers": "^0.11.3",
     "smol-toml": "^1.9.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jonit-dev/token-furnace.git"
+  },
+  "homepage": "https://github.com/jonit-dev/token-furnace#readme",
+  "bugs": {
+    "url": "https://github.com/jonit-dev/token-furnace/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "tokens",
+    "cli",
+    "dashboard",
+    "developer-tools"
+  ],
+  "author": "Joao Paulo Furtado"
 }

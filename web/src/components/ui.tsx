@@ -61,30 +61,26 @@ export function SourceBadge({ source }: { source: Source | "all" | null | undefi
   );
 }
 
-export function SourceToggle({
-  sources,
-  value,
-  onChange,
-}: {
-  sources: Source[];
-  value: Source;
-  onChange: (source: Source) => void;
+export function SourceSelect({ sources, value, onChange, label, pinned, onPin }: {
+  sources: (Source | "all")[];
+  value: Source | "all";
+  onChange: (source: Source | "all") => void;
+  label: string;
+  pinned: boolean;
+  onPin: () => void;
 }) {
   return (
-    <div role="group" aria-label="Burn source" className="inline-flex p-0.5 rounded-lg bg-chip border border-line">
-      {sources.map((s) => (
-        <button
-          key={s}
-          type="button"
-          aria-pressed={s === value}
-          onClick={() => onChange(s)}
-          className={`px-2 py-0.5 text-xs rounded-md ${
-            s === value ? "bg-card text-ink border border-line" : "text-muted"
-          }`}
-        >
-          {sourceLabel(s)}
-        </button>
-      ))}
+    <div className="flex shrink-0 items-center gap-1">
+      <select aria-label={`${label} provider`} value={value}
+        onChange={(event) => onChange(event.target.value as Source | "all")}
+        className="max-w-32 rounded-md border border-line bg-chip px-2 py-1 text-xs text-ink">
+        {sources.map((source) => <option key={source} value={source}>{source === "all" ? "All providers" : sourceLabel(source)}</option>)}
+      </select>
+      <button type="button" aria-label={`Pin ${label.toLowerCase()} provider`} aria-pressed={pinned}
+        title={pinned ? "Forget provider after reload" : "Remember provider after reload"}
+        onClick={onPin} className={`rounded-md border border-line px-2 py-1 text-xs ${pinned ? "bg-accent/10 text-accent" : "bg-chip text-muted"}`}>
+        {pinned ? "Pinned" : "Pin"}
+      </button>
     </div>
   );
 }
@@ -107,7 +103,7 @@ export function Card({
   return (
     <section className={`card p-4 min-w-0 flex flex-col ${className}`}>
       {title || right ? (
-        <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
           <div className="flex items-start gap-2 min-w-0">
             {icon ? <Icon name={icon} size={16} className="text-accent shrink-0 mt-0.5" /> : null}
             <div className="min-w-0">

@@ -1,22 +1,46 @@
 # token-furnace
 
+[![npm version](https://img.shields.io/npm/v/token-furnace)](https://www.npmjs.com/package/token-furnace)
+[![Node.js](https://img.shields.io/node/v/token-furnace)](https://www.npmjs.com/package/token-furnace)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![npm downloads](https://img.shields.io/npm/dm/token-furnace)](https://www.npmjs.com/package/token-furnace)
+
 Where the token budget actually went. `token-furnace` reads your local Claude Code and Codex
 transcripts, finds token leaks, and shows the result in your terminal, as JSON for agents, and in a
 local dashboard. Transcript data never leaves your machine.
 
-## Requirements
+## Quick start
 
-- Node.js 22.13 or newer.
+Requires **Node.js 22.13 or newer** and local Claude Code or Codex transcripts.
 
 Run it without installing:
 
+```sh
+npx token-furnace@latest
 ```
-npx token-furnace
+
+Open the live dashboard:
+
+```sh
+npx token-furnace@latest serve
 ```
+
+Visit **http://127.0.0.1:8765**. The first scan measures local usage; later scans reuse a metadata cache.
+Choose Claude Code or Codex independently for each chart, and pin a selection to remember it on reload.
+
+Export a report for scripts or sharing:
+
+```sh
+npx token-furnace@latest --json --no-plan-usage
+npx token-furnace@latest --html report.html
+```
+
+Reports include session titles and file paths. Review an exported report before sharing it.
+With no transcripts, the CLI exits 1; run `npx token-furnace@latest --list-sources` to see where it looks.
 
 Or install it globally:
 
-```
+```sh
 npm install -g token-furnace
 ```
 
@@ -44,7 +68,7 @@ Options:
 
 ## Context targets
 
-`src/core/context.ts` is the single source for ideal context sizes: **Claude Code 400k** and
+The analysis targets context sizes of **Claude Code 400k** and
 **Codex 300k**. Checkup, session flags, dashboard KPIs, hourly spend charts, benchmark estimates,
 and configuration repair all use these values. A turn exactly at its provider target is within
 target. Mixed-provider charts compare each turn against its own provider target.
@@ -126,18 +150,29 @@ main thread, or a positive number to set the worker count.
 An unknown option does not exit 2. `node:util` `parseArgs` throws, so that run exits 1 with a stack
 trace.
 
-## Release status
+## Development and contributing
 
-Version 0.1.0. The `setup` and `hook` commands are integrated and tested (PRD-006). The dashboard
-is a React + Vite + TypeScript single-file build (PRD-005). `--html` writes one file and `serve`
-serves the same page. Both load no external URL: no CDN `<script>` or `<link>`.
+Bug reports and focused pull requests are welcome. For a bug, include your Node.js version,
+the command you ran, and a redacted error or minimal transcript example. Keep credentials and
+private transcript content out of issues.
 
-The package smoke test passes on both Node.js 22.13 and Node.js 24.16: `npm pack`, a temporary
-install, and `npx --no-install` runs of the CLI (`--json`), `--html`, and `serve` all match the
-expected totals and routes. The tarball includes `dist/scan-worker.js` and `dist/dashboard.html`. The package file allowlist
-contains `dist/`, `SKILL.md`, `references/`, and `README.md`, plus npm metadata and the license.
-It contains no `.py`, `.sh`, test, or fixture files.
+```sh
+git clone https://github.com/jonit-dev/token-furnace.git
+cd token-furnace
+npm ci
+npm run typecheck
+npm test
+npm run smoke
+```
 
-The full Vitest suite (86 tests) plus the root and web typechecks and the build pass. The four CLI
-paths (cold workers, warm cache, inline main-thread, and `--no-cache` workers) return identical
-`Report` JSON. Publishing to npm is pending the package owner.
+`npm test` builds the CLI and dashboard before running the suite. `npm run smoke` packs and installs
+the package into a temporary project, then checks the installed CLI, HTML export and live server
+against synthetic transcripts. `npm pack` and `npm publish` rebuild the distributable automatically.
+The dashboard is self-contained: no CDN scripts, fonts or styles are needed.
+
+[Report a bug](https://github.com/jonit-dev/token-furnace/issues) ·
+[Browse the source](https://github.com/jonit-dev/token-furnace)
+
+## License
+
+[MIT](LICENSE) © Joao Paulo Furtado

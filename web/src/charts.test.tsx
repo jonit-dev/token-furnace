@@ -62,7 +62,7 @@ it("keeps all available quota series when switching the gauge to a provider with
   const onSource = vi.fn();
   const { container, rerender } = render(<Dashboard r={{ burns }} burn={burns.codex} sources={["claude", "codex"]} source="codex" onSource={onSource} />);
   const before = container.querySelector('[data-series="used"]')?.getAttribute("d");
-  fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
+  fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "claude" } });
   expect(onSource).toHaveBeenCalledWith("claude");
   rerender(<Dashboard r={{ burns }} burn={burns.claude} sources={["claude", "codex"]} source="claude" onSource={onSource} />);
   expect(container.querySelector('[data-provider="codex"]')).not.toBeNull();

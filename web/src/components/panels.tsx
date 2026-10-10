@@ -2,9 +2,10 @@ import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/c
 import type { ReactNode } from "react";
 import type { Burn, Report, Source } from "../../../src/core/model";
 import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
-import { Bar, Card, CopyButton, SourceBadge, SourceToggle, Spark, Tile, WeekBar } from "./ui";
+import { Bar, Card, CopyButton, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
 import { Icon } from "./icons";
+import { useUi } from "../store";
 
 export function ActNow({ r }: { r: Partial<Report> }) {
   const acts = r.actions ?? [];
@@ -122,13 +123,15 @@ export function ActiveSessions({
 export function KpiStrip({
   r,
   burn,
+  source,
 }: {
   r: Partial<Report>;
   burn?: Burn;
+  source?: Source;
 }) {
   const rate = Number(burn?.rate) || 0;
   const goal = Number(burn?.goal) || 0;
-  const hourly = (r.timeline ?? []).slice(-24).map((t) => (t[1] ?? 0) + (t[2] ?? 0));
+  const hourly = (source ? r.timelines?.[source] ?? [] : r.timeline ?? []).slice(-24).map((t) => (t[1] ?? 0) + (t[2] ?? 0));
   const used = burn?.used ?? null;
   const left = burn?.hoursLeft ?? null;
   const ratePct = burn?.ratePct ?? null;
@@ -270,7 +273,23 @@ export function KpiStrip({
       ) : null}
     </Tile>,
   );
-  return <div className="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">{tiles}</div>;
+  for (const provider of Object.keys(r.timelines ?? {}) as Source[]) {
+    const spend = (r.timelines?.[provider] ?? []).reduce((sum, row) => sum + row[1] + row[2], 0);
+    tiles.push(<Tile key={`spend-${provider}`} label={`${sourceLabel(provider)} spend`} icon="Flame"
+      value={fmt(spend)} line={`${r.days ?? 0} d`} tip={`${sourceLabel(provider)} weighted tokens over the full window`}>
+      <Spark values={(r.timelines?.[provider] ?? []).slice(-24).map((row) => row[1] + row[2])} />
+    </Tile>);
+  }
+  for (const [label, value, line] of [
+    ["Sessions", r.sessions, "full window"],
+    ["Turns", r.turns, "full window"],
+    ["Tokens / turn", r.turns ? (r.total ?? 0) / r.turns : 0, "weighted average"],
+    ["Projects", r.projectCount, "full window"],
+    ["Tool calls", r.toolCalls, "full window"],
+  ] as const) {
+    tiles.push(<Tile key={label} label={label} value={value == null ? "—" : fmt(value)} line={line} />);
+  }
+  return <div className="grid gap-3 grid-cols-2 sm:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">{tiles}</div>;
 }
 
 export function Dashboard({
@@ -286,10 +305,17 @@ export function Dashboard({
   source?: Source;
   onSource: (source: Source) => void;
 }) {
-  const toggle =
-    sources.length > 1 && source ? (
-      <SourceToggle sources={sources} value={source} onChange={onSource} />
-    ) : null;
+  const hourlySource = useUi((state) => state.hourlySource);
+  const setHourlySource = useUi((state) => state.setHourlySource);
+  const pins = useUi((state) => state.pins);
+  const togglePin = useUi((state) => state.togglePin);
+  const hourlySources = Object.keys(r.timelines ?? {}) as Source[];
+  const hourlyCurrent = hourlySources.includes(hourlySource as Source) ? hourlySource : "all";
+  const hourlyRows = hourlyCurrent === "all" ? r.timeline ?? [] : r.timelines?.[hourlyCurrent] ?? [];
+  const hourlyGoal = hourlyCurrent === "all" ? undefined : r.burns?.[hourlyCurrent]?.goal;
+  const toggle = source ? <SourceSelect sources={sources} value={source}
+    onChange={(value) => { if (value !== "all") onSource(value); }} label="Combustion rate"
+    pinned={pins.source === source} onPin={() => togglePin("source", source)} /> : null;
   const weeklyBurns = r.burns ?? (r.burn ? { claude: r.burn } : {});
   const weekly = Object.values(weeklyBurns).some(b => (b?.weekBurndown?.length ?? 0) > 1);
   return (
@@ -315,9 +341,12 @@ export function Dashboard({
           </Card>
         )}
       </div>
-      <KpiStrip r={r} burn={burn} />
-      <Card title="Hourly spend by context" sub="Tokens burned per hour, split by context window" icon="ChartColumn">
-        <Hourly rows={r.timeline ?? []} goal={burn?.goal} />
+      <KpiStrip r={r} burn={burn} source={source} />
+      <Card title="Hourly spend by context" sub="Tokens burned per hour, split by context window" icon="ChartColumn"
+        right={<SourceSelect sources={["all", ...hourlySources]} value={hourlyCurrent} onChange={setHourlySource}
+          label="Hourly spend" pinned={pins.hourlySource === hourlyCurrent}
+          onPin={() => togglePin("hourlySource", hourlyCurrent)} />}>
+        <Hourly rows={hourlyRows} goal={hourlyGoal} />
       </Card>
       <div className="grid gap-4 lg:grid-cols-5">
         <Card title="Act now" sub="Quick fixes to keep the furnace under control" icon="TriangleAlert" className="lg:col-span-2">

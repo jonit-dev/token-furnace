@@ -5,7 +5,7 @@
 export function loadingPage(): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Token Furnace: scanning</title>
+<title>Token Furnace: measuring performance</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 16px/1.5 system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; margin: 0; }
@@ -17,23 +17,31 @@ export function loadingPage(): string {
   .bar > div { height: 100%; width: 0; background: #e8590c; transition: width 0.4s; }
   small { opacity: 0.7; }
 </style></head><body><main>
-  <div class="spin" role="status" aria-label="Scanning"></div>
-  <h1>Scanning your transcripts</h1>
-  <p>Please wait. The first scan reads every Claude Code and Codex session once.</p>
+  <div class="spin" aria-hidden="true"></div>
+  <h1>Measuring performance</h1>
+  <p>Please wait while Token Furnace analyzes local Claude Code and Codex usage to find token waste.</p>
+  <p id="status" role="status">Preparing usage analysis...</p>
   <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div id="fill"></div></div>
   <p id="text">Starting...</p>
   <small id="time"></small>
 </main>
 <script>
-  const fill = document.getElementById("fill"), text = document.getElementById("text"), time = document.getElementById("time");
+  const fill = document.getElementById("fill"), text = document.getElementById("text"), time = document.getElementById("time"), status = document.getElementById("status");
   const fmt = (n) => n.toLocaleString();
   async function tick() {
     try {
       const s = await (await fetch("/api/status", { cache: "no-store" })).json();
-      if (s.phase === "ready") return location.reload();
+      if (s.phase === "ready") {
+        status.textContent = "Opening your dashboard...";
+        return location.reload();
+      }
+      status.textContent = s.phase === "idle" ? "Preparing usage analysis..."
+        : !s.filesTotal || s.filesDone >= s.filesTotal ? "Preparing your dashboard..."
+        : "Measuring token usage...";
       const pct = s.bytesTotal ? Math.min(99, Math.round((100 * s.bytesDone) / s.bytesTotal)) : 0;
       fill.style.width = pct + "%";
-      text.textContent = s.filesTotal ? fmt(s.filesDone) + " of " + fmt(s.filesTotal) + " files (" + pct + "%)" : "Looking for transcripts...";
+      fill.parentElement.setAttribute("aria-valuenow", String(pct));
+      text.textContent = s.filesTotal ? fmt(s.filesDone) + " of " + fmt(s.filesTotal) + " files (" + pct + "%)" : "";
       if (s.startedAt) time.textContent = Math.round((Date.now() - s.startedAt) / 1000) + " s elapsed";
     } catch { /* the server is busy or restarting: try again */ }
     setTimeout(tick, 1000);

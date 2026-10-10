@@ -267,6 +267,9 @@ export interface RawReport {
   active: ActiveSession[];
   /** [hour, [cool spend, hot spend]] */
   timeline: [Date, [number, number]][];
+  project_count?: number;
+  tool_calls?: number;
+  timelines?: Partial<Record<Source, [Date, [number, number]][]>>;
   hourly: [Date, HourSlot][];
   bench_total: number;
   budget: number | null;
@@ -300,6 +303,9 @@ export interface Report {
   kpis: { name: string; unit: "k" | "%"; target: number; values: number[] }[];
   /** [hour, cool, hot] */
   timeline: [string, number, number][];
+  projectCount?: number;
+  toolCalls?: number;
+  timelines?: Partial<Record<Source, [string, number, number][]>>;
   /** 24 */
   checkHours: number;
   baseline: BaselineRow[];

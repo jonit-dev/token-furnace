@@ -14,7 +14,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, type TomlTable } from "smol-toml";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "../core/config-repairs";
 import { CONTEXT_TARGET } from "../core/context";
 import { SUBAGENT_CAP, SUBAGENT_DEPTH, TOOL_CONCURRENCY, SUBAGENT_ENV, CODEX_SUBAGENT_KEY } from "../core/analyze/flags";
@@ -749,7 +749,7 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
       if (codex.agents !== undefined && !isPlainObject(codex.agents)) {
         throw new Error(`${codexPath}: expected an agents table`);
       }
-      const agents = (codex.agents ?? {}) as Record<string, unknown>;
+      const agents = (codex.agents ?? {}) as TomlTable;
       let afterCodex = beforeCodex ?? "";
       const updateCodex = (table: string, key: string, value: string | number) => {
         const object = table ? agents : codex;

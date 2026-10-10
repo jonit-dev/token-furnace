@@ -57,6 +57,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   const paths = new Map<string, string>();
   const titles = new Map<string, string | null>();
   const timeline = new Map<number, [number, number]>();
+  const timelines: Partial<Record<Source, Map<number, [number, number]>>> = {};
   const hourly = new Map<number, HourSlot>();
   const contexts: number[] = [];
   const preambles: number[] = [];
@@ -162,6 +163,10 @@ export function buildReport(input: ReportInput): RawReport | null {
         const hour = hourStart(item.when);
         const slot = timeline.get(hour) ?? (timeline.set(hour, [0, 0]), timeline.get(hour)!);
         slot[aboveTarget ? 1 : 0] += weighted;
+        const providerTimeline = timelines[source] ??= new Map();
+        const providerSlot = providerTimeline.get(hour) ?? [0, 0];
+        providerSlot[aboveTarget ? 1 : 0] += weighted;
+        providerTimeline.set(hour, providerSlot);
         // Benchmark: cap this turn at its provider’s ideal context size.
         const trimmed = Math.max(item.cacheRead - Math.max(context - target, 0), 0);
         const hourSlot = hourly.get(hour) ?? emptySlot();
@@ -321,6 +326,8 @@ export function buildReport(input: ReportInput): RawReport | null {
     total,
     turns: [...sessions.values()].reduce((sum, row) => sum + row[1], 0),
     session_count: sessions.size,
+    project_count: byProject.size,
+    tool_calls: totals.tool_calls,
     sources: [...bySource.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([name, value]) => [name as Source, share(value)]),
     buckets,
     over_target: share([...aboveBySize.values()].reduce((sum, cost) => sum + cost, 0)),
@@ -365,6 +372,9 @@ export function buildReport(input: ReportInput): RawReport | null {
         };
       }),
     timeline: [...timeline.entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
+    timelines: Object.fromEntries(Object.entries(timelines).map(([source, rows]) => [source,
+      [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
+    ])),
     hourly: [...hourly.entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
     bench_total: [...hourly.values()].reduce((sum, slot) => sum + slot.bench, 0),
     budget: input.weeklyBudget ? input.weeklyBudget * 1e6 : null,
