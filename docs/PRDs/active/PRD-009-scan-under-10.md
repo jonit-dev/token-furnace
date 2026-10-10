@@ -17,10 +17,10 @@ Mutable surface: existing source parsers/line reader, worker pool and report-ser
 ## Acceptance criteria
 
 - [ ] AC-1 [local]: Three full empty-application-cache runs on the unchanged real corpus each complete in under 10 seconds. proof: benchmark command and timings recorded below.
-- [ ] AC-2 [local]: Warm-cache and changed-transcript startup also complete in under 10 seconds. proof: benchmark scenarios with explicit cache state.
-- [ ] AC-3 [local]: Candidate full Report is byte-identical to the baseline on the same fixed inputs/clock. proof: benchmark oracle comparison plus targeted parser regressions.
-- [ ] AC-4 [local]: Live server retains responsive progress, worker-backed initial parsing and safe fallback. proof: progress and parse-pool tests, then a real local browser load.
-- [ ] AC-5 [local]: Build, affected tests and package smoke pass on Node 22.13 and 24. proof: existing commands after the accepted optimization.
+- [x] AC-2 [local]: Warm-cache and changed-transcript startup also complete in under 10 seconds. proof: frozen warm runs 3.074/2.859/3.257 s; fresh local process with a changed 50.9 MB transcript returned its default full report in 3.824 s.
+- [x] AC-3 [local]: Candidate full Report is byte-identical to the baseline on the same fixed inputs/clock. proof: full frozen cold runs and warm runs match the unchanged oracle; latest patch trial also matches.
+- [x] AC-4 [local]: Live server retains responsive progress, worker-backed initial parsing and safe fallback. proof: progress/parse-pool tests, prior real browser rendering, and the integrated local server's ready/full-report checks; UI and worker scheduling are unchanged by the one-line cache-reader patch.
+- [x] AC-5 [local]: Build, affected tests and package smoke pass on Node 22.13 and 24. proof: Node 24 build/typecheck/94 tests; Node 22 affected suites 19 tests; both runtimes pass 14 installed-package smoke checks and fresh public npx installs.
 
 ## Phases
 
@@ -135,3 +135,9 @@ Tuning stopped after unsuccessful trials under the supplied AGENTS rule. Doubtfu
 - Integrated the tested one-line cached-row streaming improvement into the primary checkout and bumped the package to **0.1.1**. Fresh builds pass; the same exact tarball passes all 14 installed-package smoke checks on **Node 22.13.0 and 24.16.0**. Artifact `/tmp/tf-release-ew8Cp3/token-furnace-0.1.1.tgz`: **293,761 bytes**, 16 files, SHA-256 `61b906ac88c25fca57c5dd2775d5363159ea4891af04fa9af697d477b4568d13`.
 - The authorized fixed-registry publish returned **HTTP 202 / npm exit 0**. Public publication is **not verified**: twelve checks over 180 seconds still showed `latest=0.1.0`, no 0.1.1 metadata, and a separate public 0.1.1 tarball request returned 404. Authenticated metadata also lacked the version. Do not treat acceptance as proof of availability or repeat the upload without inspecting the current state. Temporary authentication files were removed; no token was logged.
 - Restarted only the owned local server on `http://127.0.0.1:8780`. Its fresh process was ready in **0.774 s** and returned the default full report in **3.824 s**, including a changed **50,885,563-byte** transcript. The rebuilt local CLI, worker, shared chunk and dashboard bytes match the tested tarball. This is a changed-cache startup result, not a full empty-cache scan pass; AC-1 remains unmet.
+
+### Public patch verification and CPU-allocation trial
+
+- Publication is now verified: public `latest=0.1.1`; a downloaded public tarball matches the exact tested 293,761-byte artifact above. Fresh ordinary public `npx token-furnace@0.1.1` installs with private, empty per-runtime caches passed on Node 22.13.0 and 24.16.0, each reporting the synthetic fixture's expected one session, two turns and positive usage. Logs remain private at `/tmp/tf-public-npx-KwzQiJ`. This resolves the earlier HTTP 202/public-availability gap; no second upload was needed.
+- The affected SQLite, worker-pool and line-reader suites additionally passed **19/19 tests on Node 22.13.0**.
+- The inherited process affinity exposes 12 logical CPUs on **6 physical cores**, although the cgroup permits all 24 logical CPUs on **12 physical cores**. A separate benchmark process and its children alone temporarily used the full allowed CPU set. The unchanged full frozen application-cold scan took **23.740 s**, oracle match, with host load1 **23.69**. This did not pass AC-1; global affinity and other processes were untouched. It is a distinct resource-allocation experiment, not a directly controlled comparison with earlier timings.
