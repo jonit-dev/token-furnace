@@ -38,3 +38,11 @@ Real local verification: initial CLI 5 sessions/85 turns; the subsequent live sc
 SQLite connection recovery needed a 5-second busy timeout for simultaneous read-only worker connections. Browser server uses a temporary isolated cache and disables discovery of Claude/Codex, while reading the actual OpenCode store; a concurrent platform task was writing the normal shared cache. Existing provider regressions pass in the full suite. No agent configuration, credential files or OpenCode source rows were modified.
 
 Limits: current SQLite schema only; 5-hour/monthly meters are verified but not displayed. Models outside existing pricing ratios remain explicitly unpriced, so weighted burn estimates are approximate. Only opencode-go model usage calibrates the Go weekly quota; other OpenCode providers remain in local totals. No native Windows/macOS browser execution for this feature.
+
+
+## Post-delivery detection hardening
+The first dashboard link pointed to an OpenCode-only verification process whose CLAUDE_CONFIG_DIR and CODEX_HOME intentionally referenced missing temporary directories. Restarted port 8776 with normal discovery and an isolated metadata cache. Live browser checks now show Claude/Codex/OpenCode in both selectors and the weekly chart, with nonempty source-filtered reports (146/183/6 sessions respectively at verification). No detection production change was necessary.
+
+Source audit found no personal machine roots: Claude uses CLAUDE_CONFIG_DIR then HOME/homedir/.claude; Codex uses CODEX_HOME then HOME/homedir/.codex; OpenCode uses OPENCODE_DATA_DIR, XDG_DATA_HOME/opencode, then HOME/homedir/.local/share/opencode.
+
+Added five synthetic-home regression tests via the save-tokens skill's delegated Go arm: real default and override discovery, actual XDG database loading, all-provider burns/timelines with isolated-report equality, missing OpenCode preserving Claude/Codex totals, and reopened persistent cache with zero reparsed files. Node 24 typecheck passed; full suite passed 191 tests in 21 files. No new CLI/HTTP test was added in this follow-up; existing entry-point tests and the live all-provider browser checks provide that coverage.
