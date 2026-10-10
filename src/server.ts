@@ -65,10 +65,12 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
   });
 
-  app.reports.refresh(); // warm the parse cache; requests queue on the bound port meanwhile
   const http = await new Promise<Server>((ready) => {
     const bound = web.listen(options.port, "127.0.0.1", () => ready(bound));
   });
+  // Warm the parse cache after the port is bound, so the URL prints at once and early requests
+  // queue on the socket. A cold scan of thousands of transcripts takes minutes.
+  setImmediate(() => app.reports.refresh());
   const port = (http.address() as { port: number }).port;
   return { url: `http://127.0.0.1:${port}`, port, close: () => new Promise((done) => http.close(() => done())) };
 }
