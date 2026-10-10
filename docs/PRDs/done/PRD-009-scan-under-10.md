@@ -1,6 +1,6 @@
 # PRD-009 — Full local scan under 10 seconds
 
-**Status:** IN PROGRESS
+**Status:** COMPLETE
 **Priority:** P1 — the local dashboard still spends over a minute scanning; João requests under 10 seconds before publication.
 **Complexity:** 3 (LOW); 1–5 implementation files + existing concurrency; risk override: none.
 **Owner:** Codex
@@ -20,7 +20,7 @@ Mutable surface: existing source parsers/line reader, worker pool and report-ser
 - [x] AC-2 [local]: Warm-cache and changed-transcript startup also complete in under 10 seconds. proof: frozen warm runs 3.074/2.859/3.257 s; fresh local process with a changed 50.9 MB transcript returned its default full report in 3.824 s.
 - [x] AC-3 [local]: Candidate full Report is byte-identical to the baseline on the same fixed inputs/clock. proof: full frozen cold runs and warm runs match the unchanged oracle; latest patch trial also matches.
 - [x] AC-4 [local]: Live server retains responsive progress, worker-backed initial parsing and safe fallback. proof: progress/parse-pool tests, prior real browser rendering, and the integrated local server's ready/full-report checks; UI and worker scheduling are unchanged by the one-line cache-reader patch.
-- [x] AC-5 [local]: Build, affected tests and package smoke pass on Node 22.13 and 24. proof: Node 24 build/typecheck/94 tests; Node 22 affected suites 19 tests; both runtimes pass 14 installed-package smoke checks and fresh public npx installs.
+- [x] AC-5 [local]: Build, affected tests and package smoke pass on Node 22.13 and 24. proof: final build/typecheck; full 116-test suites plus final 17-test validator suites on both runtimes (117 distinct tests); exact prepared-artifact 14-check package smoke and fresh public npx on both runtimes.
 
 ## Phases
 
@@ -221,3 +221,11 @@ Tuning stopped after unsuccessful trials under the supplied AGENTS rule. Doubtfu
 
 - Supported Node 22.13 final full gate also passed: **7.425 / 7.750 / 8.111 s**, all oracle matches, starting load1 **4.08**. Node 24 final warm runs **0.830 / 0.847 / 0.824 s**, all oracle matches.
 - Prepared release `0.1.3`: `/tmp/tf-release-013-9syam16j/token-furnace-0.1.3.tgz`, **404,525 bytes / 21 entries**, SHA256 `7d0db1446c3eb02bf49f792c46c61d5f28aa68c5838a95bab43048efeede7225`. Includes exact Rust source/lockfile/build recipe and dependency notices; no Cargo targets, standalone WASM binaries, credentials or runtime Rust dependency. All **14 package smoke checks on both runtimes** passed with an added private SHA assertion proving each installed/tested tarball equals the prepared artifact. Registry accepted the exact upload; public propagation, fresh npx and local integration checks follow.
+
+### Completed delivery
+
+- Public `latest=0.1.3` and the canonical downloadable tarball match the exact tested artifact (SHA1 `fe7c41d02033d7aa635e7e1fbb3f3c56f14b009d`, SHA256 `7d0db1446c3eb02bf49f792c46c61d5f28aa68c5838a95bab43048efeede7225`). Upload authentication used an isolated temporary 0600 npm config, removed after the single accepted upload. Public propagation initially lagged; no duplicate upload.
+- Fresh **unversioned** public npx installs with empty, separate npm caches and synthetic homes passed on Node 22.13 and 24.16. Each installed package metadata version 0.1.3 and produced **one session / one turn / total 216**. `--version` is not a supported CLI flag, so installation version was checked in package metadata instead; no new option was added. Parent independently checked installed versions and numeric reports. Private logs `/tmp/tf-public013.b26ebh`.
+- Commit `c24eacd` fast-forwarded into the primary `feat/npx-restructure` checkout. Its rebuilt **11 distribution files** exactly match the tested public artifact. Identity-checked local restart replaced only the owned 8780 server. `http://127.0.0.1:8780` now runs 0.1.3, PID **3155852**, log `/tmp/tf-web-8780-013-qpbzfca1.log`; ready **0.711 s**, complete default report **1.741 s**, **289 sessions / 68,612 turns**. Initial parsing remains worker-backed.
+- Cleanup completed: checkout `.worktrees/scan-under-10` was integrated, released and audited (zero active cwd owners, zero tracked/untracked changes; only task-generated `node_modules`/`dist`, 11,626 ignored entries). Ordinary worktree removal succeeded; registration and path absence verified. Reclaimed **173,731,840 allocated bytes / 165.7 MiB**. No force removal or push.
+- All acceptance criteria now have evidence. The original handoff deliverables remain complete; the appended performance requirement passes on both supported runtimes. This PRD moves to `docs/PRDs/done/` in the finishing commit. Limits: benchmark clears application caches, not OS caches; the earlier 10.266-second miss is retained, and arbitrary contention or physically cold storage can exceed the measured bound.
