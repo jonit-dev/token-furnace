@@ -8,6 +8,12 @@ export const PROVIDERS = {
     parserVersion: 0,
     compaction: `"autoCompactWindow": ${CONTEXT_TARGET.claude} in ~/.claude/settings.json`,
   },
+  opencode: {
+    label: "OpenCode",
+    cacheWrites: true,
+    parserVersion: 1,
+    compaction: "Use /compact in OpenCode to start a smaller context.",
+  },
   codex: {
     label: "Codex",
     cacheWrites: false,

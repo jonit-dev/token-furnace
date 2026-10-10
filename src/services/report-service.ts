@@ -11,6 +11,7 @@ export interface ReportOptions {
   weeklyBudget: number | null;
   /** The subscription window, read by the caller: the saved reading, refreshed from the network when a login exists. */
   planWeek?: Week | null;
+  opencodeWeek?: Week | null;
   /** The clock. Defaults to now, so a test can freeze it. */
   now?: Date;
 }
@@ -145,6 +146,7 @@ export class ReportService {
         .sort((a, b) => (this.order.get(a.path) ?? Infinity) - (this.order.get(b.path) ?? Infinity)),
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,
+      opencodeWeek: opts.opencodeWeek ?? null,
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
     });
   }

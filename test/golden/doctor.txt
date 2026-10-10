@@ -39,7 +39,7 @@ Verdict: 15 leaks found in the last 24 h, largest first.
 15. [P2] Config: memory index too long (config)
    Fix: Shorten MEMORY.md under 200 lines; move detail into topic files.
 
-Benchmark: the same turns at Claude 400k / Codex 300k compaction targets would cost about 15M (6% less). Estimate: trims cached context only.
+Benchmark: the same turns at Claude 400k / Codex 300k / OpenCode 128k compaction targets would cost about 15M (6% less). Estimate: trims cached context only.
 
 Baseline gaps (last 24 h -> recommended):
   critical Spend on turns over 400k     94%                under 10%

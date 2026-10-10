@@ -122,6 +122,7 @@ export interface ReportInput {
   config: ConfigInput;
   planWeek: Week | null;
   codexWeek: Week | null;
+  opencodeWeek?: Week | null;
 }
 
 /** Aggregates for the last CHECK_HOURS, as one dict Python shares per source. */

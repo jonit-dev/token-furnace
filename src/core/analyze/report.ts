@@ -64,12 +64,13 @@ export function buildReport(input: ReportInput): RawReport | null {
   const totals = emptyTotals();
   const lastHour = new Map<Source, number>();
   const recent = new Map<Source, Map<number, number>>();
+  const quotaHour = new Map<Source, number>();
   const weekHourly = new Map<Source, Map<number, [number, number]>>();
   const active: [string, number, number, string | null, number][] = [];
   const sessions24 = new Map<string, [number, number, number, number]>();
   const signals24 = new Map<string, [number, WakeCounts]>();
   const per = new Map<Source, PerSource>();
-  const weeks: Record<Source, Week | null> = { claude: input.planWeek, codex: input.codexWeek };
+  const weeks: Record<Source, Week | null> = { claude: input.planWeek, codex: input.codexWeek, opencode: input.opencodeWeek ?? null };
   const weekNow = new Map<Source, number>();
 
   let total = 0;
@@ -140,9 +141,13 @@ export function buildReport(input: ReportInput): RawReport | null {
           bumpMap(lastHour, source, weighted);
           hourCost += weighted;
         }
-        for (const [h, cut] of gainCuts) if (item.when >= cut) bumpGain(recent, source, h, weighted);
+        const quotaEligible = source !== "opencode" || item.model.startsWith("opencode-go/");
+        if (quotaEligible) {
+          if (item.when >= hour1Cut) bumpMap(quotaHour, source, weighted);
+          for (const [h, cut] of gainCuts) if (item.when >= cut) bumpGain(recent, source, h, weighted);
+        }
         const week = weeks[source];
-        if (week && item.when >= week.start) bumpMap(weekNow, source, weighted);
+        if (week && quotaEligible && item.when >= week.start) bumpMap(weekNow, source, weighted);
         allContext += context;
         const isTop = rate !== null && rate >= topRate;
         stats7.turns += 1;
@@ -173,7 +178,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         const benchTurn = weighted - priced * (CACHE_READ_RATE * (item.cacheRead - trimmed));
         hourSlot.bench += benchTurn;
         if (!hourly.has(hour)) hourly.set(hour, hourSlot);
-        if (week && item.when >= week.start) {
+        if (week && quotaEligible && item.when >= week.start) {
           const per2 = weekHourly.get(source) ?? new Map<number, [number, number]>();
           if (!weekHourly.has(source)) weekHourly.set(source, per2);
           const bucket = per2.get(hour) ?? [0, 0];
@@ -433,7 +438,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         ideal: Math.max(limit - spent, 0) / hoursLeft,
         limit,
         start: week.start,
-        rate_pct: (burn.rate * 100) / limit,
+        rate_pct: ((quotaHour.get(src) ?? 0) * 100) / limit,
         ideal_pct: Math.max(left, 0) / hoursLeft,
         burndown: weekPoints(weekHourly.get(src) ?? new Map(), week.start, now, limit),
         projection: {

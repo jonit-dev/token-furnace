@@ -38,6 +38,8 @@ export function harnessEnv(root: string, now: Date): NodeJS.ProcessEnv {
     ...process.env,
     CLAUDE_CONFIG_DIR: root,
     CODEX_HOME: join(root, "codex"),
+    OPENCODE_DATA_DIR: join(root, "opencode"),
+    OPENCODE_API_KEY: undefined,
     XDG_CACHE_HOME: root,
     TF_PARITY_NOW: now.toISOString(),
   };
@@ -53,7 +55,7 @@ export function collectSessions(env: NodeJS.ProcessEnv, source: string): { live:
   } as const;
   const live: Source[] = [];
   const sessions: SessionInput[] = [];
-  for (const name of Object.keys(agents) as Source[]) {
+  for (const name of Object.keys(agents) as (keyof typeof agents)[]) {
     if (source !== "all" && source !== name) continue;
     const agent = agents[name];
     if (!existsDir(agent.root())) continue; // not installed

@@ -7,7 +7,7 @@ SPEND BY CONTEXT SIZE OF THE TURN   <- the main lever
   200-300k        2.9%       10 turns
   300-500k       76.5%      300 turns
   500-1000k      11.4%       20 turns
-  --> 88% of spend is on turns carrying more than their provider context target (Claude 400k / Codex 300k)
+  --> 88% of spend is on turns carrying more than their provider context target (Claude 400k / Codex 300k / OpenCode 128k)
 
 ALWAYS-RESIDENT PREAMBLE (instructions, memory, skill catalog, tool schemas)
   p50=400k  p90=900k per session  ->  99% of every token read

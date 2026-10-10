@@ -55,7 +55,7 @@ export const useUi = create<UiState>()(persist((set) => ({
   partialize: (state) => ({ pins: state.pins }),
   merge: (saved, current) => {
     const pins = (saved as { pins?: UiState["pins"] } | undefined)?.pins;
-    const valid = (value: unknown): value is Source => value === "claude" || value === "codex";
+    const valid = (value: unknown): value is Source => value === "claude" || value === "codex" || value === "opencode";
     const source = valid(pins?.source) ? pins.source : undefined;
     const hourlySource = valid(pins?.hourlySource) || pins?.hourlySource === "all" ? pins.hourlySource : undefined;
     return { ...current, source: source ?? current.source, hourlySource: hourlySource ?? current.hourlySource,

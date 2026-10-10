@@ -1,3 +1,4 @@
+import { PROVIDERS } from "../../../src/core/providers";
 import { useState, type ReactNode } from "react";
 import type { BaselineRow, Issue, Report } from "../../../src/core/model";
 import { fmt, LEVEL, LEVEL_ORDER, plural, sharePct, SOURCE_LABEL, TH } from "./format";
@@ -109,7 +110,7 @@ export function Leaks({ issues, hours }: { issues: Report["issues"]; hours: numb
 export function Checks({ rows, hours, days }: { rows: Report["baseline"]; hours: number; days: number }) {
   if (!rows.length) return null;
   // Evaluate per provider: group each agent's rows together, worst level first.
-  const srcOrder: Record<string, number> = { claude: 0, codex: 1, all: 2 };
+  const srcOrder: Record<string, number> = { claude: 0, codex: 1, opencode: 2, all: 3 };
   const sorted = [...rows].sort(
     (a, b) =>
       (srcOrder[a.source] ?? 3) - (srcOrder[b.source] ?? 3) ||
@@ -121,7 +122,7 @@ export function Checks({ rows, hours, days }: { rows: Report["baseline"]; hours:
     .filter(([, n]) => n)
     .map(([l, n]) => n + " " + LEVEL[l][2].toLowerCase())
     .join(" · ");
-  const bySource = ["claude", "codex"]
+  const bySource = Object.keys(PROVIDERS)
     .map((s) => [s, rows.filter((r) => r.source === s).length] as [string, number])
     .filter(([, n]) => n)
     .map(([s, n]) => n + " " + SOURCE_LABEL[s])

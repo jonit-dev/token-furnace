@@ -202,7 +202,7 @@ export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> })
     const end = rate > 0 && used < 100 ? Math.max(now, Math.min(reset, now + (100 - used) / rate * 3600000)) : now;
     const endV = used + rate * (end - now) / 3600000;
     return [{ source, start, reset, pts, now, used, rate, end, endV,
-      color: source === "claude" ? "#f97316" : "#4a9eff" }];
+      color: source === "claude" ? "#f97316" : source === "opencode" ? "#a78bfa" : "#4a9eff" }];
   });
   if (!series.length) return null;
   const t0 = Math.min(...series.map(s => s.start));

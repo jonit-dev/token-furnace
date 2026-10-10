@@ -71,7 +71,7 @@ function run(cmd, args, opts = {}) {
 }
 
 function isolatedEnv(root) {
-  const env = { ...process.env };
+  const env = { ...process.env, OPENCODE_DATA_DIR: join(root, "opencode"), OPENCODE_API_KEY: undefined };
   for (const key of CLEARED) delete env[key];
   env.HOME = join(root, "home");
   env.CLAUDE_CONFIG_DIR = join(root, "claude");

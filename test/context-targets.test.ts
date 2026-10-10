@@ -53,7 +53,7 @@ describe("shared provider context targets", () => {
       expect(view.timelines!.claude![0][column] + view.timelines!.codex![0][column]).toBe(view.timeline[0][column]);
     }
     expect(view.buckets[0].aboveTargetShare).toBe(50);
-    expect(view.contextTargets).toEqual({ claude: 400000, codex: 300000 });
+    expect(view.contextTargets).toEqual({ claude: 400000, codex: 300000, opencode: 128000 });
     expect(raw.bench_total).toBeCloseTo(raw.total * (650000 / 700000));
     expect(configNotes(["claude", "codex"], {
       claudeBase: "", claudeHome: "", settings: '{"autoCompactWindow":400000}',

@@ -131,8 +131,8 @@ export function topIssues(report: RawReport): RawIssue[] {
     let [fix, title, why, action] = ISSUES[kind];
     const source = hits[0][0].source;
     if (kind === "late compaction") {
-      fix = `Set ${PROVIDERS[source].compaction}, then /compact or restart old sessions.`;
-      action = `Set ${PROVIDERS[source].compaction}. Then ask me to /compact or restart each listed session that is still open.`;
+      fix = source === "opencode" ? PROVIDERS[source].compaction : `Set ${PROVIDERS[source].compaction}, then /compact or restart old sessions.`;
+      action = source === "opencode" ? PROVIDERS[source].compaction : `Set ${PROVIDERS[source].compaction}. Then ask me to /compact or restart each listed session that is still open.`;
     }
     issues.push({
       title,

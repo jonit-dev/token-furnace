@@ -26,7 +26,7 @@ export type Env = Record<string, string | undefined>;
 const READ_COMMAND =
   /(?:^|&&|;|\|\||\n)\s*(?:sed -n|grep|rg|cat|head|tail|awk|jq|find|python3? -c?(?:\s|$))/;
 
-const READ_TOOLS = new Set(["Read", "Grep", "Glob"]);
+const READ_TOOLS = new Set(["Read", "Grep", "Glob", "read", "grep", "glob"]);
 
 export function isRead(name: unknown, command: unknown): boolean {
   if (typeof name === "string" && READ_TOOLS.has(name)) return true;

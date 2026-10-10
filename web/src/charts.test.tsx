@@ -68,3 +68,9 @@ it("keeps all available quota series when switching the gauge to a provider with
   expect(container.querySelector('[data-provider="codex"]')).not.toBeNull();
   expect(container.querySelector('[data-series="used"]')?.getAttribute("d")).toBe(before);
 });
+
+it("draws OpenCode alongside Claude and Codex with a distinct quota color", () => {
+  const { container } = render(<WeeklyQuota burns={{ claude: burn(), codex: burn(), opencode: burn(24, 63) }} />);
+  expect(container.querySelectorAll("g[data-provider]")).toHaveLength(3);
+  expect(container.querySelector('[data-provider="opencode"] [data-series="used"]')?.getAttribute("stroke")).toBe("#a78bfa");
+});

@@ -336,3 +336,20 @@ describe("context configuration repair", () => {
     expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(false);
   });
 });
+
+it("selects and persists OpenCode independently for both dashboard charts", () => {
+  const report = { ...fixtureReport,
+    burns: { ...fixtureReport.burns, opencode: { ...fixtureReport.burns.claude!, used: 63 } },
+    timelines: { ...fixtureReport.timelines, opencode: fixtureReport.timelines!.claude },
+  };
+  window.__REPORT__ = report; vi.stubGlobal("fetch", okFetch(report));
+  render(<App />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "opencode" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Hourly spend provider" }), { target: { value: "opencode" } });
+  expect(useUi.getState().source).toBe("opencode"); expect(useUi.getState().hourlySource).toBe("opencode");
+  act(() => useUi.getState().togglePin("source", "opencode"));
+  act(() => useUi.getState().togglePin("hourlySource", "opencode"));
+  act(() => useUi.setState({ source: "claude", hourlySource: "all" }));
+  act(() => useUi.persist.rehydrate());
+  expect(useUi.getState().source).toBe("opencode"); expect(useUi.getState().hourlySource).toBe("opencode");
+});

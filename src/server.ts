@@ -14,7 +14,7 @@ import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { runFixConfig } from "./setup/agents";
-import { planWeek } from "./services/usage-client";
+import { openCodeWeek, planWeek } from "./services/usage-client";
 
 export interface ServeOptions {
   days: number;
@@ -90,8 +90,8 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   /** Refresh after the response. One call at a time; the client's own gate stops a second call. */
   const refresh = (): void => {
-    fetching ??= planWeek(app.env, app.now(), true)
-      .then((week) => {
+    fetching ??= Promise.all([planWeek(app.env, app.now(), true), openCodeWeek(app.env, app.now(), true)])
+      .then(([week]) => {
         if (week && week.resets > app.now()) quota = week;
       })
       .catch(() => {}) // a failed call keeps the reading
@@ -104,11 +104,12 @@ function reportController(app: App, options: ServeOptions, page: string) {
   async function build(query: Record<string, unknown>) {
     const now = app.now();
     const days = positiveInt(query.days, options.days);
-    const source = query.source === "claude" || query.source === "codex" ? query.source : options.source;
+    const source = query.source === "claude" || query.source === "codex" || query.source === "opencode" ? query.source : options.source;
     rescan(app); // the answer is the report we have now; the next poll sees the new scan
     const report = app.reports.getRaw(days, source, {
       weeklyBudget: options.weeklyBudget,
       planWeek: await plan(now),
+      opencodeWeek: await openCodeWeek(app.env, now, false),
       now,
     });
     if (options.planUsage) setImmediate(refresh); // after this response: the keychain read must not block it

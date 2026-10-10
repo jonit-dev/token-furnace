@@ -4,7 +4,7 @@
 [![Node.js](https://img.shields.io/node/v/token-furnace)](https://www.npmjs.com/package/token-furnace)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Where the token budget actually went. `token-furnace` reads your local Claude Code and Codex
+Where the token budget actually went. `token-furnace` reads your local Claude Code, Codex and OpenCode
 transcripts, finds token leaks, and shows the result in your terminal, as JSON for agents, and in a
 local dashboard. Transcript data never leaves your machine.
 
@@ -18,7 +18,7 @@ Each card has a target. A red dot means the target is missed and a green dot mea
 
 ## Quick start
 
-Requires **Node.js 22.13 or newer** and local Claude Code or Codex transcripts.
+Requires **Node.js 22.13 or newer** and local Claude Code, Codex or OpenCode transcripts.
 
 Run it without installing:
 
@@ -33,7 +33,7 @@ npx token-furnace@latest serve
 ```
 
 Visit **http://127.0.0.1:8765**. The first scan measures local usage; later scans reuse a metadata cache.
-Choose Claude Code or Codex independently for each chart, and pin a selection to remember it on reload.
+Choose Claude Code, Codex or OpenCode independently for each chart, and pin a selection to remember it on reload.
 
 Export a report for scripts or sharing:
 
@@ -55,7 +55,7 @@ npm install -g token-furnace
 
 | Command | Result |
 |---|---|
-| `token-furnace [days] [--source claude\|codex]` | Ranked verdict on stdout. `days` defaults to 7. Exits 1 on leaks or no data. |
+| `token-furnace [days] [--source claude\|codex\|opencode]` | Ranked verdict on stdout. `days` defaults to 7. Exits 1 on leaks or no data. |
 | `token-furnace --full` | Full text report. |
 | `token-furnace --json` | The `Report` JSON on stdout, for agents and scripts. Exits 0 even when leaks are present. |
 | `token-furnace --html <path>` | Writes a static HTML report with the report JSON inlined. It does not change the exit code. |
@@ -70,13 +70,28 @@ Options:
 - `--weekly-budget <M>` — weekly budget in millions of weighted tokens. `TOKEN_FURNACE_WEEKLY_BUDGET`
   sets the same value.
 - `--no-cache` — parse every file and write no cache.
-- `--no-plan-usage` — never call `api.anthropic.com`. A saved reading is still used.
+- `--no-plan-usage` — never fetch Anthropic or OpenCode Go usage. A saved reading is still used.
 - `-h`, `--help` — usage text.
+
+## OpenCode
+
+Current SQLite sessions are read from `$XDG_DATA_HOME/opencode/opencode.db` (default
+`~/.local/share/opencode/opencode.db`). Set `OPENCODE_DATA_DIR` to override that directory.
+The database is opened read-only, including live WAL updates. Legacy JSON session stores
+are not supported. Assistant message usage counts once; step-finish usage is not added again.
+
+OpenCode Go reads the local `auth.json` entry for `opencode-go` (or `OPENCODE_API_KEY`)
+and fetches the real weekly utilization and reset from `https://opencode.ai/zen/go/v1/usage`.
+The weekly dashboard uses that reading to calibrate local weighted tokens; burn projections
+are estimates, not billed dollars. OpenCode sessions from other providers are included in
+local totals; only `opencode-go` sessions calibrate the Go quota. The 5-hour and monthly meters
+are not displayed. Unknown models keep the existing unpriced-model warning.
+No OpenCode configuration is changed by Auto Fixes.
 
 ## Context targets
 
 The analysis targets context sizes of **Claude Code 400k** and
-**Codex 300k**. Checkup, session flags, dashboard KPIs, hourly spend charts, benchmark estimates,
+**Codex 300k**, with a **128k OpenCode diagnostic target** (not a model context limit). Checkup, session flags, dashboard KPIs, hourly spend charts, benchmark estimates,
 and configuration repair all use these values. A turn exactly at its provider target is within
 target. Mixed-provider charts compare each turn against its own provider target.
 
@@ -123,9 +138,7 @@ injects an escalation prompt at the 4th, 7th, and 10th edit.
 - Transcript data stays on this machine. The tool sends no telemetry.
 - The local cache stores metadata only: session titles, token counts, timestamps, models, tool
   names, and file paths. It never stores message text.
-- One network call exists: plan usage. It runs only when a Claude Code login exists on the machine.
-  It sends the plan auth token to `api.anthropic.com` and nowhere else. `--no-plan-usage` turns it
-  off.
+- Plan usage can contact Anthropic with a local Claude Code login, or the OpenCode Go usage endpoint with a local Go key. Keys go only to their own provider; `--no-plan-usage` disables network calls.
 - The server binds to `127.0.0.1` only. It rejects a `Host` header that is not loopback.
 
 ## Cache

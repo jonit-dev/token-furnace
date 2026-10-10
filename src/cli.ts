@@ -16,7 +16,7 @@ import { renderHtml } from "./render/html";
 import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
-import { planWeek } from "./services/usage-client";
+import { openCodeWeek, planWeek } from "./services/usage-client";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { runFixConfig, runSetup } from "./setup/agents";
 
@@ -29,13 +29,13 @@ const USAGE = `Usage: token-furnace [days] [options]
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
   days                 how many days back to look (default 7)
-  --source <agent>     all (default), claude, or codex
+  --source <agent>     all (default), claude, codex, or opencode
   --json               print the Report JSON and nothing else, for agents and scripts
   --full               the full text report (the old burn.py output)
   --html <path>        also write a self-contained HTML report
   --list-sources       each agent, its path and its transcript count
   --weekly-budget <M>  weekly budget in millions of weighted tokens
-  --no-plan-usage      never call api.anthropic.com for the subscription window (a saved reading is still used)
+  --no-plan-usage      never fetch subscription usage from Anthropic or OpenCode Go (a saved reading is still used)
   --no-cache           parse every file, write no cache
   serve [--port 8765]  live report on http://127.0.0.1:<port>, refreshed in the background
   fix-config          repair context and worker settings (backs up first; --include-depth optional)
@@ -167,10 +167,11 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
 
   const now = app.now();
   await app.reports.refresh(stderrProgress());
-  const plan = await planWeek(app.env, now, options.planUsage);
+  const [plan, goPlan] = await Promise.all([planWeek(app.env, now, options.planUsage), openCodeWeek(app.env, now, options.planUsage)]);
   const report = app.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: plan,
+    opencodeWeek: goPlan,
     now,
   });
   if (!report) {
