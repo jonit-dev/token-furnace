@@ -1,7 +1,7 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import type { ParsedFile, SourceFile, Turn, Wake } from "../core/model";
+import type { ParsedFile, SourceFile, Turn, Wake, Week } from "../core/model";
 import {
   classifyPrompt,
   isRead,
@@ -108,6 +108,52 @@ export class CodexSource implements AgentSource {
       wakes = [];
     }
     return { turns, title: null, badLines: bad };
+  }
+
+  /**
+   * Codex's 7-day window from the rate_limits it logs in each session; null when unknown. No
+   * network. burn.py:926
+   *
+   * Scans the newest rollouts until a live reading turns up: the most recently touched file is
+   * often a non-subscription (eval/tooling) session that logs no rate_limits at all.
+   */
+  week(now: Date): Week | null {
+    const files = [...this.files()].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 200);
+    for (const file of files) {
+      for (const line of tail(file.path, file.size)) {
+        if (!line.includes('"rate_limits"')) continue;
+        const record = jsonParse(line);
+        const limits = record?.payload?.rate_limits;
+        const week = [limits?.primary, limits?.secondary].find(
+          (w: any) => w && w.window_minutes === 10080,
+        );
+        const resets = epoch(week?.resets_at);
+        if (resets === null) continue;
+        if (resets <= now.getTime()) break; // this file's newest reading ended; try an older one
+        return {
+          start: new Date(resets - 7 * 86_400_000),
+          resets: new Date(resets),
+          used: Number(week.used_percent),
+        };
+      }
+    }
+    return null;
+  }
+}
+
+function epoch(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value * 1000 : null;
+}
+
+/** The last 256 KB of a rollout, newest line last, like burn.py:934. */
+function tail(path: string, size: number): string[] {
+  const handle = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(Math.min(size, 262_144));
+    const read = readSync(handle, buffer, 0, buffer.length, Math.max(size - buffer.length, 0));
+    return buffer.toString("utf8", 0, read).split("\n");
+  } finally {
+    closeSync(handle);
   }
 }
 

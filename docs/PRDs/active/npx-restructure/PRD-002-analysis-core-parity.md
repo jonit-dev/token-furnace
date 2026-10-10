@@ -1,6 +1,6 @@
 # PRD-002 — Port the analysis core with parity against Python
 
-**Status:** NOT STARTED
+**Status:** DONE
 **Priority:** P1 — the leak findings are the product. AC-1 proves the port changes no result.
 **Complexity:** 7 (HIGH)
 **Owner:** João
@@ -35,11 +35,11 @@ The analysis in `scripts/burn.py` is pure logic over turn dicts and config files
 
 ## Acceptance Criteria
 
-- [ ] AC-1 [local]: The parity test passes for `--source all`, `claude`, and `codex`, with and without `--weekly-budget`. proof: `npx vitest run test/parity.test.ts` — Evidence: pending.
-- [ ] AC-2 [local]: The parity fixture triggers all five session leaks and every config check in FR-6 and FR-7, so parity covers each branch. proof: assert in `test/parity.test.ts` that each issue title is present — Evidence: pending.
-- [ ] AC-3 [local]: Every assert in `scripts/test_burn.py` has a matching assert in `test/analysis.test.ts`, and the suite passes. proof: `npx vitest run test/analysis.test.ts` — Evidence: pending.
-- [ ] AC-4 [local]: `src/core/` has no `node:fs`, `node:os`, `process`, or `Date.now()` use. proof: `grep -rnE "node:fs|node:os|process\.|Date\.now" src/core` returns no lines — Evidence: pending.
-- [ ] AC-5 [local]: `Report` in `src/core/model.ts` has no `unknown` field left. proof: `grep -n unknown src/core/model.ts` returns no lines — Evidence: pending.
+- [x] AC-1 [local]: The parity test passes for `--source all`, `claude`, and `codex`, with and without `--weekly-budget`. proof: `npx vitest run test/parity.test.ts` — Evidence: 6 passed (2026-10-09); all five cases deep-equal burn.py with the clock frozen to `TF_PARITY_NOW`, floats compared to 1e-9.
+- [x] AC-2 [local]: The parity fixture triggers all five session leaks and every config check in FR-6 and FR-7, so parity covers each branch. proof: assert in `test/parity.test.ts` that each issue title is present — Evidence: 10 config lines (5 Claude + MEMORY.md + 4 Codex), 5 flag kinds, 15 issue titles asserted.
+- [x] AC-3 [local]: Every assert in `scripts/test_burn.py` has a matching assert in `test/analysis.test.ts`, and the suite passes. proof: `npx vitest run test/analysis.test.ts` — Evidence: 8 passed; `check_severity`, `check_last_24h`, `check_weekly_quota`, `check_config_notes`, `check_codex_week` and `main` all ported, including the 11-issue count.
+- [x] AC-4 [local]: `src/core/` has no `node:fs`, `node:os`, `process`, or `Date.now()` use. proof: `grep -rnE "node:fs|node:os|process\.|Date\.now" src/core` returns no lines — Evidence: 0 lines (2026-10-09); `src/core` imports only `./format`, `./flags`, `./pricing`, `./config-checks`, `./baseline`, `./burn`, `./issues` and `../model`.
+- [x] AC-5 [local]: `Report` in `src/core/model.ts` has no `unknown` field left. proof: `grep -n unknown src/core/model.ts` returns no lines — Evidence: 0 lines (2026-10-09); `budget`, `baseline`, `topSessions`, `config`, `tools` and `unpriced` all carry concrete types.
 
 ## Integration Ledger
 
@@ -51,19 +51,34 @@ The analysis in `scripts/burn.py` is pure logic over turn dicts and config files
 ## Execution Phases
 
 #### Phase 1: Parity harness first
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** `test/parity.test.ts`, `test/fixtures/build.ts`
 **Implementation:** Write the fixture builder and the Python side of the harness first. Make the test fail on a stub `buildReport`. Unset the env vars that `test_burn.py` `run()` unsets, so the developer's own settings do not leak in. Point `XDG_CACHE_HOME` at the temp dir.
 **Verification:** The test runs and fails on the stub only.
 
 #### Phase 2: Pricing, flags, config checks
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** `src/core/analyze/pricing.ts`, `flags.ts`, `config-checks.ts`
 **Implementation:** Port as they are, with the same constants and message strings. Config checks receive file contents and env values as arguments.
 **Verification:** `npx vitest run test/analysis.test.ts` — `check_config_notes` and `check_severity` ports pass.
 
 #### Phase 3: Report, burn, baseline, issues, view
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** `src/core/analyze/report.ts`, `burn.ts`, `baseline.ts`, `issues.ts`, `view.ts`, `src/sources/codex.ts` (`week()`)
 **Implementation:** Read `burn.py:527–952` and `1072–1497` fully first. Keep the issue texts and prompts byte for byte. Replace each `unknown` in `Report` with the real type.
 **Verification:** `npx vitest run test/parity.test.ts test/analysis.test.ts` — AC-1 to AC-5.
+
+## Delivery notes
+
+- `src/core/analyze/format.ts` was added. Python's `%.Nf` rounds the exact value of the double with
+  ties to even, and `Number.toFixed` does not, so the strings in the report and in every fix prompt
+  needed an exact-decimal formatter (`fixed`, `int0`).
+- The parity harness reads config files and the saved usage reading itself (`test/harness.ts`), which
+  is the I/O the core was given up. `ReportService` in PRD-003 should call the same functions.
+- `plan_week()` stays out of this PRD. `buildReport` takes `planWeek` as an input; the parity fixture
+  writes the `usage.json` that `plan_week()` reads, so both sides see the same weekly reading without
+  a network call.
+- Two deviations from a literal reading of the phase plan: `test/harness.ts` is a new file (Phase 1
+  named only `test/parity.test.ts` and `test/fixtures/build.ts`), and `report.ts` calls
+  `configChecks(input.live, config)` before the aggregates are finished, matching burn.py's
+  `config_checks` at the same point.

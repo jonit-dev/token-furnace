@@ -300,6 +300,21 @@ export interface Report {
   unpriced: [number, [string, number][]] | null;
 }
 
+/** One ranked leak or config problem, before report_view turns it into an Issue. */
+export interface RawIssue {
+  title: string;
+  fix: string;
+  why: string;
+  action: string;
+  /** A flag prefix, or the config title. */
+  kind: string;
+  source: Source | "all" | null;
+  share: number | null;
+  /** The sessions and flags that hit it. */
+  hits: [SessionRow, string][];
+  priority: Priority;
+}
+
 export interface Issue {
   title: string;
   fix: string;

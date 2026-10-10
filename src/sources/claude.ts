@@ -60,7 +60,8 @@ export class ClaudeSource implements AgentSource {
     let first: string | null = null;
     for (const line of lines) {
       const titled = line.includes('"customTitle"') || line.includes('"aiTitle"');
-      if (!titled && !first && !line.includes('"user"')) continue;
+      // Once `first` is set, later user lines are ignored: the first prompt is the title.
+      if (!titled && (first !== null || !line.includes('"user"'))) continue;
       const record = jsonParse(line);
       if (record === null) continue;
       if (titled) {
