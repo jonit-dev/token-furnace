@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compose, type App } from "../src/compose";
 import { MemorySessionRepository } from "../src/repo/memory-repo";
-import { buildFull } from "./fixtures/build";
+import { buildFull, saveUsageReading } from "./fixtures/build";
 import { fixedNow, harnessEnv, planWeek, tsReport } from "./harness";
 
 const now = fixedNow();
@@ -83,6 +83,7 @@ describe("getReport", () => {
     const withData = fixtureApp();
     withData.reports.refresh();
     const root2 = String(withData.env.CLAUDE_CONFIG_DIR);
+    saveUsageReading(root2, now);
     const opts = { weeklyBudget: null, now };
     expect(withData.reports.getReport(7, "claude", opts)?.burns.claude?.weekBurndown).toBeNull();
     expect(

@@ -83,7 +83,7 @@ async function build(app: App, options: ServeOptions, query: Record<string, unkn
   app.reports.refresh();
   return app.reports.getRaw(days, source, {
     weeklyBudget: options.weeklyBudget,
-    planWeek: options.planUsage ? await planWeek(app.env, now) : null,
+    planWeek: await planWeek(app.env, now, options.planUsage),
     now,
   });
 }

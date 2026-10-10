@@ -28,7 +28,7 @@ Where the token budget actually went. Reads local Claude Code and Codex transcri
   --html <path>        also write a self-contained HTML report
   --list-sources       each agent, its path and its transcript count
   --weekly-budget <M>  weekly budget in millions of weighted tokens
-  --plan-usage         read the subscription window from api.anthropic.com (opt-in network call)
+  --plan-usage         refresh the subscription window from api.anthropic.com (opt-in network call; a saved reading is always used)
   --no-cache           parse every file, write no cache
   serve [--port 8765]  live report on http://127.0.0.1:<port>, rebuilt per request
   -h, --help           this text
@@ -110,7 +110,7 @@ export async function main(argv: string[] = process.argv.slice(2), app: App = co
 
   const now = app.now();
   app.reports.refresh();
-  const plan = options.planUsage ? await planWeek(app.env, now) : null;
+  const plan = await planWeek(app.env, now, options.planUsage);
   const report = app.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: plan,

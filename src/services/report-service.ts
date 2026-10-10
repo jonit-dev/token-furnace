@@ -8,7 +8,7 @@ import type { AgentSource, Env } from "../sources/agent-source";
 export interface ReportOptions {
   /** Millions of weighted tokens, or null. */
   weeklyBudget: number | null;
-  /** The subscription window, read by the caller. Only --plan-usage asks for it. */
+  /** The subscription window, read by the caller from the saved reading, or the network with --plan-usage. */
   planWeek?: Week | null;
   /** The clock. Defaults to now, so a test can freeze it. */
   now?: Date;

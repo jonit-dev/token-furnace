@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/cli";
 import { compose } from "../src/compose";
-import { assistant, buildFull, user } from "./fixtures/build";
+import { assistant, buildFull, buildWeeklyQuota, user } from "./fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "./harness";
 
 const HOUR = 3_600_000;
@@ -136,8 +136,23 @@ describe("network", () => {
     const run1 = await run([], leaksRoot);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(run1.code).toBe(1);
-    // Without the opt-in the report says the subscription reading was unavailable.
+    // No saved reading and no opt-in: the report says the subscription reading was unavailable.
     expect(run1.out).toContain("the subscription usage was unavailable");
+  });
+
+  it("uses a saved subscription reading without --plan-usage and without a call", async () => {
+    const fetchSpy = vi.fn(() => {
+      throw new Error("fetch must not be called");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const root = mkdtempSync(join(tmpdir(), "tf-saved-"));
+    buildWeeklyQuota(root, now);
+    const run1 = await run(["--json"], root);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const report = JSON.parse(run1.out);
+    // The weekly reading gives a percent-per-hour pace, not the 7-day token average.
+    expect(report.burns.claude.weekBurndown).not.toBeNull();
+    expect(report.burns.claude.goalText ?? JSON.stringify(report.burns.claude)).not.toContain("unavailable");
   });
 });
 

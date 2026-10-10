@@ -20,12 +20,14 @@ export function usageCachePath(env: Env): string {
 }
 
 /**
- * The subscription's 7-day window, or null when unavailable. The login token goes to
- * api.anthropic.com and nowhere else, so only --plan-usage calls this. Any failure keeps the last
- * good reading.
+ * The subscription's 7-day window, or null when unavailable. The saved reading is always used: it
+ * is a local file and a status line can feed it. The login token goes to api.anthropic.com and
+ * nowhere else, and only when `network` is true (--plan-usage). Any failure keeps the last good
+ * reading.
  */
-export async function planWeek(env: Env, now: Date): Promise<Week | null> {
+export async function planWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
   const at = now.getTime() / 1000;
+  if (!network) return toWeek(readJson(usageCachePath(env))?.seven_day ?? null, now);
   if (at - lastTry < RETRY_SECONDS) return lastWeek;
   lastTry = at;
 

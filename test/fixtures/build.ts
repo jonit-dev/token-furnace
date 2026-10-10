@@ -110,16 +110,6 @@ export function buildFull(root: string, now: Date): Fixture {
     if (i % 5 === 0) lines.push(user(when, "<task-notification>done</task-notification>"));
     lines.push(assistant(when, 400_000, [["Bash", "cd /x && sed -n 1,9p f"]]));
   }
-  // A saved plan-usage reading, so build_report's plan_week() reads it instead of the network.
-  mkdirSync(join(root, "token-furnace"), { recursive: true });
-  writeFileSync(
-    join(root, "token-furnace", "usage.json"),
-    JSON.stringify({
-      fetched: now.getTime() / 1000,
-      seven_day: { utilization: 40, resets_at: now.getTime() / 1000 + 3 * 86_400 },
-    }),
-  );
-
   const leak = join(project, "aaaaaaaa-leak.jsonl");
   write(leak, lines);
 
@@ -208,4 +198,16 @@ export function buildCodexWeek(root: string, used: number, resetsAtEpochSeconds:
   const path = join(root, "sessions", "2026", "rollout-x.jsonl");
   write(path, [codexRateLimits(used, resetsAtEpochSeconds)]);
   return path;
+}
+
+/** A saved subscription reading, the file plan_week() reads: 40% used, resetting in 3 days. */
+export function saveUsageReading(root: string, now: Date): void {
+  mkdirSync(join(root, "token-furnace"), { recursive: true });
+  writeFileSync(
+    join(root, "token-furnace", "usage.json"),
+    JSON.stringify({
+      fetched: now.getTime() / 1000,
+      seven_day: { utilization: 40, resets_at: now.getTime() / 1000 + 3 * 86_400 },
+    }),
+  );
 }

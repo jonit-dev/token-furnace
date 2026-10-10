@@ -3,21 +3,20 @@
 import { request } from "node:http";
 import { connect } from "node:net";
 import { networkInterfaces } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { compose } from "../src/compose";
 import { startServer, type LiveServer } from "../src/server";
-import { buildFull } from "./fixtures/build";
+import { buildFull, saveUsageReading } from "./fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "./harness";
 
 const now = fixedNow();
 const root = mkdtempSync(join(tmpdir(), "tf-server-"));
 buildFull(root, now);
-// No saved subscription reading: the default run makes no network call and has no Claude week.
-// Codex's week still comes from the rate_limits in its own rollout.
-rmSync(join(root, "token-furnace"), { recursive: true });
+// A saved subscription reading: the default run makes no network call and still has a Claude week.
+saveUsageReading(root, now);
 const env = { ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString() };
 const app = compose(env);
 
@@ -66,9 +65,9 @@ describe("serve", () => {
     const response = await get("/api/report");
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual(tsReport(env, now, 7, null, "all"));
-    // No plan-usage call by default; Codex's own rate_limits still give it a week.
+    // No plan-usage call by default; the saved reading gives Claude a week, rate_limits gives Codex's.
     const report = JSON.parse(response.body);
-    expect(report.burns.claude.weekBurndown).toBeNull();
+    expect(report.burns.claude.weekBurndown).not.toBeNull();
     expect(report.burns.codex.weekBurndown).not.toBeNull();
   });
 
