@@ -1,6 +1,6 @@
 # Architecture — npx restructure
 
-**Status:** PROPOSED
+**Status:** IMPLEMENTED — archived; npm publish pending the package owner.
 **Date:** 2026-10-09
 
 ## Goal

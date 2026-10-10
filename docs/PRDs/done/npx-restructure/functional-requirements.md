@@ -1,6 +1,6 @@
 # Functional requirements — npx restructure
 
-**Status:** PROPOSED
+**Status:** IMPLEMENTED — archived; npm publish pending the package owner.
 **Date:** 2026-10-09
 
 Each requirement names the PRD that delivers it. "Same as Python" means the behavior of `scripts/burn.py` at commit `f3442b5`.

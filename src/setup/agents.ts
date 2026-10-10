@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
 import type { Env } from "../sources/agent-source";
 
 export interface SetupOptions {
@@ -54,45 +55,53 @@ function collapseHome(path: string, home: string): string {
   return path;
 }
 
-/** Parses TOML value from a string, handling basic strings, ints, booleans, and sections. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return Boolean(v) && typeof v === "object" && !Array.isArray(v);
+}
+
+/** Resolve TOML keys through the parser so quoted keys and comments cannot hide existing settings. */
 function getTomlValue(text: string, table: string, key: string): string | undefined {
-  const lines = text.split("\n");
-  let curTable = "";
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (trimmed.startsWith("#") || !trimmed) continue;
-    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      curTable = trimmed.slice(1, -1).trim();
-      continue;
-    }
-    if (curTable === table) {
-      const eq = trimmed.indexOf("=");
-      if (eq !== -1) {
-        const k = trimmed.slice(0, eq).trim();
-        if (k === key) {
-          const v = trimmed.slice(eq + 1).trim();
-          return v;
-        }
-      }
-    }
+  let data: Record<string, unknown>;
+  try {
+    data = parseToml(text) as Record<string, unknown>;
+  } catch {
+    return undefined;
   }
-  return undefined;
+  const scope = table ? data[table] : data;
+  if (!isPlainObject(scope)) return undefined;
+  const v = scope[key];
+  if (v === undefined) return undefined;
+  return typeof v === "string" ? JSON.stringify(v) : String(v);
+}
+
+/** The unquoted name of a `[table]` header line, or null when the line is not one. */
+function tableHeaderName(line: string): string | null {
+  const t = line.trim();
+  if (!t.startsWith("[") || t.startsWith("[[")) return null;
+  const close = t.indexOf("]");
+  if (close === -1) return null;
+  let name = t.slice(1, close).trim();
+  if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) {
+    name = name.slice(1, -1);
+  }
+  return name;
 }
 
 function setTomlValue(content: string, table: string, key: string, val: string): string {
   const lines = content.length > 0 ? content.split("\n") : [];
   // Normalize lines to retain original endings if needed or standard \n
   const linesWithNl = lines.map((l) => `${l}\n`);
+  const assignment = `${key} = ${val}\n`;
   const hdr = `[${table}]`;
   if (table) {
-    const idx = linesWithNl.findIndex((l) => l.trim() === hdr);
+    const idx = linesWithNl.findIndex((l) => tableHeaderName(l) === table);
     if (idx === -1) {
       if (linesWithNl.length > 0 && !linesWithNl[linesWithNl.length - 1].endsWith("\n")) {
         linesWithNl.push("\n");
       }
-      linesWithNl.push("\n", `${hdr}\n`, `${key} = ${val}\n`);
+      linesWithNl.push("\n", `${hdr}\n`, assignment);
     } else {
-      linesWithNl.splice(idx + 1, 0, `${key} = ${val}\n`);
+      linesWithNl.splice(idx + 1, 0, assignment);
     }
   } else {
     let i = linesWithNl.findIndex((l) => l.trimStart().startsWith("["));
@@ -101,7 +110,7 @@ function setTomlValue(content: string, table: string, key: string, val: string):
     while (i > 0 && !linesWithNl[i - 1].trim()) {
       i--;
     }
-    linesWithNl.splice(i, 0, `${key} = ${val}\n`, ...(atTable ? [] : ["\n"]));
+    linesWithNl.splice(i, 0, assignment, ...(atTable ? [] : ["\n"]));
   }
   return linesWithNl.join("");
 }
@@ -503,8 +512,6 @@ export function runSetup(
   const claudeSettingsPath = join(claudeDir, "settings.json");
   let claudeCfg: any = {};
   let claudeJsonMalformed = false;
-  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
-    Boolean(v) && typeof v === "object" && !Array.isArray(v);
   if (existsSync(claudeSettingsPath)) {
     try {
       const parsed = JSON.parse(readFileSync(claudeSettingsPath, "utf8"));
@@ -597,11 +604,19 @@ export function runSetup(
 
   const codexConfigPath = join(codexDir, "config.toml");
   let codexToml = "";
+  let codexTomlInvalid = false;
   if (existsSync(codexConfigPath)) {
     codexToml = readFileSync(codexConfigPath, "utf8");
+    try {
+      parseToml(codexToml);
+    } catch {
+      codexTomlInvalid = true;
+      warn("codex config.toml is not valid TOML — left unchanged");
+    }
   }
 
   const setCodexIfUnset = (table: string, key: string, tomlVal: string, humanVal: string) => {
+    if (codexTomlInvalid) return;
     const cur = getTomlValue(codexToml, table, key);
     const label = table ? `${table}.${key}` : key;
     if (cur !== undefined) {
@@ -614,7 +629,17 @@ export function runSetup(
       return;
     }
     if (apply) {
-      codexToml = setTomlValue(codexToml, table, key, tomlVal);
+      const candidate = setTomlValue(codexToml, table, key, tomlVal);
+      // shortcut: unsupported table layouts are skipped; use a preserving editor if they need support.
+      try {
+        parseToml(candidate);
+        // An apparent table header can be inside a multiline string.
+        if (getTomlValue(candidate, table, key) !== tomlVal) throw new Error("Setting was not inserted");
+      } catch {
+        warn(`codex ${label}: cannot set without risking config — left alone`);
+        return;
+      }
+      codexToml = candidate;
       writeConfig(codexConfigPath, codexToml);
       did(`codex ${label} = ${tomlVal}`);
     } else {

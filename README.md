@@ -44,6 +44,8 @@ Options:
 ## Setup and hook
 
 `token-furnace setup` prints the planned changes and changes no file. Add `--apply` to write them.
+Existing values and comments are preserved. Invalid or unsupported Codex settings are skipped
+with a warning.
 `--verify` checks an existing install and exits 1 on any failure. `--rollback` restores the most
 recent backup. `--aggressive` also sets the flagged-risky subagent spawn depth; verify that
 subagents still spawn after any Claude Code upgrade.
@@ -96,6 +98,12 @@ Version 0.1.0. The `setup` and `hook` commands are integrated and tested (PRD-00
 is a React + Vite + TypeScript single-file build (PRD-005). `--html` writes one file and `serve`
 serves the same page. Both load no external URL: no CDN `<script>` or `<link>`.
 
-The Node.js 24 smoke test passed: `npm pack`, a temporary install, and `npx` runs of the CLI,
-`--html`, and `serve` all matched. Node.js 22.13 is still under investigation. Publishing to npm
-is pending the package owner.
+The package smoke test passes on both Node.js 22.13 and Node.js 24.16: `npm pack`, a temporary
+install, and `npx --no-install` runs of the CLI (`--json`), `--html`, and `serve` all match the
+expected totals and routes. The tarball includes `dist/scan-worker.js` and `dist/dashboard.html`. The package file allowlist
+contains `dist/`, `SKILL.md`, `references/`, and `README.md`, plus npm metadata and the license.
+It contains no `.py`, `.sh`, test, or fixture files.
+
+The full Vitest suite (86 tests) plus the root and web typechecks and the build pass. The four CLI
+paths (cold workers, warm cache, inline main-thread, and `--no-cache` workers) return identical
+`Report` JSON. Publishing to npm is pending the package owner.

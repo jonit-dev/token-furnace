@@ -1,6 +1,6 @@
 # Data contracts and cache schema — npx restructure
 
-**Status:** PROPOSED
+**Status:** IMPLEMENTED — archived; npm publish pending the package owner.
 **Date:** 2026-10-09
 
 All types live in `src/core/model.ts`. The server and `web/` import the same `Report` type. The Python names are in brackets where they differ.

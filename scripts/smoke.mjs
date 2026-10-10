@@ -28,10 +28,12 @@ const CLEARED = [
   "CLAUDE_CODE_SUBAGENT_MODEL",
   "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY",
   "TOKEN_FURNACE_WEEKLY_BUDGET",
+  // Leaked by wrappers such as `npm exec --package=node@22.13.0`: npx would treat it as a package to install.
+  "npm_config_package",
 ];
 
 const failures = [];
-const detailOf = (error) => String(error?.message ?? error).replace(/\s+/g, " ").slice(0, 300);
+const detailOf = (error) => String(error?.message ?? error).replace(/\s+/g, " ").slice(0, 1500);
 
 function check(ok, label, detail) {
   if (ok) console.log(`ok   ${label}`);
@@ -222,6 +224,7 @@ try {
 
   /** npm run from a temp HOME and cache, so the install writes nothing outside the temp root. */
   const npmEnv = { ...process.env, HOME: join(root, "home"), XDG_CACHE_HOME: join(root, "cache"), npm_config_cache: npmCache, npm_config_update_notifier: "false" };
+  for (const key of CLEARED) delete npmEnv[key];
 
   const inherited = process.env.npm_node_execpath;
   if (inherited && resolve(inherited) !== resolve(process.execPath)) {
@@ -285,7 +288,7 @@ try {
   ]
     .map((match) => match[1])
     .filter((url) => /^(?:https?:)?\/\//i.test(url));
-  check(external.length === 0, "html has no external script/link assets (PRD-005 React bundle pending)", external.join(", "));
+  check(external.length === 0, "html has no external script/link assets", external.join(", "));
 
   server = spawn(process.execPath, [cliJs, "serve", "--port", "0", "--no-plan-usage"], { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
   const base = await waitForUrl(server);

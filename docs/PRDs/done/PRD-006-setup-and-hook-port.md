@@ -49,3 +49,5 @@
 Integration verification (2026-10-09, Node 24.16.0): typecheck, build and all 71 tests pass. Setup/hook dispatch runs before SQLite composition; built setup dry-run creates no cache or config files. Installer checks cover safe shell quoting, legacy hook replacement, instruction boundaries and malformed configuration preservation.
 
 Hook input regression: both one multiline JSON payload per invocation and newline-delimited batch payloads emit only at edits 4/7/10. All three focused hook tests pass.
+
+Release integration correction (2026-10-10): Codex configuration now uses the TOML parser to recognize quoted keys and validates each proposed edit before writing. Existing comments/settings survive, invalid TOML stays unchanged, and unsupported inline/dotted layouts are skipped with a warning. A candidate must also resolve the intended value, so table-like text inside multiline strings cannot be edited accidentally. Four regressions cover these cases; all 17 setup tests and the integrated 86-test suite pass with root/web typecheck and build. All setup checks use temporary HOME directories.

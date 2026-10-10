@@ -24,5 +24,7 @@ First release of `token-furnace` as one npm package.
 - Publishing to npm is pending the package owner.
 - The dashboard is a React + Vite + TypeScript single-file build (PRD-005). `--html` and `serve`
   both use it, with no external CDN links.
-- The Node.js 24 smoke test passed: `npm pack`, a temporary install, and `npx` runs of the CLI,
-  `--html`, and `serve` all matched. Node.js 22.13 is still under investigation.
+- The package smoke test passes on both Node.js 22.13 and Node.js 24.16: `npm pack`, a temporary
+  install, and `npx --no-install` runs of the CLI, `--html`, and `serve` all match. The tarball
+  contains the allowed application files, npm metadata and the license.
+- The full Vitest suite (86 tests), the root and web typechecks, and the build pass.

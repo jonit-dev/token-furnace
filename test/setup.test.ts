@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli";
 import { compose } from "../src/compose";
 
@@ -375,4 +376,73 @@ describe("token-furnace setup", () => {
     expect(existsSync(join(testHome, ".claude"))).toBe(false);
     expect(existsSync(join(testHome, ".codex"))).toBe(false);
   });
+
+  it("quoted keys and commented table headers are preserved, not duplicated", async () => {
+    const app = appFor();
+    const codexConfig = join(testHome, ".codex", "config.toml");
+    mkdirSync(join(testHome, ".codex"), { recursive: true });
+    const initial = '"model_verbosity" = "high"\n[agents] # existing agents\nfoo = "keep"\n';
+    writeFileSync(codexConfig, initial);
+
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+
+    const after = readFileSync(codexConfig, "utf8");
+    // The candidate parses, so there is no duplicate key and no second [agents] table.
+    const parsed = parseToml(after) as Record<string, any>;
+    expect(parsed.model_verbosity).toBe("high");
+    expect(parsed.tool_output_token_limit).toBe(10000);
+    expect(parsed.agents.foo).toBe("keep");
+    expect(parsed.agents.max_concurrent_threads_per_session).toBe(3);
+    expect(parsed.agents.default_subagent_reasoning_effort).toBe("medium");
+    // Comments and the quoted existing key survive verbatim.
+    expect(after).toContain("# existing agents");
+    expect(after).toContain('"model_verbosity" = "high"');
+    expect(after.match(/model_verbosity/g)?.length).toBe(1);
+    expect(after.match(/^\[agents\]/gm)?.length).toBe(1);
+
+    // Idempotent: a second apply changes nothing.
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    expect(readFileSync(codexConfig, "utf8")).toBe(after);
+  });
+
+  it("invalid existing codex TOML is left byte-for-byte unchanged", async () => {
+    const app = appFor();
+    const codexConfig = join(testHome, ".codex", "config.toml");
+    mkdirSync(join(testHome, ".codex"), { recursive: true });
+    const bad = 'model_verbosity = "low\n[agents\nfoo = "keep"\n';
+    writeFileSync(codexConfig, bad);
+
+    // Both dry run and apply must not touch an unparseable config.
+    expect(await main(["setup"], app)).toBe(0);
+    expect(readFileSync(codexConfig, "utf8")).toBe(bad);
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    expect(readFileSync(codexConfig, "utf8")).toBe(bad);
+  });
+
+  it("an unsupported inline agents table is skipped with a warning, not corrupted", async () => {
+    const app = appFor();
+    const codexConfig = join(testHome, ".codex", "config.toml");
+    mkdirSync(join(testHome, ".codex"), { recursive: true });
+    writeFileSync(codexConfig, 'agents = { foo = "keep" }\n');
+
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+
+    const after = readFileSync(codexConfig, "utf8");
+    const parsed = parseToml(after) as Record<string, any>;
+    expect(parsed.agents.foo).toBe("keep");
+    // No [agents] table was appended (that would not parse): the shape is left alone.
+    expect(parsed.agents.max_concurrent_threads_per_session).toBeUndefined();
+    expect(after).not.toContain("[agents]");
+  });
+  it("does not insert settings into a multiline string containing a table header", async () => {
+    const app = appFor();
+    const codexConfig = join(testHome, ".codex", "config.toml");
+    mkdirSync(join(testHome, ".codex"), { recursive: true });
+    const initial = 'note = """\n[agents]\nkeep this text\n"""\n';
+    writeFileSync(codexConfig, initial);
+
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    expect(readFileSync(codexConfig, "utf8")).toBe(initial);
+  });
+
 });
