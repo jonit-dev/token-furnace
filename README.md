@@ -9,6 +9,14 @@ Where the token budget actually went. `token-furnace` reads your local Claude Co
 transcripts, finds token leaks, and shows the result in your terminal, as JSON for agents, and in a
 local dashboard. Transcript data never leaves your machine.
 
+![Token Furnace dashboard: combustion rate gauge, weekly quota projection, target cards, and hourly spend by context](docs/screenshots/dashboard.png)
+
+Each card has a target. A red dot means the target is missed and a green dot means it is met.
+
+| Act now and active sessions | Checkup |
+| --- | --- |
+| ![Act now fixes and the active sessions table with burn rate, burn share, context, and flags](docs/screenshots/act-now-sessions.png) | ![Checkup table judging each setting and habit per provider against its target](docs/screenshots/checkup.png) |
+
 ## Quick start
 
 Requires **Node.js 22.13 or newer** and local Claude Code or Codex transcripts.
