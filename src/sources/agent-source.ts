@@ -1,5 +1,5 @@
 import { readdirSync } from "node:fs";
-import type { ParsedFile, Source, SourceFile } from "../core/model";
+import type { ParsedFile, Source, SourceFile, Week } from "../core/model";
 
 /** Read-only adapter for one agent's transcripts on disk. */
 export interface AgentSource {
@@ -8,6 +8,16 @@ export interface AgentSource {
   root(): string;
   files(): SourceFile[];
   parse(path: string): ParsedFile;
+  /** The agent's own directory: CLAUDE_CONFIG_DIR or ~/.claude, CODEX_HOME or ~/.codex. */
+  base(): string;
+  /** The directory the agent uses when its env var is unset. */
+  home(): string;
+  /** Raw text of a file in the agent's own directory, or null when it is not there. */
+  readFile(name: string): string | null;
+  /** The agent's 7-day usage window from local data, when it logs one. */
+  week?(now: Date): Week | null;
+  /** MEMORY.md indexes the agent loads, with their line counts. Claude only. */
+  memoryIndexes?(): { path: string; lines: number }[];
 }
 
 export type Env = Record<string, string | undefined>;

@@ -1,8 +1,8 @@
 import { defineConfig } from "tsup";
 
-// PRD-003 narrows `entry` to src/cli.ts once the binary exists.
+// The binary is dist/cli.js; the server and the renderers come with it in the same bundle.
 export default defineConfig({
-  entry: ["src/**/*.ts"],
+  entry: ["src/cli.ts"],
   format: ["esm"],
   target: "node22",
   platform: "node",

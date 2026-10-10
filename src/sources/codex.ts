@@ -12,6 +12,7 @@ import {
   type AgentSource,
   type Env,
 } from "./agent-source";
+import { lines } from "./lines";
 
 const ROLLOUT = /^rollout-.*\.jsonl$/;
 
@@ -21,8 +22,20 @@ export class CodexSource implements AgentSource {
 
   constructor(private readonly env: Env) {}
 
-  private base(): string {
+  base(): string {
     return this.env.CODEX_HOME || join(this.env.HOME || homedir(), ".codex");
+  }
+
+  home(): string {
+    return join(this.env.HOME || homedir(), ".codex");
+  }
+
+  readFile(name: string): string | null {
+    try {
+      return readFileSync(join(this.base(), name), "utf8");
+    } catch {
+      return null;
+    }
   }
 
   root(): string {
@@ -42,7 +55,6 @@ export class CodexSource implements AgentSource {
    * the difference. Reasoning tokens bill as output.
    */
   parse(path: string): ParsedFile {
-    const lines = readLines(path);
     let project = "?";
     let session = basename(path);
     let model = "";
@@ -52,7 +64,7 @@ export class CodexSource implements AgentSource {
     const turns: Turn[] = [];
     let bad = 0;
 
-    for (const line of lines) {
+    for (const line of lines(path)) {
       const record = jsonParse(line);
       if (record === null) {
         if (line.trim() !== "") bad += 1;
@@ -120,7 +132,7 @@ export class CodexSource implements AgentSource {
   week(now: Date): Week | null {
     const files = [...this.files()].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 200);
     for (const file of files) {
-      for (const line of tail(file.path, file.size)) {
+      for (const line of tail(file.path, file.size).reverse()) {
         if (!line.includes('"rate_limits"')) continue;
         const record = jsonParse(line);
         const limits = record?.payload?.rate_limits;
@@ -145,7 +157,7 @@ function epoch(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value * 1000 : null;
 }
 
-/** The last 256 KB of a rollout, newest line last, like burn.py:934. */
+/** The last 256 KB of a rollout, oldest line first; callers walk it newest first, like burn.py:936. */
 function tail(path: string, size: number): string[] {
   const handle = openSync(path, "r");
   try {
@@ -171,8 +183,4 @@ function walk(dir: string, out: SourceFile[]): void {
       continue;
     }
   }
-}
-
-function readLines(path: string): string[] {
-  return readFileSync(path, "utf8").split("\n");
 }

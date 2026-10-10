@@ -14,14 +14,18 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node --input-type=module -e \"import { copyFileSync } from 'node:fs'; copyFileSync('web/legacy/dashboard.html', 'dist/dashboard.html')\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^24.10.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "express": "^5.3.0"
   }
 }

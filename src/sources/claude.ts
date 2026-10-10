@@ -12,6 +12,7 @@ import {
   type AgentSource,
   type Env,
 } from "./agent-source";
+import { lines } from "./lines";
 
 /** Claude Code transcripts under $CLAUDE_CONFIG_DIR/projects (default ~/.claude). burn.py:122-211 */
 export class ClaudeSource implements AgentSource {
@@ -19,8 +20,38 @@ export class ClaudeSource implements AgentSource {
 
   constructor(private readonly env: Env) {}
 
-  private base(): string {
+  /** CLAUDE_CONFIG_DIR, or ~/.claude. burn.py:122 */
+  base(): string {
     return this.env.CLAUDE_CONFIG_DIR || join(this.env.HOME || homedir(), ".claude");
+  }
+
+  home(): string {
+    return join(this.env.HOME || homedir(), ".claude");
+  }
+
+  readFile(name: string): string | null {
+    try {
+      return readFileSync(join(this.base(), name), "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every MEMORY.md under projects, with its line count. burn.py:502 */
+  memoryIndexes(): { path: string; lines: number }[] {
+    const root = this.root();
+    const out: { path: string; lines: number }[] = [];
+    for (const project of readDirSafe(root)) {
+      const path = join(root, project, "memory", "MEMORY.md");
+      let text: string | null = null;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        continue;
+      }
+      out.push({ path, lines: countLines(text) });
+    }
+    return out;
   }
 
   root(): string {
@@ -45,52 +76,41 @@ export class ClaudeSource implements AgentSource {
     return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
+  /**
+   * One streaming pass: turns, title and bad lines together. burn.py:141, 168
+   *
+   * A transcript can reach 300 MB, so the file is never held in memory.
+   */
   parse(path: string): ParsedFile {
-    const lines = readLines(path);
-    return {
-      turns: this.turns(path, lines),
-      title: this.title(lines),
-      badLines: badLines(lines),
-    };
-  }
-
-  /** The session's latest custom or generated title, else its first prompt, or null. burn.py:141 */
-  private title(lines: string[]): string | null {
-    let title: string | null = null;
-    let first: string | null = null;
-    for (const line of lines) {
-      const titled = line.includes('"customTitle"') || line.includes('"aiTitle"');
-      // Once `first` is set, later user lines are ignored: the first prompt is the title.
-      if (!titled && (first !== null || !line.includes('"user"'))) continue;
-      const record = jsonParse(line);
-      if (record === null) continue;
-      if (titled) {
-        const value = record.customTitle || record.aiTitle;
-        if (value) title = String(value);
-      } else if (record.type === "user" && !record.isMeta) {
-        const content = record.message?.content;
-        if (typeof content === "string" && !content.startsWith("<local-command")) {
-          const command = /<command-name>(.*?)<\/command-name>/.exec(content);
-          const args = /<command-args>(.*?)<\/command-args>/s.exec(content);
-          const text = command ? `${command[1]} ${args ? args[1] : ""}` : content;
-          first = text.split(/\s+/).join(" ").trim().slice(0, 80) || null;
-        }
-      }
-    }
-    return title ?? first;
-  }
-
-  /** burn.py:168 */
-  private turns(path: string, lines: string[]): Turn[] {
     // The directory name encodes the whole path; the record's cwd names the project.
     let project = basename(dirname(path));
     const session = basename(path).slice(0, -6);
     const turns: Turn[] = [];
     let wakes: Wake[] = [];
-    for (const line of lines) {
-      if (!candidate(line)) continue;
+    let title: string | null = null;
+    let first: string | null = null;
+    let bad = 0;
+
+    for (const line of lines(path)) {
+      const titled = line.includes('"customTitle"') || line.includes('"aiTitle"');
+      const isCandidate = candidate(line);
+      const isUser = line.includes('"user"');
+      // Once `first` is set, later user lines are ignored: the first prompt is the title.
+      const wantsTitle = titled || (first === null && isUser);
+      if (!wantsTitle && !isCandidate) continue;
       const record = jsonParse(line);
-      if (record === null) continue;
+      if (record === null) {
+        if (titled || isCandidate) bad += 1; // a bad line is counted once, never fatal
+        continue;
+      }
+      if (titled) {
+        const value = record.customTitle || record.aiTitle;
+        if (value) title = String(value);
+      }
+      if (wantsTitle && !titled && record.type === "user" && !record.isMeta) {
+        first = userTitle(record) ?? first;
+      }
+      if (!isCandidate) continue;
       project = basename(String(record.cwd || "").replace(/\/+$/, "")) || project;
       if (record.type === "user") {
         const kind = userWake(record);
@@ -98,53 +118,67 @@ export class ClaudeSource implements AgentSource {
         continue;
       }
       if (record.type !== "assistant") continue;
-      const when = parseTime(record.timestamp);
-      if (when === null) continue;
-      const message = record.message || {};
-      const usage = message.usage;
-      if (!usage || Object.keys(usage).length === 0) continue;
-      const calls = (message.content || []).filter(
-        (block: any) => block && typeof block === "object" && block.type === "tool_use",
-      );
-      turns.push({
-        source: "claude",
-        project,
-        session,
-        model: String(message.model ?? ""),
-        when,
-        baseIn: num(usage.input_tokens),
-        cacheRead: num(usage.cache_read_input_tokens),
-        cacheWrite: num(usage.cache_creation_input_tokens),
-        output: num(usage.output_tokens),
-        tools: calls.map((block: any) => String(block.name ?? "")),
-        reads: calls.filter((block: any) => isRead(block.name, block.input?.command)).length,
-        wakes,
-      });
-      wakes = [];
+      const turn = assistantTurn(record, project, session, wakes);
+      if (turn) {
+        turns.push(turn);
+        wakes = [];
+      }
     }
-    return turns;
+    return { turns, title: title ?? first, badLines: bad };
   }
 }
 
-function readLines(path: string): string[] {
-  return readFileSync(path, "utf8").split("\n");
+/** The session title from a user record, or null. burn.py:141 */
+function userTitle(record: Record<string, any>): string | null {
+  const content = record.message?.content;
+  if (typeof content !== "string" || content.startsWith("<local-command")) return null;
+  const command = /<command-name>(.*?)<\/command-name>/.exec(content);
+  const args = /<command-args>(.*?)<\/command-args>/s.exec(content);
+  const text = command ? `${command[1]} ${args ? args[1] : ""}` : content;
+  return text.split(/\s+/).join(" ").trim().slice(0, 80) || null;
+}
+
+/** One assistant record as a Turn, or null when it carries no usage. burn.py:168 */
+function assistantTurn(
+  record: Record<string, any>,
+  project: string,
+  session: string,
+  wakes: Wake[],
+): Turn | null {
+  const when = parseTime(record.timestamp);
+  if (when === null) return null;
+  const message = record.message || {};
+  const usage = message.usage;
+  if (!usage || Object.keys(usage).length === 0) return null;
+  const calls = (message.content || []).filter(
+    (block: any) => block && typeof block === "object" && block.type === "tool_use",
+  );
+  return {
+    source: "claude",
+    project,
+    session,
+    model: String(message.model ?? ""),
+    when,
+    baseIn: num(usage.input_tokens),
+    cacheRead: num(usage.cache_read_input_tokens),
+    cacheWrite: num(usage.cache_creation_input_tokens),
+    output: num(usage.output_tokens),
+    tools: calls.map((block: any) => String(block.name ?? "")),
+    reads: calls.filter((block: any) => isRead(block.name, block.input?.command)).length,
+    wakes,
+  };
+}
+
+/** Python counts lines by iterating the file, so a last line without a newline still counts. */
+function countLines(text: string): number {
+  const parts = text.split("\n");
+  return parts[parts.length - 1] === "" ? parts.length - 1 : parts.length;
 }
 
 /** A line the Claude parsers look at: an assistant record, or a user record without a tool result. */
 function candidate(line: string): boolean {
   const isUser = line.includes('"user"') && !line.includes('"tool_result"');
   return line.includes('"assistant"') || isUser;
-}
-
-/** Transcript lines a parser tried to read and could not. A bad line never stops the scan. */
-function badLines(lines: string[]): number {
-  let bad = 0;
-  for (const line of lines) {
-    const titled = line.includes('"customTitle"') || line.includes('"aiTitle"');
-    if (!titled && !candidate(line)) continue;
-    if (jsonParse(line) === null) bad += 1;
-  }
-  return bad;
 }
 
 /** What a user record means, or null for harness noise. burn.py:131 */

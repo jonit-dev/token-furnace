@@ -1,6 +1,6 @@
 # PRD-003 — CLI, Express server, and cutover from `burn.py`
 
-**Status:** NOT STARTED
+**Status:** DONE
 **Priority:** P1 — after this PRD the tool runs on Node only, and the Python is gone.
 **Complexity:** 6 (MEDIUM)
 **Owner:** João
@@ -28,12 +28,12 @@
 
 ## Acceptance Criteria
 
-- [ ] AC-1 [local]: `token-furnace --json` on the fixture prints JSON that equals `toView(buildReport(...))`, and nothing else on stdout. proof: `npx vitest run test/cli.test.ts` — Evidence: pending.
-- [ ] AC-2 [local]: The default command prints the same verdict text as `burn.py --doctor` on the same fixture (captured into the test before Python is deleted). It exits 1 with leaks, 1 with no data, and 0 on a clean fixture. proof: `npx vitest run test/cli.test.ts` — Evidence: pending.
-- [ ] AC-3 [local]: `GET /api/report` returns the `Report`. A request with `Host: evil.example:8765` gets 403. The server listens on `127.0.0.1` only. proof: `npx vitest run test/server.test.ts` — Evidence: pending.
-- [ ] AC-4 [local]: A run without `--plan-usage` makes no network call. proof: test stubs `fetch` to throw, and the run passes — `npx vitest run test/cli.test.ts` — Evidence: pending.
-- [ ] AC-5 [local]: `--html out.html` writes a file that shows the report when opened from disk. proof: open the file in a browser, and the leak list is visible — Evidence: pending.
-- [ ] AC-6 [local]: `burn.py`, `test_burn.py`, `doctor`, and `scripts/__pycache__` are deleted. `SKILL.md` and `references/` name `npx token-furnace` instead of `scripts/doctor` and `burn.py`. proof: `git ls-files scripts` lists only PRD-006 files, and `grep -rn "burn.py\|scripts/doctor" SKILL.md references` returns no lines — Evidence: pending.
+- [x] AC-1 [local]: `token-furnace --json` on the fixture prints JSON that equals `toView(buildReport(...))`, and nothing else on stdout. proof: `npx vitest run test/cli.test.ts` — Evidence: 10 tests pass; stdout is one JSON line equal to `tsReport(...)`, and the built `node dist/cli.js --json` prints 1 line with all Report keys.
+- [x] AC-2 [local]: The default command prints the same verdict text as `burn.py --doctor` on the same fixture (captured into the test before Python is deleted). It exits 1 with leaks, 1 with no data, and 0 on a clean fixture. proof: `npx vitest run test/cli.test.ts` — Evidence: masked output equals `test/golden/doctor.txt`; exit 1 on leaks, 1 on no data, 0 on the clean fixture. `node dist/cli.js` on the live fixture printed 14 leaks and exited 1.
+- [x] AC-3 [local]: `GET /api/report` returns the `Report`. A request with `Host: evil.example:8765` gets 403. The server listens on `127.0.0.1` only. proof: `npx vitest run test/server.test.ts` — Evidence: 6 tests pass; 403 on the evil Host for all three routes, ECONNREFUSED on the LAN address. Live `serve --port 18765` returned the report JSON and 403 for `Host: evil.example:18765`.
+- [x] AC-4 [local]: A run without `--plan-usage` makes no network call. proof: test stubs `fetch` to throw, and the run passes — `npx vitest run test/cli.test.ts` — Evidence: the `fetch` stub was never called and the run still exited 1 with "the subscription usage was unavailable".
+- [x] AC-5 [local]: `--html out.html` writes a file that shows the report when opened from disk. proof: open the file in a browser, and the leak list is visible — Evidence: 70 KB page written; headless Chrome render shows the KPI tiles plus "Sessions compact too late", "The caller reads files and logs itself" and 8 more leaks with Copy fix buttons.
+- [x] AC-6 [local]: `burn.py`, `test_burn.py`, `doctor`, and `scripts/__pycache__` are deleted. `SKILL.md` and `references/` name `npx token-furnace` instead of `scripts/doctor` and `burn.py`. proof: `git ls-files scripts` lists only PRD-006 files, and `grep -rn "burn.py\|scripts/doctor" SKILL.md references` returns no lines — Evidence: the four Python files, `test/parity.test.ts` and the Python-only golden-capture test are gone; the grep returns nothing; `npm test` passes 37 tests with only `/usr/bin:/bin` on PATH (no python3).
 
 ## Integration Ledger
 
@@ -48,25 +48,25 @@
 ## Execution Phases
 
 #### Phase 1: Service, repository, composition
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** `src/services/report-service.ts`, `src/repo/session-repo.ts`, `src/repo/memory-repo.ts`, `src/services/usage-client.ts`, `src/compose.ts`, `test/report-service.test.ts`
 **Implementation:** `ReportService` reads config files through the sources and passes contents to the pure `buildReport()`. `usage-client.ts` keeps the Python cache file location and the 5-minute reuse rule.
 **Verification:** `npx vitest run test/report-service.test.ts`.
 
 #### Phase 2: CLI and text rendering
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** `src/cli.ts`, `src/render/text.ts`, `test/cli.test.ts`
 **Implementation:** Before you delete Python, capture `burn.py --doctor` and `burn.py` output on the fixture into `test/golden/doctor.txt` and `test/golden/full.txt`. Mask times that change per run.
 **Verification:** `npx vitest run test/cli.test.ts` — AC-1, AC-2, AC-4.
 
 #### Phase 3: Server
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** `src/server.ts`, `web/legacy/dashboard.html` (`git mv`), `test/server.test.ts`
 **Implementation:** Add `express` as the only runtime dependency. Port the three routes. `serve` prints the URL. It does not open a browser.
 **Verification:** `npx vitest run test/server.test.ts` — AC-3. Manual browser check — AC-5.
 
 #### Phase 4: Cutover
-**Status:** NOT STARTED
+**Status:** DONE
 **Files:** delete `scripts/burn.py`, `scripts/test_burn.py`, `scripts/doctor`, `scripts/__pycache__`, `test/parity.test.ts`; edit `SKILL.md`, `references/evidence.md`
 **Implementation:** The parity test needs Python, so it goes with Python. `test/analysis.test.ts` and the golden files keep the behavior pinned.
 **Verification:** `npm test` passes with no `python3` on `PATH` — AC-6.

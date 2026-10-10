@@ -1,6 +1,6 @@
 ---
 name: token-furnace
-description: Token Furnace - run `scripts/doctor` to detect common token leaks in local Claude Code and Codex transcripts (late compaction, caller-side reads, wakeups, unbounded loops, long-lived sessions, bad config) and get ranked fixes plus an HTML report with copy-to-Claude prompts. Also cuts coding-agent token cost by preventing wasted work rather than compressing text — a retrieval policy, a verification ladder, a retry circuit breaker, and a delegation rule, plus the scripts that measure and enforce them. Installs and configures itself for Claude Code and Codex, with config backup and one-command rollback. Use when setting up a new machine or agent, when asked to reduce token or context cost, when asked where the token budget or plan usage went, when a session is burning turns re-reading the same code, or when deciding whether to delegate to subagents.
+description: Token Furnace - run `npx token-furnace` to detect common token leaks in local Claude Code and Codex transcripts (late compaction, caller-side reads, wakeups, unbounded loops, long-lived sessions, bad config) and get ranked fixes plus an HTML report with copy-to-Claude prompts. Also cuts coding-agent token cost by preventing wasted work rather than compressing text — a retrieval policy, a verification ladder, a retry circuit breaker, and a delegation rule, plus the scripts that measure and enforce them. Installs and configures itself for Claude Code and Codex, with config backup and one-command rollback. Use when setting up a new machine or agent, when asked to reduce token or context cost, when asked where the token budget or plan usage went, when a session is burning turns re-reading the same code, or when deciding whether to delegate to subagents.
 ---
 
 # Token Furnace
@@ -8,25 +8,26 @@ description: Token Furnace - run `scripts/doctor` to detect common token leaks i
 ## Start here: the doctor
 
 ```bash
-scripts/doctor              # last 7 days, every agent found
-scripts/doctor 2 --source claude
+npx token-furnace           # last 7 days, every agent found
+npx token-furnace 2 --source claude
 ```
 
-It also starts the live report on `http://127.0.0.1:8765` when nothing serves that port
-(`TOKEN_FURNACE_PORT` moves it). Give the user that link; do not open the HTML file. The page
+For the live report, run `npx token-furnace serve --port 8765` in its own terminal
+(`--port` moves it). Give the user `http://127.0.0.1:<port>`; do not open the HTML file. The page
 rebuilds on each load and reloads every minute: active sessions, the last hour's burn rate
 against the ideal pace to the plan's weekly reset, and the leaks.
 The Dashboard tab opens with the KPI tiles and trends, then what to act on now; Leaks, Baseline
 and Details follow.
 
-The weekly reading comes from the subscription usage endpoint, which rate-limits. A status line
-can feed it instead: write `{"fetched": <epoch>, "seven_day": {"utilization": <used %>,
+The weekly reading comes from the subscription usage endpoint, which rate-limits, so the call
+is opt-in: only `--plan-usage` makes it. A status line can feed it instead, and its saved
+reading is used by every run: write `{"fetched": <epoch>, "seven_day": {"utilization": <used %>,
 "resets_at": <epoch>}}` from its `rate_limits.seven_day` input to
 `${XDG_CACHE_HOME:-~/.cache}/token-furnace/usage.json`. A reading under 5 minutes old wins.
 
 It prints a verdict, each leak ranked by share of spend with its fix and the worst sessions,
-and the baseline levers that miss their target. It exits 1 when it finds a leak. It also
-writes `~/.cache/token-furnace/report.html`: a spend-over-time chart, the
+and the baseline levers that miss their target. It exits 1 when it finds a leak.
+`--html report.html` also writes a self-contained page: a spend-over-time chart, the
 baseline table, the leak table, and a "Copy for Claude" button per leak that copies a
 prompt with the evidence and transcript paths. The detail behind each check is in
 "Measure before you tune" below.
@@ -232,20 +233,22 @@ Full reasoning and sources: [references/evidence.md](references/evidence.md).
 
 ## Measure before you tune
 
-Do not guess which rule on this page is costing you. `scripts/burn.py` reads the local
+Do not guess which rule on this page is costing you. `npx token-furnace` reads the local
 session transcripts and reports where the budget actually went — read-only, no
-dependencies, no network.
+network. Pass `--json` for the machine-readable report.
 
 It is agent-agnostic: Claude Code (`~/.claude/projects`) and Codex (`~/.codex/sessions`)
 are both auto-detected and reported together, so the comparison between them is the useful
-part. Adding a third agent is one entry in the script's `SOURCES` table.
+part. Adding a third agent is one entry in `src/compose.ts`.
 
 ```bash
-scripts/burn.py                      # last 7 days, every agent found
-scripts/burn.py 30                   # last 30 days
-scripts/burn.py --source codex       # one agent only
-scripts/burn.py --list-sources       # what is installed on this machine
-scripts/burn.py 2 --html burn.html   # also write an HTML report: tiles, context bars, leak table
+npx token-furnace                    # last 7 days, every agent found
+npx token-furnace 30                 # last 30 days
+npx token-furnace --source codex     # one agent only
+npx token-furnace --list-sources     # what is installed on this machine
+npx token-furnace --full             # the full text report: tiles, context bars, leak table
+npx token-furnace 2 --html burn.html # also write an HTML report: tiles, context bars, leak table
+npx token-furnace serve              # live report on http://127.0.0.1:8765
 ```
 
 Read the output in this order:
@@ -276,7 +279,7 @@ Read the output in this order:
 Measured case, 2026-10-09: a 20x plan drained in 2 days. Four Opus coordinator sessions,
 18 to 40 hours old, used 77% of spend. Auto-compact was on, but with a 1M window it fired
 only near 960k, so the median turn carried about 500k. Each session also showed caller
-reads, wakeups and loop flags. `scripts/test_burn.py` checks every flag.
+reads, wakeups and loop flags. `test/analysis.test.ts` checks every flag.
 
 The numbers are base-input-equivalent, not raw tokens, because raw counts overstate cheap
 cached reads and understate output, and they are scaled by a rough per-model price ratio.

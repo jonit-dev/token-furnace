@@ -1,0 +1,63 @@
+TOKEN FURNACE: last 7 days, 16M weighted tokens, 4 sessions
+Burn (claude): 0.5M in the last hour, goal 0.1M/h (your 7-day average; the subscription usage was unavailable)
+Burn (codex): 0.0M in the last hour, goal 0.0M/h (ideal pace to the weekly reset <when> (72 h left))
+Verdict: 15 leaks found in the last 24 h, largest first.
+
+1. [P1] Sessions compact too late (86% of spend, 1 sessions)
+   Fix: Set autoCompactWindow to about 200000, then /compact or restart old sessions.
+   e.g. fix the bug: late compaction: peak 400k
+2. [P1] The caller reads files and logs itself (86% of spend, 1 sessions)
+   Fix: Send multi-range reads, greps and log parsing to a cheap read-only subagent.
+   e.g. fix the bug: caller reads: 300 file/log reads
+3. [P1] Too many wakeups (86% of spend, 1 sessions)
+   Fix: Ask subagents and teammates for one report at the end; wait with one blocking command.
+   e.g. fix the bug: wakeups: 60 (teammate 0, task 60, peer 0)
+4. [P1] Autonomous loops run without a budget (86% of spend, 1 sessions)
+   Fix: Give each /goal or autonomous loop a stop condition and a turn or time budget.
+   e.g. fix the bug: loop: 300 turns for 1 human prompts
+5. [P1] Sessions stay open too long (86% of spend, 1 sessions)
+   Fix: Commit, end the session, and start one fresh session per task.
+   e.g. fix the bug: long-lived: 12h
+6. [P1] Config: autoCompactWindow (config)
+   Fix: autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": 200000.
+7. [P2] Config: subagent fan-out cap (config)
+   Fix: Cap concurrent subagents at 3: each one runs its own model and tool loop.
+8. [P2] Config: subagent nesting depth (config)
+   Fix: Cap subagent nesting depth at 1: recursive delegation multiplies the loop.
+9. [P2] Config: subagent model (config)
+   Fix: Pin a cheap worker model so subagents do not inherit a premium one.
+10. [P2] Config: tool-call concurrency (config)
+   Fix: Cap parallel tool calls at 4.
+11. [P2] Config: subagent fan-out cap (config)
+   Fix: Cap concurrent subagents at 3: each one runs its own model and tool loop.
+12. [P2] Config: subagent nesting depth (config)
+   Fix: Cap subagent nesting depth at 1: recursive delegation multiplies the loop.
+13. [P2] Config: subagent reasoning effort (config)
+   Fix: Set the subagent reasoning effort to low or medium.
+14. [P2] Config: auto-compact token limit (config)
+   Fix: Set model_auto_compact_token_limit to about 160000.
+15. [P2] Config: memory index too long (config)
+   Fix: Shorten MEMORY.md under 200 lines; move detail into topic files.
+
+Benchmark: the same turns at a 200k compaction window would cost about 8M (47% less). Estimate: trims cached context only.
+
+Baseline gaps (last 24 h -> recommended):
+  critical Spend on turns over 300k     94%                under 10%
+  critical Median context per turn      400k               under 150k
+  critical Turns per human prompt       160                under 50
+  critical Caller reads per tool call   100%               under 20%
+  warn     Wakeups per session          30                 under 20
+  warn     Longest top session          12h                under 12h
+  info     Spend on the top model       100%               under 60%
+  critical Preamble per session (p50)   400k               under 40k
+  info     Spend on the top model       100%               under 60%
+  warn     Preamble per session (p50)   50k                under 40k
+  warn     autoCompactWindow            unset (model max)  about 200k
+  warn     Max concurrent subagents     unset              at most 3
+  warn     Subagent spawn depth         unset              at most 1
+  warn     Subagent model               unset              pinned
+  warn     Tool-call concurrency        unset              at most 4
+  warn     Max concurrent subagents     5                  at most 3
+  warn     Agent nesting depth          2                  at most 1
+  warn     Subagent reasoning effort    unset              low or medium
+  warn     Auto-compact token limit     unset              about 160k

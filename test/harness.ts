@@ -1,17 +1,14 @@
 /**
- * The shared test harness: write a fixture directory, then read a report from it with either
- * TypeScript or the real burn.py. The Python side is the oracle until PRD-003 deletes it.
+ * The shared test harness: write a fixture directory, then read the report from it.
+ * The golden files in test/golden/ are burn.py's own output on these fixtures, kept as the oracle.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { buildReport } from "../src/core/analyze/report";
 import { reportView } from "../src/core/analyze/view";
 import type {
   ConfigInput,
-  RawReport,
   Report,
   ReportInput,
   SessionInput,
@@ -20,8 +17,6 @@ import type {
 } from "../src/core/model";
 import { ClaudeSource } from "../src/sources/claude";
 import { CodexSource } from "../src/sources/codex";
-
-export const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The env test_burn.py run() unsets, so a developer's own settings cannot leak in. */
 export const CLEARED = [
@@ -144,93 +139,6 @@ export function tsReport(
 ): Report | null {
   const raw = buildReport(reportInput(env, now, days, budget, source));
   return raw ? reportView(raw, now) : null;
-}
-
-/** The raw report, for a test that reads burn.py's own dict keys. */
-export function tsRaw(
-  env: NodeJS.ProcessEnv,
-  now: Date,
-  days: number,
-  budget: number | null,
-  source: string,
-): RawReport | null {
-  return buildReport(reportInput(env, now, days, budget, source));
-}
-
-/** burn.build_report + burn.report_view, as JSON, with the clock frozen to TF_PARITY_NOW. */
-export function pythonReport(
-  env: NodeJS.ProcessEnv,
-  days: number,
-  budget: number | null,
-  source: string,
-): unknown {
-  const script = `
-import datetime, json, sys, types
-sys.path.insert(0, ${JSON.stringify(join(REPO, "scripts"))})
-import burn
-
-fixed = datetime.datetime.fromisoformat("${env.TF_PARITY_NOW}")
-
-
-class Frozen(datetime.datetime):
-    @classmethod
-    def now(cls, tz=None):
-        return fixed
-
-
-burn.datetime.datetime = Frozen
-args = types.SimpleNamespace(days=${days}, weekly_budget=${budget === null ? "None" : budget},
-                             source=${JSON.stringify(source)})
-report = burn.build_report(args)
-print(json.dumps(burn.report_view(report) if report else None, default=str))
-`;
-  const out = execFileSync("python3", ["-c", script], { env, encoding: "utf8", cwd: REPO });
-  const lines = out.trim().split("\n");
-  return JSON.parse(lines[lines.length - 1]);
-}
-
-/**
- * Python's clock has microseconds, a JS Date has milliseconds. Truncate every ISO string to
- * milliseconds so a sub-millisecond difference in a projected instant is not a parity failure.
- */
-export function normalizeTimes(value: unknown): unknown {
-  if (typeof value === "string") return value.replace(/\.(\d{3})\d*\+00:00$/, ".$1+00:00");
-  if (Array.isArray(value)) return value.map(normalizeTimes);
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) out[key] = normalizeTimes(item);
-    return out;
-  }
-  return value;
-}
-
-/** Float comparison to 1e-9, as the PRD asks; everything else must be identical. */
-export function compare(a: unknown, b: unknown, path = "report"): string[] {
-  const diffs: string[] = [];
-  const walk = (x: unknown, y: unknown, at: string): void => {
-    if (typeof x === "number" && typeof y === "number") {
-      if (Math.abs(x - y) > 1e-9) diffs.push(`${at}: ${x} != ${y}`);
-      return;
-    }
-    if (x === null || y === null || typeof x !== "object" || typeof y !== "object") {
-      if (x !== y) {
-        const cut = (v: unknown) => {
-          const text = JSON.stringify(v) ?? String(v);
-          return text.length > 400 ? `${text.slice(0, 400)}…` : text;
-        };
-        diffs.push(`${at}: ${cut(x)} != ${cut(y)}`);
-      }
-      return;
-    }
-    if (Array.isArray(x) !== Array.isArray(y)) {
-      diffs.push(`${at}: array mismatch`);
-      return;
-    }
-    const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
-    for (const key of keys) walk((x as any)[key], (y as any)[key], `${at}.${key}`);
-  };
-  walk(a, b, path);
-  return diffs;
 }
 
 function existsDir(path: string): boolean {
