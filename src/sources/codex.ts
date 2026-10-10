@@ -12,6 +12,7 @@ import {
   type AgentSource,
   type Env,
 } from "./agent-source";
+import { isIgnoredOutput } from "./ignored-output";
 import { lines } from "./lines";
 
 const ROLLOUT = /^rollout-.*\.jsonl$/;
@@ -64,7 +65,7 @@ export class CodexSource implements AgentSource {
     const turns: Turn[] = [];
     let bad = 0;
 
-    for (const line of lines(path)) {
+    for (const line of lines(path, isIgnoredOutput)) {
       const record = jsonParse(line);
       if (record === null) {
         if (line.trim() !== "") bad += 1;

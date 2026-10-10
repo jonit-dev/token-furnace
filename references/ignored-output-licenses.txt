@@ -1,0 +1,478 @@
+THIRD-PARTY LICENSE AND COPYRIGHT NOTICES
+Component: native/ignored-output (crate "tf-ignored-output", a Rust cdylib
+compiled to wasm32-unknown-unknown and embedded as base64 in the published
+Token Furnace distribution / npm package).
+Source of truth: native/ignored-output/Cargo.lock (version = 4).
+Scope: every non-root package in that Cargo.lock. The local root crate
+("tf-ignored-output" 0.0.0) is not a third party and is excluded.
+Registry source for all crates below:
+  registry+https://github.com/rust-lang/crates.io-index
+License texts are reproduced verbatim from the original LICENSE/COPYING files
+in the local Cargo registry source directory:
+  $CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/<crate>-<version>/
+Where a crate offers a choice of licenses, the MIT license is reproduced.
+Exception: unicode-ident is licensed "(MIT OR Apache-2.0) AND Unicode-3.0", so
+the Unicode-3.0 (UNICODE LICENSE V3) notice is reproduced as well.
+No generic or substitute notices are used; each block is the crate's own file.
+
+
+================================================================================
+crate:            itoa
+version:           1.0.18
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/dtolnay/itoa
+copyright holder:   David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       itoa-1.0.18/LICENSE-MIT
+checksum:           8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            memchr
+version:           2.8.3
+license (declared): Unlicense OR MIT
+license (chosen):   MIT
+repository:         https://github.com/BurntSushi/memchr
+copyright holder:   Copyright (c) 2015 Andrew Gallant
+                    (also listed in crate metadata: Andrew Gallant, bluss)
+license file:       memchr-2.8.3/LICENSE-MIT
+checksum:           cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98
+--------------------------------------------------------------------------------
+The MIT License (MIT)
+
+Copyright (c) 2015 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+================================================================================
+crate:            proc-macro2
+version:           1.0.107
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/dtolnay/proc-macro2
+copyright holder:   David Tolnay <dtolnay@gmail.com>,
+                    Alex Crichton <alex@alexcrichton.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       proc-macro2-1.0.107/LICENSE-MIT
+checksum:           985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            quote
+version:           1.0.47
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/dtolnay/quote
+copyright holder:   David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       quote-1.0.47/LICENSE-MIT
+checksum:           1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            serde
+version:           1.0.229
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/serde-rs/serde
+copyright holder:   Erick Tryzelaar <erick.tryzelaar@gmail.com>,
+                    David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       serde-1.0.229/LICENSE-MIT
+checksum:           4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            serde_core
+version:           1.0.229
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/serde-rs/serde
+copyright holder:   Erick Tryzelaar <erick.tryzelaar@gmail.com>,
+                    David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       serde_core-1.0.229/LICENSE-MIT
+checksum:           67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            serde_derive
+version:           1.0.229
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/serde-rs/serde
+copyright holder:   Erick Tryzelaar <erick.tryzelaar@gmail.com>,
+                    David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       serde_derive-1.0.229/LICENSE-MIT
+checksum:           e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            serde_json
+version:           1.0.151
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/serde-rs/json
+copyright holder:   Erick Tryzelaar <erick.tryzelaar@gmail.com>,
+                    David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       serde_json-1.0.151/LICENSE-MIT
+checksum:           c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            syn
+version:           3.0.4
+license (declared): MIT OR Apache-2.0
+license (chosen):   MIT
+repository:         https://github.com/dtolnay/syn
+copyright holder:   David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       syn-3.0.4/LICENSE-MIT
+checksum:           e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+crate:            unicode-ident
+version:           1.0.24
+license (declared): (MIT OR Apache-2.0) AND Unicode-3.0
+license (chosen):   MIT AND Unicode-3.0 (both reproduced; the AND applies)
+repository:         https://github.com/dtolnay/unicode-ident
+copyright holders:
+  MIT portion:      David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+  Unicode portion:  Copyright © 1991-2023 Unicode, Inc.
+license files:      unicode-ident-1.0.24/LICENSE-MIT
+                    unicode-ident-1.0.24/LICENSE-UNICODE
+checksum:           e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75
+--------------------------------------------------------------------------------
+[MIT portion, verbatim from LICENSE-MIT]
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+[Unicode-3.0 portion, verbatim from LICENSE-UNICODE]
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2023 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+
+================================================================================
+crate:            zmij
+version:           1.0.23
+license (declared): MIT
+license (chosen):   MIT
+repository:         https://github.com/dtolnay/zmij
+copyright holder:   David Tolnay <dtolnay@gmail.com>
+                    (from crate metadata; LICENSE-MIT carries no separate
+                    copyright line)
+license file:       zmij-1.0.23/LICENSE-MIT
+checksum:           29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b
+--------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+END OF THIRD-PARTY NOTICES
+Packages covered: 11 (itoa, memchr, proc-macro2, quote, serde, serde_core,
+serde_derive, serde_json, syn, unicode-ident, zmij).
