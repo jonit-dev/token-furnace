@@ -49,7 +49,6 @@ const DEFAULT_BASE = join(process.env.BENCH_TMPDIR || join(homedir(), ".cache"),
 const NODE24 = "/home/joao/.nvm/versions/node/v24.16.0/bin/node";
 const TIMEOUT_MS = 240_000;
 const SPEED_LIMIT_S = 10;
-const WORKERS = "8";
 const MAX_BUFFER = 512 * 1024 * 1024;
 const CLOCK_PAD_MS = 60_000;
 const MANIFEST_VERSION = 1;
@@ -301,7 +300,7 @@ function runEnv(snap, cacheDir, manifest) {
   env.CODEX_HOME = join(snap, "codex");
   env.TOKEN_FURNACE_NOW = manifest.clock;
   env.TOKEN_FURNACE_NO_CACHE = "0";
-  env.TOKEN_FURNACE_WORKERS = WORKERS; // pinned so a run does not inherit the shell's worker count
+  delete env.TOKEN_FURNACE_WORKERS; // benchmark the package default, never a shell override
   env.npm_config_update_notifier = "false";
   return env;
 }

@@ -92,14 +92,26 @@ export class SqliteSessionRepository implements SessionRepository {
     );
   }
 
+  private openDb(path: string): DatabaseSync {
+    const db = new DatabaseSync(path);
+    try {
+      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec("PRAGMA synchronous = NORMAL;");
+      if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  }
+
   private ensureDb(): void {
     if (this.db) return;
     try {
       if (this.dbPath !== ":memory:") {
         mkdirSync(dirname(this.dbPath), { recursive: true });
       }
-      const db = new DatabaseSync(this.dbPath);
-      db.exec("PRAGMA foreign_keys = ON;");
+      const db = this.openDb(this.dbPath);
       const verRow = db.prepare("PRAGMA user_version;").get() as { user_version: number } | undefined;
       const ver = verRow ? verRow.user_version : 0;
       if (ver !== SCHEMA_VERSION) {
@@ -128,13 +140,13 @@ export class SqliteSessionRepository implements SessionRepository {
       if (this.dbPath !== ":memory:") {
         mkdirSync(dirname(this.dbPath), { recursive: true });
       }
-      const db = new DatabaseSync(this.dbPath);
+      const db = this.openDb(this.dbPath);
       db.exec(DDL);
       this.db = db;
       this.prepareStatements();
     } catch {
       try {
-        const memDb = new DatabaseSync(":memory:");
+        const memDb = this.openDb(":memory:");
         memDb.exec(DDL);
         this.db = memDb;
         this.prepareStatements();

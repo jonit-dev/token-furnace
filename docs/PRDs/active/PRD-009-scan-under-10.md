@@ -81,3 +81,17 @@ All completed candidates below exited 0 and matched the complete 52,002-byte ora
 The four initial hypotheses (cache, reader, worker count, read size) did not reach 10 seconds. Replan: two additional bounded trials within 10 minutes, targeting allocation for small files and scheduling large files earlier. Preserve all input data, source ordering in the final report, workers/fallback, and byte parity. No reduced corpus or partial-report completion.
 
 Harness gates also reject nonzero process exits, missing oracle during final verification, failed warm priming, and any individual cold run >=10 seconds. Synthetic self-check passes including these failures. The 9,334-file, 27.54 GB snapshot is the full source tree; it also contains auxiliary/nested files the existing source discovery does not parse. Final measurements must distinguish snapshot size from the actual discovered transcript count/bytes.
+
+### Final measured state of the retained candidate
+
+Retained: WAL/NORMAL cache connections (with failed-open cleanup), byte-line reader with 1 MiB reads, and a default limit of 12 workers using available parallelism. Small-file buffer sizing and large-file dispatch were reverted after they failed to improve timings. Newest-first scheduling remains intact. The benchmark now clears shell worker overrides and measures the production default, rather than forcing the original 8-worker count.
+
+Actual discovery within the unchanged frozen tree: Claude 719 files / 2,014,600,953 bytes; Codex 6,526 files / 11,414,174,391 bytes. Total **7,245 transcripts / 13,428,775,344 bytes**. Auxiliary files remain in the snapshot for complete source configuration and memory-index behavior.
+
+- Three final application-cold runs: **15.954, 16.080, 20.707 seconds**. Each exited 0 and matched the full oracle; `verify --runs 3` correctly exited 1 because all three exceeded 10 seconds. AC-1 is **not met**.
+- Three warm runs: **2.874, 2.850, 2.701 seconds**, all byte-identical to the oracle. Warm portion of AC-2 passes; changed-file performance is still pending.
+- A separate CPU-profiled cold run: 13.717 seconds, full parity; 59.372 user CPU seconds + 25.203 system CPU seconds. This is diagnostic, not the final speed gate.
+- Additional rejected trials: tiny-file allocation 25.734s (8 workers), 49.892s (12); allocation plus dispatch 28.634s (8), 20.958s (12); clamped allocation plus 8 MiB reads 27.465s (12). Host load varied; these did not justify retaining extra code.
+- Own validation: 94 tests across 14 files passed; TypeScript passed; installed-tarball smoke on Node 24.16.0 passed. Node 22.13.0 and live-web validation are pending below.
+
+Tuning stopped after unsuccessful trials under the supplied AGENTS rule. Doubtful assumption: a complete first scan of 13.43 GB can finish within 10 seconds on this hardware. Asked whether the user's target includes first-ever scans or ordinary cached launches; no answer yet. Until clarified or AC-1 passes, this PRD remains active and the package remains unpublished. User publication authorization is already granted; no additional publication approval is requested.

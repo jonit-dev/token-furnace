@@ -176,4 +176,23 @@ describe("SqliteSessionRepository", () => {
     const content = readFileSync(dbPath);
     expect(content.includes(Buffer.from(SECRET))).toBe(false);
   });
+
+  it("AC-6: reopened connection uses WAL/NORMAL pragmas and preserves rows", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac6-cache-"));
+    const dbPath = join(cacheDir, "token-furnace", "cache.sqlite");
+    const session = { source: "claude" as const, path: "/tmp/sample.jsonl", mtimeMs: 100, title: "demo", turns: [] };
+
+    const repo1 = new SqliteSessionRepository(dbPath);
+    repo1.save(session, 200);
+    expect(repo1.all()).toHaveLength(1);
+    repo1.close();
+
+    const repo2 = new SqliteSessionRepository(dbPath);
+    const db = (repo2 as unknown as { db: DatabaseSync }).db;
+    expect(db).not.toBeNull();
+    expect((db!.prepare("PRAGMA journal_mode;").get() as { journal_mode: string }).journal_mode).toBe("wal");
+    expect((db!.prepare("PRAGMA synchronous;").get() as { synchronous: number }).synchronous).toBe(1);
+    expect(repo2.all()).toHaveLength(1);
+    repo2.close();
+  });
 });
