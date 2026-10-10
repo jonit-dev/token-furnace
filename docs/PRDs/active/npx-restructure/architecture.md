@@ -127,7 +127,7 @@ Tests call `new ReportService([fixtureSource], new MemorySessionRepository())` d
 | Frontend | React, Tailwind, Zustand | Zustand holds UI state only. Report data comes from `/api/report`. |
 | Tests | Vitest | One runner for `src/` and `web/`. |
 
-Runtime dependencies: `express` only. React, Tailwind, and Zustand are build-time dependencies that are bundled into `dist/web`.
+Runtime dependencies: `express`, `routing-controllers`, `reflect-metadata` (and the peers `class-transformer`, `class-validator`). React, Tailwind, and Zustand are build-time dependencies that are bundled into `dist/web`.
 
 ## Not in scope
 
@@ -148,3 +148,4 @@ Runtime dependencies: `express` only. React, Tailwind, and Zustand are build-tim
 - 2026-10-09 (Claude): The plan-usage network call becomes opt-in (`--plan-usage`). Reason: `SKILL.md` says "no network", but `plan_week()` sends the OAuth token on every run.
 - 2026-10-09 (João): The product, package, CLI binary, and folder name is `token-furnace`. It matches `SKILL.md` and the existing `~/.cache/token-furnace` cache directory.
 - 2026-10-09 (João): The plan-usage call is on by default when a login exists. The opt-in made the dashboard ignore the subscription and show tokens/h. Supersedes the entry above.
+- 2026-10-09 (João): HTTP routes use `routing-controllers` on Express, never a vanilla router. Controllers are classes in `src/server.ts`, and the host guard is a `@Middleware`. Supersedes NFR-1's "express only". `tsconfig.json` sets `experimentalDecorators`.

@@ -58,6 +58,7 @@ Each requirement names the PRD that delivers it. "Same as Python" means the beha
 
 ## Non-functional
 
-- NFR-1: Runtime dependency is `express` only.
+- NFR-1: Runtime dependencies are `express`, `routing-controllers` and `reflect-metadata`. `routing-controllers` brings `class-transformer` and `class-validator` as peers. Nothing else.
+- NFR-4: Every HTTP route is a `routing-controllers` controller method. No `app.get`, `app.use` routes, or `express.Router`.
 - NFR-2: `core/` has no I/O and imports nothing outside `core/`.
 - NFR-3: Every report is identical with the memory repository and with the SQLite repository.

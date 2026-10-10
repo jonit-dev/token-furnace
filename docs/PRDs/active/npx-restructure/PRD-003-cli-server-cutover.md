@@ -62,7 +62,7 @@
 #### Phase 3: Server
 **Status:** DONE
 **Files:** `src/server.ts`, `web/legacy/dashboard.html` (`git mv`), `test/server.test.ts`
-**Implementation:** Add `express` as the only runtime dependency. Port the three routes. `serve` prints the URL. It does not open a browser.
+**Implementation:** Add `express` as the runtime dependency (`routing-controllers` joined it on 2026-10-09, see architecture.md). Port the three routes as controller methods. `serve` prints the URL. It does not open a browser.
 **Verification:** `npx vitest run test/server.test.ts` — AC-3. Manual browser check — AC-5.
 
 #### Phase 4: Cutover

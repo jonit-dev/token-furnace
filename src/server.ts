@@ -1,12 +1,12 @@
 /**
- * The live report: Express on 127.0.0.1, rebuilding the report on every request. burn.py serve()
- *
- * A Host header other than the loopback name and the port this server listens on gets 403, so a
- * DNS-rebinding page cannot read the report. No CORS headers go out.
+ * The live report: Express on 127.0.0.1 with routing-controllers, rebuilding the report on every
+ * request. burn.py serve(). Every route is a controller method: no vanilla routers.
  */
 
 import type { Server } from "node:http";
-import express from "express";
+import "reflect-metadata";
+import express, { type Request, type Response } from "express";
+import { Controller, Get, Middleware, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
 import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
@@ -37,49 +37,16 @@ export async function serve(app: App, options: ServeOptions): Promise<void> {
   await new Promise<void>(() => {}); // the server keeps the loop alive
 }
 
-/** Bind 127.0.0.1 and answer three routes. Port 0 asks the OS for a free port. */
+/** Bind 127.0.0.1 and answer the routes. Port 0 asks the OS for a free port. */
 export async function startServer(app: App, options: ServeOptions): Promise<LiveServer> {
-  const page = loadPage();
   const web = express();
   web.disable("x-powered-by");
-
-  web.use((req, res, next) => {
-    const port = req.socket.localPort;
-    const host = (req.headers.host ?? "").toLowerCase();
-    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
-      res.status(403).type("text/plain").send("Forbidden");
-      return;
-    }
-    next();
-  });
-
-  web.get("/api/status", (_req, res) => {
-    if (!app.reports.hasScanned) warm(app);
-    res.set("Cache-Control", "no-store").json(app.reports.progress);
-  });
-
-  web.get("/api/report", async (req, res) => {
-    if (!app.reports.hasScanned) {
-      warm(app);
-      res.status(202).json({ status: "scanning", progress: app.reports.progress });
-      return;
-    }
-    const report = await build(app, options, req.query);
-    res.type("application/json").send(JSON.stringify(report ? reportView(report, app.now()) : null));
-  });
-
-  web.get("/dashboard.html", (_req, res) => {
-    res.type("text/html").send(page); // the raw page, polled for hot reload: no rebuild
-  });
-
-  web.use(async (req, res) => {
-    if (!app.reports.hasScanned) {
-      warm(app);
-      res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
-      return;
-    }
-    const report = await build(app, options, req.query);
-    res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
+  useExpressServer(web, {
+    controllers: [reportController(app, options, loadPage())],
+    middlewares: [LoopbackHostOnly],
+    defaultErrorHandler: true,
+    classTransformer: false,
+    validation: false,
   });
 
   const http = await new Promise<Server>((ready) => {
@@ -89,6 +56,61 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   warm(app);
   const port = (http.address() as { port: number }).port;
   return { url: `http://127.0.0.1:${port}`, port, close: () => new Promise((done) => http.close(() => done())) };
+}
+
+/**
+ * A Host header other than the loopback name and the port this server listens on gets 403, so a
+ * DNS-rebinding page cannot read the report. No CORS headers go out.
+ */
+@Middleware({ type: "before", priority: 100 })
+class LoopbackHostOnly implements ExpressMiddlewareInterface {
+  use(req: Request, res: Response, next: (error?: unknown) => void): void {
+    const port = req.socket.localPort;
+    const host = (req.headers.host ?? "").toLowerCase();
+    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+      res.status(403).type("text/plain").send("Forbidden");
+      return;
+    }
+    next();
+  }
+}
+
+/** The routes, closed over the app they serve. The catch-all page is declared last. */
+function reportController(app: App, options: ServeOptions, page: string) {
+  @Controller()
+  class ReportController {
+    @Get("/api/status")
+    status(@Res() res: Response) {
+      if (!app.reports.hasScanned) warm(app);
+      return res.set("Cache-Control", "no-store").json(app.reports.progress);
+    }
+
+    @Get("/api/report")
+    async report(@Req() req: Request, @Res() res: Response) {
+      if (!app.reports.hasScanned) {
+        warm(app);
+        return res.status(202).json({ status: "scanning", progress: app.reports.progress });
+      }
+      const report = await build(app, options, req.query);
+      return res.type("application/json").send(JSON.stringify(report ? reportView(report, app.now()) : null));
+    }
+
+    @Get("/dashboard.html")
+    dashboard(@Res() res: Response) {
+      return res.type("text/html").send(page); // the raw page, polled for hot reload: no rebuild
+    }
+
+    @Get(/.*/)
+    async index(@Req() req: Request, @Res() res: Response) {
+      if (!app.reports.hasScanned) {
+        warm(app);
+        return res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
+      }
+      const report = await build(app, options, req.query);
+      return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
+    }
+  }
+  return ReportController;
 }
 
 /** Start or join the scan without waiting. A failed scan is logged, not an unhandled rejection. */
