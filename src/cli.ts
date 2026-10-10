@@ -15,9 +15,13 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, Source } from "./core/model";
 import { planWeek } from "./services/usage-client";
+import { runChurnHook, readStdin } from "./setup/churn-hook";
+import { runSetup } from "./setup/agents";
 
 const USAGE = `Usage: token-furnace [days] [options]
        token-furnace serve [--port 8765]
+       token-furnace setup [--apply] [--rollback] [--aggressive] [--verify]
+       token-furnace hook churn
 
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
@@ -47,6 +51,43 @@ interface Options {
 }
 
 export async function main(argv: string[] = process.argv.slice(2), app: App = compose()): Promise<number> {
+  if (argv[0] === "hook" && argv[1] === "churn") {
+    return runChurnHook(readStdin(), app.env, process.stdout);
+  }
+  if (argv[0] === "setup") {
+    const setupArgs = parseArgs({
+      args: argv.slice(1),
+      allowPositionals: true,
+      options: {
+        apply: { type: "boolean" },
+        rollback: { type: "boolean" },
+        aggressive: { type: "boolean" },
+        verify: { type: "boolean" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+    if (setupArgs.values.help) {
+      process.stdout.write(
+        "Usage: token-furnace setup [--apply] [--aggressive] [--verify] [--rollback]\n\n" +
+          "  --apply       write changes (default: dry run)\n" +
+          "  --aggressive  also set the flagged-risky subagent spawn depth\n" +
+          "  --verify      check an existing install; exits 1 on any failure\n" +
+          "  --rollback    restore the most recent backup\n",
+      );
+      return 0;
+    }
+    return runSetup(
+      {
+        apply: setupArgs.values.apply,
+        rollback: setupArgs.values.rollback,
+        aggressive: setupArgs.values.aggressive,
+        verify: setupArgs.values.verify,
+      },
+      app.env,
+      process.stdout,
+    );
+  }
+
   const parsed = parseArgs({
     args: argv,
     allowPositionals: true,

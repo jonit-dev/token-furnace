@@ -99,12 +99,12 @@ cheap model outspends an expensive one.
 The breaker escalates the capability applied to the task. It never abandons the task —
 a breaker that stops work converts a token problem into an unfinished-work problem.
 
-`scripts/escalate-on-churn.py` enforces this as a hook, because the rule is easy to write
+`token-furnace hook churn` enforces this as a hook, because the rule is easy to write
 down and easy to ignore mid-loop. It counts edits per file per session and injects the
 escalation prompt at the 4th, 7th, 10th edit of the same file. It never blocks an edit and
 never fails a tool call on bad input.
 
-`setup-agents.sh --apply` wires it into Claude Code's `settings.json` as a `PostToolUse`
+`token-furnace setup --apply` wires it into Claude Code's `settings.json` as a `PostToolUse`
 hook matching `Edit|Write|NotebookEdit`, and `--verify` checks it is still wired and still
 executable. The step is idempotent — re-running never appends a second copy — and
 `--rollback` removes it with the rest of the config.
@@ -154,14 +154,14 @@ economic tokens, not visible prompt length.
 
 ## Setup
 
-`scripts/setup-agents.sh` performs the whole installation, idempotently, for Claude Code
+`npx -y token-furnace setup` performs the whole installation, idempotently, for Claude Code
 and Codex together.
 
 ```bash
-scripts/setup-agents.sh              # dry run — prints every change, writes nothing
-scripts/setup-agents.sh --apply      # back up, apply, then verify
-scripts/setup-agents.sh --verify     # check an existing install; exits 1 on any failure
-scripts/setup-agents.sh --rollback   # restore the most recent backup
+npx -y token-furnace setup              # dry run — prints every change, writes nothing
+npx -y token-furnace setup --apply      # back up, apply, then verify
+npx -y token-furnace setup --verify     # check an existing install; exits 1 on any failure
+npx -y token-furnace setup --rollback   # restore the most recent backup
 ```
 
 `--apply` ends by verifying its own work rather than trusting that each step
@@ -171,10 +171,10 @@ installed to `ls` and is invisible to the agent), the always-on line must be pre
 in both files, and a restorable backup must exist. `--verify` runs the same checks
 alone and exits non-zero on failure, so it can gate a provisioning script.
 
-**It backs up before it touches anything.** Every `--apply` run first copies
-`settings.json`, `config.toml`, `CLAUDE.md` and `AGENTS.md` into
+**It backs up before the first change.** An apply that changes configuration copies
+`settings.json`, `.claude.json`, `config.toml`, `CLAUDE.md` and `AGENTS.md` into
 `~/.agents/token-furnace-backups/<timestamp>/` and writes a `restore.sh` beside them. Nothing
-is edited until that backup exists. `--rollback` restores the newest one; any older
+is edited until that backup exists. A no-op apply preserves the previous backup. `--rollback` restores the newest one; any older
 snapshot restores by running its own `restore.sh`.
 
 What it does:
@@ -209,7 +209,7 @@ Applied by default — none of these reduce reasoning quality:
 | Claude | `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `3` | Default is 20. Caps simultaneous fan-out; does not cap total work. |
 | Claude | `ENABLE_TOOL_SEARCH` | `true` | Defers MCP tool schemas instead of loading every definition up front. Pure win with several MCP servers. |
 | Claude | `MAX_MCP_OUTPUT_TOKENS` | `12000` | Default 25K. Bounds a pathological MCP dump. |
-| Claude | `autoCompactWindow` | `200000` | Manual for now: `setup-agents.sh` does not set it. On a 1M model the default compacts near 1M, so every turn carries up to 1M of context. |
+| Claude | `autoCompactWindow` | `200000` | Manual for now: `token-furnace setup` does not set it. On a 1M model the default compacts near 1M, so every turn carries up to 1M of context. |
 | Codex | `model_verbosity` | `low` | Shortens visible prose only. Reasoning is a separate setting and is untouched. |
 | Codex | `tool_output_token_limit` | `10000` | Bounds giant build and test logs. |
 | Codex | `agents.max_concurrent_threads_per_session` | `3` | Same reasoning as the Claude cap. |
@@ -290,7 +290,7 @@ silently billed as cheap — if that section is a large share of your spend, add
 ## Verify it worked
 
 ```bash
-scripts/setup-agents.sh              # re-run dry: every step should report "ok"
+npx -y token-furnace setup              # re-run dry: every step should report "ok"
 ```
 
 Then, in a fresh session of either agent, confirm the always-on line is in context. If a
