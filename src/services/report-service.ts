@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
-import type { ConfigInput, RawReport, Report, ScanProgress, Source, Week } from "../core/model";
+import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, Source, Week } from "../core/model";
 import type { SessionRepository } from "../repo/session-repo";
+import { ParsePool } from "./parse-pool";
 import type { AgentSource, Env } from "../sources/agent-source";
 
 export interface ReportOptions {
@@ -24,6 +25,8 @@ export class ReportService {
     private readonly sources: AgentSource[],
     private readonly repo: SessionRepository,
     private readonly env: Env,
+    /** The built worker script and how many threads parse. Null parses on the main thread. */
+    private readonly workers: { url: URL; size: number } | null = null,
   ) {}
 
   /** Where the scan stands. `/api/status` and the CLI read it. */
@@ -65,24 +68,53 @@ export class ReportService {
       startedAt: Date.now(),
       updatedAt: Date.now(),
     });
-    let lastYield = Date.now();
+    const save = (item: (typeof todo)[number], parsed: ParsedFile): void => {
+      this.repo.save(
+        { source: item.source.name, path: item.file.path, mtimeMs: item.file.mtimeMs, title: parsed.title, turns: parsed.turns },
+        item.file.size,
+      );
+    };
+    const done = (item: (typeof todo)[number]): void => {
+      progress.filesDone += 1;
+      progress.bytesDone += item.file.size;
+      progress.updatedAt = Date.now();
+      onProgress?.(progress);
+    };
+
+    // A handful of files is faster in-process than the cost of starting threads.
+    const pool = this.workers && this.workers.size > 1 && todo.length > 16 ? new ParsePool(this.workers.url, this.env, this.workers.size) : null;
     try {
-      for (const { source, file } of todo) {
-        const parsed = source.parse(file.path);
-        this.repo.save(
-          { source: source.name, path: file.path, mtimeMs: file.mtimeMs, title: parsed.title, turns: parsed.turns },
-          file.size,
-        );
-        progress.filesDone += 1;
-        progress.bytesDone += file.size;
-        if (Date.now() - lastYield >= 50) {
-          progress.updatedAt = Date.now();
-          onProgress?.(progress);
-          await new Promise<void>((next) => setImmediate(next)); // let requests through
-          lastYield = Date.now();
+      if (pool) {
+        // One lane per worker: each takes the next file, newest first, as soon as it is free.
+        let next = 0;
+        const lane = async (index: number): Promise<void> => {
+          while (next < todo.length) {
+            const item = todo[next++];
+            let parsed: ParsedFile;
+            try {
+              parsed = await pool.parse(index, item.source.name, item.file.path);
+            } catch {
+              // Fall back to in-process parsing if the worker fails or crashes
+              parsed = item.source.parse(item.file.path);
+            }
+            save(item, parsed);
+            done(item);
+          }
+        };
+        await Promise.all(Array.from({ length: this.workers!.size }, (_, index) => lane(index)));
+      } else {
+        let lastYield = Date.now();
+        for (const item of todo) {
+          save(item, item.source.parse(item.file.path));
+          done(item);
+          if (Date.now() - lastYield >= 50) {
+            await new Promise<void>((next) => setImmediate(next)); // let requests through
+            lastYield = Date.now();
+          }
         }
       }
     } finally {
+      await pool?.close();
       progress.phase = "ready";
       progress.updatedAt = Date.now();
       this.hasScanned = true;

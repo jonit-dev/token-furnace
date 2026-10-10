@@ -118,12 +118,17 @@ function warm(app: App): void {
   app.reports.refresh().catch((error) => console.error("token-furnace: scan failed:", error));
 }
 
+/** Rescan in the background when the last scan is over 5 s old. A request never waits for it. */
+function rescan(app: App): void {
+  if (Date.now() - app.reports.progress.updatedAt > 5_000) warm(app);
+}
+
 /** One report per request, from the transcripts as they are now. */
 async function build(app: App, options: ServeOptions, query: Record<string, unknown>) {
   const now = app.now();
   const days = positiveInt(query.days, options.days);
   const source = query.source === "claude" || query.source === "codex" ? query.source : options.source;
-  await app.reports.refresh();
+  rescan(app); // the answer is the report we have now; the next poll sees the new scan
   return app.reports.getRaw(days, source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: await planWeek(app.env, now, options.planUsage),

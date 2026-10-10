@@ -65,7 +65,7 @@ describe("first scan", () => {
     // Together, so a slow file in the middle of the scan cannot let it finish between two reads.
     const [status, report, page] = await Promise.all([get("/api/status"), get("/api/report"), get("/")]);
     expect(status.status).toBe(200);
-    expect(status.ms).toBeLessThan(500); // the loop is free, not parked behind the scan
+    expect(status.ms).toBeLessThan(200); // match PRD-008's response-time limit
     const first = JSON.parse(status.body);
     expect(first.phase).toBe("scanning");
     expect(first.filesTotal).toBeGreaterThan(1);
