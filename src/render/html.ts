@@ -3,11 +3,8 @@ import { fileURLToPath } from "node:url";
 import { reportView } from "../core/analyze/view";
 import type { RawReport } from "../core/model";
 
-/**
- * The dashboard page, next to the bundle in dist/ and in web/legacy when running from src.
- * PRD-005 replaces it with the built React app.
- */
-const PAGE = ["dashboard.html", "../../web/legacy/dashboard.html"];
+/** The built React page: next to the bundle in dist/, or in dist/ when running from src. */
+const PAGE = ["./web/index.html", "../../dist/web/index.html"];
 
 /** The raw page, which the server serves for hot reload and the CLI embeds. */
 export function loadPage(): string {
@@ -18,10 +15,10 @@ export function loadPage(): string {
       continue;
     }
   }
-  throw new Error("dashboard.html not found next to the bundle or in web/legacy/");
+  throw new Error("Built page dist/web/index.html not found. Run `npm run build`.");
 }
 
-/** dashboard.html with the report embedded, for a static file or the first paint. burn.py:1498 */
+/** The built page with the report embedded, for a static file or the first paint. burn.py:1498 */
 export function renderHtml(report: RawReport, now: Date, page = loadPage()): string {
   // `</` would end the script tag; Python escapes it the same way.
   const data = JSON.stringify(reportView(report, now)).replace(/<\//g, "<\\/");

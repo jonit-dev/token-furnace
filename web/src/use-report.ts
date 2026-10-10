@@ -20,23 +20,31 @@ export function useReport(): Report | null {
     // A file: page keeps the report it embeds.
     if (location.protocol !== "http:" && location.protocol !== "https:") return undefined;
 
+    let active = true;
     const load = async () => {
       try {
         const response = await fetch("/api/report", { cache: "no-store" });
+        // 202 means the server is still scanning: keep the last report and stay online.
+        if (response.status === 202) return;
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data: unknown = await response.json();
-        // ponytail: trusts the server to send a Report. Add a runtime check if that stops being true.
+        if (!active) return;
+        // shortcut: trusts the server to send a Report. Add a runtime check if that stops being true.
         if (data) setReport(data as Report);
         setOnline(true);
       } catch {
         // A failed refresh keeps the last report and marks the page offline.
-        setOnline(false);
+        if (active) setOnline(false);
       }
     };
 
     void load();
     const timer = setInterval(load, REFRESH_MS);
-    return () => clearInterval(timer);
+    return () => {
+      // A late response after unmount must not touch state.
+      active = false;
+      clearInterval(timer);
+    };
   }, [setOnline]);
 
   return report;
