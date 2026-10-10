@@ -163,7 +163,8 @@ export function Spark({
 }
 
 // One compact KPI tile. state: 'crit' needs action now, 'over' misses the target, 'ok' meets it, null has no target.
-const DOT: Record<string, string> = { crit: "bg-hot", over: "bg-accent", ok: "bg-ok" };
+// A missed target is red, a met target is green.
+const DOT: Record<string, string> = { crit: "bg-hot", over: "bg-hot", ok: "bg-ok" };
 
 export function Tile({
   label,

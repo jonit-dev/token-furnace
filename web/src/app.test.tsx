@@ -70,7 +70,16 @@ describe("App", () => {
     } };
     render(<KpiStrip r={report} burn={report.burns.claude} />);
     const tile = screen.getByText("Active sessions").closest(".card")!;
-    expect(tile.querySelector("span.rounded-full")).toBeNull();
+    expect(tile.querySelector("span.rounded-full.bg-ok")).not.toBeNull();
+    expect(tile.querySelector("span.rounded-full.bg-hot")).toBeNull();
+  });
+
+  it("marks a missed target with a red dot and a met target with a green dot", () => {
+    render(<KpiStrip r={{ ...fixtureReport, overTarget: 40 }} burn={fixtureReport.burns.claude} />);
+    const dot = (label: string) => screen.getByText(label).closest(".card")!.querySelector("span.rounded-full")!;
+    expect(dot("Spend >target · 7 d").className).toContain("bg-hot");
+    const met = render(<KpiStrip r={{ ...fixtureReport, overTarget: 0 }} burn={fixtureReport.burns.claude} />);
+    expect(met.getAllByText("Spend >target · 7 d").at(-1)!.closest(".card")!.querySelector("span.rounded-full")!.className).toContain("bg-ok");
   });
 
   it("shows every provider's active sessions independently of the burn selector", () => {
@@ -193,15 +202,17 @@ describe("App", () => {
     expect(screen.getByRole("img", { name: "Hourly spend" })).toBeTruthy();
   });
 
-  it("shows provider spend and full-window activity statistics", () => {
+  it("shows each provider's spend over target with a target dot, and folds the counters into one tip", () => {
     render(<App />);
-    for (const source of ["claude", "codex"] as const) {
-      const label = source === "claude" ? "Claude Code spend" : "Codex spend";
-      expect(screen.getByText(label).closest(".card")!.textContent).toContain("7 d");
+    for (const label of ["Claude Code >target", "Codex >target"]) {
+      const card = screen.getByText(label).closest(".card")!;
+      expect(card.textContent).toContain("7 d");
+      expect(card.querySelector("span.rounded-full")).not.toBeNull();
     }
-    expect(screen.getByText("Projects").closest(".card")!.textContent).toContain(String(fixtureReport.projectCount));
-    expect(screen.getByText("Tool calls").closest(".card")!.textContent).toContain(String(fixtureReport.toolCalls));
-    hasText("Tokens / turn");
+    const tip = screen.getByText("Spend >target · 7 d").closest(".card")!.getAttribute("title")!;
+    expect(tip).toContain("projects");
+    expect(tip).toContain("tool calls");
+    expect(screen.queryByText("Tokens / turn")).toBeNull();
   });
 
   it("falls back from a missing pinned provider and lets the visible provider be pinned", () => {

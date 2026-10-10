@@ -218,22 +218,46 @@ export function KpiStrip({
       <Tile key="week" label="Weekly limit" icon="CalendarDays" value="—" line="no subscription reading yet" state={null} />,
     );
   }
-  const over = Number(r.overTarget) || 0;
-  const overHourly = (r.timeline ?? [])
-    .slice(-24)
-    .map((t) => (100 * (t[2] ?? 0)) / (((t[1] ?? 0) + (t[2] ?? 0)) || 1));
+  const days = r.days ?? 0;
+  // One "spend over the context target" tile; the all-provider tile and each provider tile share it.
+  const overTile = (key: string, label: string, rows: Report["timeline"], over: number, total: number, tip: string) => {
+    const max = MAX_OVER_TARGET_SHARE * 100;
+    return (
+      <Tile
+        key={key}
+        label={label}
+        icon="TrendingUp"
+        value={Math.round(over) + "%"}
+        line={fmt(total) + " · " + days + " d"}
+        tip={tip}
+        state={over > max ? "over" : "ok"}
+      >
+        <Spark
+          values={rows.slice(-24).map((t) => (100 * (t[2] ?? 0)) / (((t[1] ?? 0) + (t[2] ?? 0)) || 1))}
+          target={max}
+          over={over > max}
+        />
+      </Tile>
+    );
+  };
+  const counts = [
+    [r.sessions, "sessions"],
+    [r.turns, "turns"],
+    [r.projectCount, "projects"],
+    [r.toolCalls, "tool calls"],
+  ]
+    .filter(([n]) => n != null)
+    .map(([n, name]) => fmt(Number(n)) + " " + name)
+    .join(" · ");
   tiles.push(
-    <Tile
-      key="over"
-      label={"Spend >target · " + (r.days ?? 0) + " d"}
-      icon="TrendingUp"
-      value={Math.round(over) + "%"}
-      line={fmt(r.total) + " · " + (r.days ?? 0) + " d"}
-      tip={"Spend over provider context target (" + CONTEXT_TARGET_LABEL + ") · " + fmt(r.total) + " tokens in " + (r.days ?? 0) + " d"}
-      state={over > MAX_OVER_TARGET_SHARE * 100 ? "over" : "ok"}
-    >
-      <Spark values={overHourly} target={MAX_OVER_TARGET_SHARE * 100} over={over > MAX_OVER_TARGET_SHARE * 100} />
-    </Tile>,
+    overTile(
+      "over",
+      "Spend >target · " + days + " d",
+      r.timeline ?? [],
+      Number(r.overTarget) || 0,
+      r.total ?? 0,
+      "Spend over provider context target (" + CONTEXT_TARGET_LABEL + ") · " + fmt(r.total) + " tokens in " + days + " d" + (counts ? " · " + counts : ""),
+    ),
   );
   for (const k of r.kpis ?? []) {
     const vals = k.values ?? [];
@@ -256,6 +280,8 @@ export function KpiStrip({
   const active = r.active ?? [];
   const top = active[0];
   const topBurn = top ? r.burns?.[top.source] : undefined;
+  // The benchmark is the top burner's own provider goal: red when that provider runs over it, green when under.
+  const topOver = top && topBurn?.goal ? topBurn.rate > topBurn.goal && top.rateShare >= 50 : null;
   tiles.push(
     <Tile
       key="active"
@@ -264,30 +290,24 @@ export function KpiStrip({
       value={active.length}
       line={top ? `top ${Math.round(top.rateShare)}%` : "none in 30 min"}
       tip={top ? "Top burner: " + (top.title || top.id) : "No session had a turn in the last 30 minutes"}
-      state={top && top.rateShare >= 50 && topBurn?.goal && topBurn.rate > topBurn.goal ? "over" : null}
+      state={topOver == null ? null : topOver ? "over" : "ok"}
     >
-      {top ? (
-        <div className="text-[11px] truncate" title={top.title || top.id}>
-          {top.title || top.id}
-        </div>
-      ) : null}
+      {top ? <Bar pct={top.rateShare} cls={topOver == null ? "bg-muted" : topOver ? "bg-hot" : "bg-ok"} /> : null}
     </Tile>,
   );
   for (const provider of Object.keys(r.timelines ?? {}) as Source[]) {
-    const spend = (r.timelines?.[provider] ?? []).reduce((sum, row) => sum + row[1] + row[2], 0);
-    tiles.push(<Tile key={`spend-${provider}`} label={`${sourceLabel(provider)} spend`} icon="Flame"
-      value={fmt(spend)} line={`${r.days ?? 0} d`} tip={`${sourceLabel(provider)} weighted tokens over the full window`}>
-      <Spark values={(r.timelines?.[provider] ?? []).slice(-24).map((row) => row[1] + row[2])} />
-    </Tile>);
-  }
-  for (const [label, value, line] of [
-    ["Sessions", r.sessions, "full window"],
-    ["Turns", r.turns, "full window"],
-    ["Tokens / turn", r.turns ? (r.total ?? 0) / r.turns : 0, "weighted average"],
-    ["Projects", r.projectCount, "full window"],
-    ["Tool calls", r.toolCalls, "full window"],
-  ] as const) {
-    tiles.push(<Tile key={label} label={label} value={value == null ? "—" : fmt(value)} line={line} />);
+    const rows = r.timelines?.[provider] ?? [];
+    const [cool, hot] = rows.reduce<[number, number]>((sum, row) => [sum[0] + row[1], sum[1] + row[2]], [0, 0]);
+    tiles.push(
+      overTile(
+        `spend-${provider}`,
+        `${sourceLabel(provider)} >target`,
+        rows,
+        (100 * hot) / (cool + hot || 1),
+        cool + hot,
+        `${sourceLabel(provider)} spend over its context target · ${fmt(cool + hot)} weighted tokens in ${days} d`,
+      ),
+    );
   }
   return <div className="grid gap-3 grid-cols-2 sm:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">{tiles}</div>;
 }
