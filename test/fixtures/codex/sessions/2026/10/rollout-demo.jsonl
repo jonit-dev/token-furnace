@@ -1,0 +1,11 @@
+{"timestamp":"2026-10-01T09:00:00+00:00","type":"session_meta","payload":{"id":"0a1b2c3d4e5f67890abc","cwd":"/home/dev/work/api"}}
+{"timestamp":"2026-10-01T09:00:05+00:00","type":"turn_context","payload":{"model":"gpt-5.5"}}
+{"timestamp":"2026-10-01T09:00:10+00:00","type":"event_msg","payload":{"type":"user_message","message":"write the parser"}}
+{"timestamp":"2026-10-01T09:00:20+00:00","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"cd /x && sed -n 1,9p f\"}"}}
+{"timestamp":"2026-10-01T09:00:25+00:00","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"input\":\"@@ -1 +1 @@\"}"}}
+{"timestamp":"2026-10-01T09:00:30+00:00","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":200,"reasoning_output_tokens":100}}}}
+{"timestamp":"2026-10-01T09:00:35+00:00","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":null}}}
+{"timestamp":"not-a-time","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}}}
+{"timestamp":"2026-10-01T09:00:40+00:00","type":"event_msg","payload":{"type":"user_message","message":"<teammate-message>ping</teammate-message>"}}
+{"timestamp":"2026-10-01T09:00:45+00:00","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"output_tokens":50,"reasoning_output_tokens":0}}}}
+{"type":"event_msg","payload":{"type":"user_me
