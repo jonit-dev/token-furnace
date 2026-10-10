@@ -3,7 +3,6 @@
 [![npm version](https://img.shields.io/npm/v/token-furnace)](https://www.npmjs.com/package/token-furnace)
 [![Node.js](https://img.shields.io/node/v/token-furnace)](https://www.npmjs.com/package/token-furnace)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![npm downloads](https://img.shields.io/npm/dm/token-furnace)](https://www.npmjs.com/package/token-furnace)
 
 Where the token budget actually went. `token-furnace` reads your local Claude Code and Codex
 transcripts, finds token leaks, and shows the result in your terminal, as JSON for agents, and in a
