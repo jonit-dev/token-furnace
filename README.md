@@ -20,6 +20,14 @@ Each card has a target. A red dot means the target is missed and a green dot mea
 
 Requires **Node.js 22.13 or newer** and local Claude Code, Codex or OpenCode transcripts.
 
+The CLI and local dashboard use Node.js APIs on Linux, macOS and Windows. Setup and
+configuration repair use the OS home directory when `HOME` is unset; custom agent directories
+are respected. Windows setup uses directory junctions on NTFS. Use `setup --rollback` to restore
+backups on any platform; the generated `restore.sh` additionally requires Bash.
+
+Platform CI is configured to run the tests and installed-package smoke checks on Linux, Windows and macOS,
+with Node 22.13 and 24. Live agent hooks and macOS Keychain access need separate verification.
+
 Run it without installing:
 
 ```sh

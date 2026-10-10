@@ -5,7 +5,7 @@ export const PROVIDERS = {
   claude: {
     label: "Claude Code",
     cacheWrites: true,
-    parserVersion: 0,
+    parserVersion: 1,
     compaction: `"autoCompactWindow": ${CONTEXT_TARGET.claude} in ~/.claude/settings.json`,
   },
   opencode: {
@@ -17,7 +17,7 @@ export const PROVIDERS = {
   codex: {
     label: "Codex",
     cacheWrites: false,
-    parserVersion: 1,
+    parserVersion: 2,
     compaction: `model_auto_compact_token_limit = ${CONTEXT_TARGET.codex} in ~/.codex/config.toml`,
   },
 } as const;

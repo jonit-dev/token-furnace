@@ -105,7 +105,7 @@ export class CodexSource implements AgentSource {
         // Code-mode wrappers log the commands they actually executed separately.
         pendingTools.push("exec_command");
         const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
-        const shellCommand = Array.isArray(item.command) && item.command.some((arg: unknown) => arg === "-lc" || arg === "-c")
+        const shellCommand = Array.isArray(item.command) && item.command.some((arg: unknown) => typeof arg === "string" && ["-lc", "-c", "-command"].includes(arg.toLowerCase()))
           ? item.command.at(-1) : command;
         pendingReads += isRead(null, shellCommand) ? 1 : 0;
         continue;

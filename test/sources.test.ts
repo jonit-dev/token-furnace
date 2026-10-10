@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isRead } from "../src/sources/agent-source";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -99,7 +102,7 @@ describe("ClaudeSource", () => {
   });
 
   it("defaults to ~/.claude when CLAUDE_CONFIG_DIR is unset", () => {
-    expect(new ClaudeSource({ HOME: "/home/dev" }).root()).toBe("/home/dev/.claude/projects");
+    expect(new ClaudeSource({ HOME: "/home/dev" }).root()).toBe(join("/home/dev", ".claude", "projects"));
   });
 
   it("treats a missing agent directory as not installed", () => {
@@ -124,6 +127,39 @@ describe("CodexSource", () => {
   });
 
   it("defaults to ~/.codex when CODEX_HOME is unset", () => {
-    expect(new CodexSource({ HOME: "/home/dev" }).root()).toBe("/home/dev/.codex/sessions");
+    expect(new CodexSource({ HOME: "/home/dev" }).root()).toBe(join("/home/dev", ".codex", "sessions"));
+  });
+});
+
+
+describe("Windows shell reads", () => {
+  it.each(["Get-Content src/main.ts", "get-content src/main.ts", "gc src/main.ts", "type src\\main.ts", "Select-String TODO src/main.ts", "Set-Location src; Get-Content main.ts", "echo ready | Get-Content src/main.ts"])("counts %s", (command) => {
+    expect(isRead("PowerShell", command)).toBe(true);
+  });
+  it.each(["Set-Content src/main.ts hello", "Get-Contentment src/main.ts", "typewriter src/main.ts", 'echo "Get-Content src/main.ts"'])("does not count %s", (command) => {
+    expect(isRead("PowerShell", command)).toBe(false);
+  });
+  it("counts reads in Codex PowerShell command arrays", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-powershell-array-"));
+    try {
+      const path = join(root, "rollout-windows.jsonl");
+      const records = readFileSync(CODEX_FILE, "utf8").trim().split("\n");
+      records[3] = JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: {
+        type: "CommandExecution", id: "windows-read", command: ["powershell.exe", "-NoProfile", "-Command", "Get-Content src/main.ts"] } } });
+      writeFileSync(path, records.join("\n"));
+      expect(new CodexSource({}).parse(path).turns[0].reads).toBe(1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("counts PowerShell reads through both transcript parsers with CRLF", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-windows-reads-"));
+    try {
+      for (const [source, original] of [[new ClaudeSource({}), CLAUDE_FILE], [new CodexSource({}), CODEX_FILE]] as const) {
+        const path = join(root, source.name + ".jsonl");
+        const text = readFileSync(original, "utf8").replace(/sed -n 1,9p f/g, "Get-Content f").replace(/sed -n 1,20p x/g, "Get-Content x");
+        writeFileSync(path, text.replaceAll("\n", "\r\n"));
+        expect(source.parse(path).turns.map((turn) => turn.reads)).toEqual(source.parse(original).turns.map((turn) => turn.reads));
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

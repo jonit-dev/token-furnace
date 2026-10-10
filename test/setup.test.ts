@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,10 +12,16 @@ import {
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli";
 import { compose } from "../src/compose";
+import { runSetup } from "../src/setup/agents";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, writeFileSync: vi.fn(fs.writeFileSync) };
+});
 
 describe("token-furnace setup", () => {
   let testHome: string;
@@ -28,6 +33,7 @@ describe("token-furnace setup", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(testHome, { recursive: true, force: true });
   });
 
@@ -37,6 +43,44 @@ describe("token-furnace setup", () => {
       ...env,
     }, { noCache: true });
   }
+
+  it.each([false, true])("uses the OS home without HOME and respects custom directories (%s)", async (custom) => {
+    vi.stubEnv("HOME", testHome);
+    vi.stubEnv("USERPROFILE", testHome);
+    const claudeDir = join(testHome, custom ? "claude custom" : ".claude");
+    const codexDir = join(testHome, custom ? "codex custom" : ".codex");
+    mkdirSync(claudeDir); mkdirSync(codexDir);
+    const settings = join(claudeDir, "settings.json");
+    const config = join(codexDir, "config.toml");
+    writeFileSync(settings, '{"keep":true}');
+    writeFileSync(config, 'keep = true\n');
+    const app = appFor({ HOME: undefined,
+      CLAUDE_CONFIG_DIR: custom ? claudeDir : undefined,
+      CODEX_HOME: custom ? codexDir : undefined });
+    let plan = "";
+    expect(runSetup({}, app.env, { write: (text) => { plan += text; } })).toBe(0);
+    expect(plan).toContain(join(testHome, ".agents", "token-furnace-backups"));
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    expect(JSON.parse(readFileSync(settings, "utf8")).env.ENABLE_TOOL_SEARCH).toBe("true");
+    expect(readFileSync(config, "utf8")).toContain('model_verbosity = "low"');
+    expect(await main(["setup", "--verify"], app)).toBe(0);
+    expect(await main(["fix-config"], app)).toBe(0);
+    expect(JSON.parse(readFileSync(settings, "utf8")).autoCompactWindow).toBe(400000);
+    expect(parseToml(readFileSync(config, "utf8")).model_auto_compact_token_limit).toBe(300000);
+    expect(await main(["setup", "--rollback"], app)).toBe(0);
+    expect(readFileSync(settings, "utf8")).toBe('{"keep":true}');
+    expect(readFileSync(config, "utf8")).toBe('keep = true\n');
+    if (custom) {
+      expect(existsSync(join(testHome, ".claude"))).toBe(false);
+      expect(existsSync(join(testHome, ".codex"))).toBe(false);
+    }
+  });
+
+  it("repairs configuration without HOME when explicit agent directories are supplied", async () => {
+    const app = appFor({ HOME: undefined, CLAUDE_CONFIG_DIR: join(testHome, "claude"), CODEX_HOME: join(testHome, "codex") });
+    expect(await main(["fix-config"], app)).toBe(0);
+    expect(JSON.parse(readFileSync(join(testHome, "claude", "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+  });
 
   it("AC-1: dry-run changes no files and prints planned actions", async () => {
     const app = appFor();
@@ -185,7 +229,7 @@ describe("token-furnace setup", () => {
   it("Defect 2: restores cleanly with hostile HOME containing spaces, apostrophe, $(), and backticks", async () => {
     const hostileRoot = mkdtempSync(join(tmpdir(), "tf-test 'with space' $(echo evil) `touch marker`-"));
     try {
-      const app = compose({ HOME: hostileRoot });
+      const app = compose({ HOME: hostileRoot }, { noCache: true });
       const claudeSettings = join(hostileRoot, ".claude", "settings.json");
       mkdirSync(join(hostileRoot, ".claude"), { recursive: true });
       const initialClaudeBytes = JSON.stringify({ safe: true });
@@ -331,7 +375,7 @@ describe("token-furnace setup", () => {
     const elsewhere = join(testHome, "elsewhere");
     mkdirSync(elsewhere, { recursive: true });
     rmSync(linkPath, { recursive: true, force: true });
-    symlinkSync(elsewhere, linkPath);
+    symlinkSync(elsewhere, linkPath, process.platform === "win32" ? "junction" : "dir");
 
     expect(await main(["setup", "--apply"], app)).toBe(0);
 
@@ -478,12 +522,10 @@ describe("token-furnace fix-config", () => {
     mkdirSync(join(testHome, ".claude"));
     const path = join(testHome, ".claude", "settings.json");
     writeFileSync(path, '{}');
-    chmodSync(join(testHome, ".claude"), 0o500);
-    try {
-      expect(await main(["fix-config"], compose({ HOME: testHome }, { noCache: true }))).toBe(1);
-      expect(readFileSync(path, "utf8")).toBe('{}');
-      expect(existsSync(join(testHome, ".codex", "config.toml"))).toBe(false);
-    } finally { chmodSync(join(testHome, ".claude"), 0o700); }
+    vi.mocked(writeFileSync).mockImplementationOnce(() => { throw new Error("backup refused"); });
+    expect(await main(["fix-config"], compose({ HOME: testHome }, { noCache: true }))).toBe(1);
+    expect(readFileSync(path, "utf8")).toBe('{}');
+    expect(existsSync(join(testHome, ".codex", "config.toml"))).toBe(false);
   });
 
   it("creates missing configuration with the requested targets", async () => {

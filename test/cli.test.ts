@@ -58,7 +58,7 @@ function env(root: string): NodeJS.ProcessEnv {
 
 /** The clock moves the weekly reset label and the fixture's own paths; neither is the verdict. */
 function mask(text: string, root: string): string {
-  return text.replaceAll(root, "<root>").replace(/(weekly reset )\w{3} \d\d:\d\d/g, "$1<when>");
+  return text.replaceAll(root, "<root>").replaceAll("\\", "/").replace(/(weekly reset )\w{3} \d\d:\d\d/g, "$1<when>");
 }
 
 /** Run the CLI with stdout and stderr captured. */
@@ -231,7 +231,7 @@ describe("--list-sources", () => {
     const run1 = await run(["--list-sources"], leaksRoot);
     expect(run1.code).toBe(0);
     expect(run1.out).toMatch(/^ {2}claude\s+\S*projects\s+3 transcripts$/m);
-    expect(run1.out).toMatch(/^ {2}codex\s+\S*codex\/sessions\s+1 transcripts$/m);
+    expect(run1.out).toMatch(/^ {2}codex\s+\S*codex[\\/]sessions\s+1 transcripts$/m);
     const missing = await run(["--list-sources"], emptyRoot);
     expect(missing.out).toContain("not installed");
   });

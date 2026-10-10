@@ -26,12 +26,15 @@ export type Env = Record<string, string | undefined>;
 const READ_COMMAND =
   /(?:^|&&|;|\|\||\n)\s*(?:sed -n|grep|rg|cat|head|tail|awk|jq|find|python3? -c?(?:\s|$))/;
 
+const WINDOWS_READ_COMMAND =
+  /(?:^|&&|;|\|\||\||\n)\s*(?:Get-Content|Select-String|gc|cat|type|sls)(?:\s|$)/i;
+
 const READ_TOOLS = new Set(["Read", "Grep", "Glob", "read", "grep", "glob"]);
 
 export function isRead(name: unknown, command: unknown): boolean {
   if (typeof name === "string" && READ_TOOLS.has(name)) return true;
   const text = typeof command === "string" ? command.trim() : "";
-  return text !== "" && READ_COMMAND.test(text);
+  return text !== "" && (READ_COMMAND.test(text) || WINDOWS_READ_COMMAND.test(text));
 }
 
 /** What a user record means: a wakeup kind, a human prompt, or null (harness noise). burn.py:105 */

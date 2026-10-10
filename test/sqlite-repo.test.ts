@@ -39,6 +39,25 @@ function parseLog(app: App): string[] {
 }
 
 describe("SqliteSessionRepository", () => {
+  it.each([["claude", 0], ["codex", 1]] as const)("reparses %s reads from the previous parser version", async (source, previousVersion) => {
+    const { app, cacheDir } = fixtureApp();
+    try {
+      await app.reports.refresh();
+      const db = new DatabaseSync(join(cacheDir, "token-furnace", "cache.sqlite"));
+      try {
+        db.prepare("UPDATE files SET parser_version = ? WHERE source = ?").run(previousVersion, source);
+        db.prepare("UPDATE turns SET reads = 0 WHERE path IN (SELECT path FROM files WHERE source = ?)").run(source);
+      } finally { db.close(); }
+      const seen = parseLog(app);
+      await app.reports.refresh();
+      expect(seen.length).toBeGreaterThan(0);
+      expect(app.repo.all().filter((session) => session.source === source).flatMap((session) => session.turns).some((turn) => turn.reads > 0)).toBe(true);
+      seen.length = 0;
+      await app.reports.refresh();
+      expect(seen).toEqual([]);
+    } finally { (app.repo as SqliteSessionRepository).close(); }
+  });
+
   it("AC-1: report from SQLite repository equals report from memory repository", async () => {
     const root = mkdtempSync(join(tmpdir(), "tf-ac1-root-"));
     const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac1-cache-"));

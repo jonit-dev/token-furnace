@@ -11,6 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -124,15 +125,15 @@ export function runSetup(
   env: Env = process.env,
   out: { write(text: string): unknown } = process.stdout,
 ): number {
-  const home = env.HOME ?? "";
+  const home = env.HOME || homedir();
   const apply = Boolean(opts.apply);
   const aggressive = Boolean(opts.aggressive);
   const rollback = Boolean(opts.rollback);
   const verifyOnly = Boolean(opts.verify);
 
   const hub = join(home, ".agents", "skills");
-  const claudeDir = join(home, ".claude");
-  const codexDir = join(home, ".codex");
+  const claudeDir = env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+  const codexDir = env.CODEX_HOME || join(home, ".codex");
   const backupRoot = join(home, ".agents", "token-furnace-backups");
 
   const here = dirname(fileURLToPath(import.meta.url));
@@ -441,7 +442,7 @@ export function runSetup(
     if (apply) {
       mkdirSync(dirname(linkPath), { recursive: true });
       ensureBackup();
-      symlinkSync(target, linkPath);
+      symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
       did(disp);
     } else {
       plan(`link ${disp} -> ${dispT}`);
@@ -706,9 +707,9 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
     }
     if (!repairs.length) { out.write("No repairs selected. No files changed.\n"); return 0; }
     const selected = (id: ConfigRepairId) => repairs.includes(id);
-    if (!env.HOME) throw new Error("HOME must be set");
-    const claudePath = join(env.CLAUDE_CONFIG_DIR || join(env.HOME, ".claude"), "settings.json");
-    const codexPath = join(env.CODEX_HOME || join(env.HOME, ".codex"), "config.toml");
+    const home = env.HOME || homedir();
+    const claudePath = join(env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "settings.json");
+    const codexPath = join(env.CODEX_HOME || join(home, ".codex"), "config.toml");
     const changes: { path: string; before: string | null; after: string }[] = [];
     const withinCap = (value: unknown, cap: number) => {
       const n = typeof value === "number" || typeof value === "string" && value.trim() ? Number(value) : NaN;

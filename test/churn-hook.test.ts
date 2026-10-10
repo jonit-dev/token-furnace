@@ -7,7 +7,7 @@ import { runChurnHook } from "../src/setup/churn-hook";
 let root: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "tf-churn-"));
-  vi.stubEnv("TMPDIR", root);
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) vi.stubEnv(key, root);
 });
 afterEach(() => {
   vi.unstubAllEnvs();
