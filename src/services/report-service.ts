@@ -81,8 +81,8 @@ export class ReportService {
       onProgress?.(progress);
     };
 
-    // A handful of files is faster in-process than the cost of starting threads.
-    const pool = this.workers && this.workers.size > 1 && todo.length > 16 ? new ParsePool(this.workers.url, this.env, this.workers.size) : null;
+    const poolSize = this.workers && todo.length ? Math.min(this.workers.size, todo.length) : 0;
+    const pool = poolSize >= 1 ? new ParsePool(this.workers!.url, this.env, poolSize) : null;
     try {
       if (pool) {
         // One lane per worker: each takes the next file, newest first, as soon as it is free.
@@ -101,7 +101,7 @@ export class ReportService {
             done(item);
           }
         };
-        await Promise.all(Array.from({ length: this.workers!.size }, (_, index) => lane(index)));
+        await Promise.all(Array.from({ length: poolSize }, (_, index) => lane(index)));
       } else {
         let lastYield = Date.now();
         for (const item of todo) {

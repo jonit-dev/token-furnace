@@ -122,4 +122,37 @@ describe("worker-thread scan", () => {
 
     await expect(failingService.refresh()).rejects.toThrow("unreadable transcript");
   }, 60_000);
+
+  it.each([1, 4])("parses single pending file with worker (size %i) when main-thread throws", async (size) => {
+    const oneDir = mkdtempSync(join(tmpdir(), "tf-one-"));
+    const singleEnv = harnessEnv(oneDir, now);
+    const file = join(oneDir, "projects", "single", "session.jsonl");
+    mkdirSync(join(oneDir, "projects", "single"), { recursive: true });
+    writeFileSync(file, `${assistant(new Date(now.getTime() - 60_000), 12_345)}\n`);
+
+    const expectedService = new ReportService(
+      [new ClaudeSource(singleEnv)],
+      new MemorySessionRepository(),
+      singleEnv,
+      null,
+    );
+    await expectedService.refresh();
+    const expectedReport = expectedService.getReport(7, "claude", { weeklyBudget: null, now });
+
+    const failingSource = new ClaudeSource(singleEnv);
+    failingSource.parse = () => {
+      throw new Error("main thread must not parse this file");
+    };
+    const workerService = new ReportService(
+      [failingSource],
+      new MemorySessionRepository(),
+      singleEnv,
+      { url: workerUrl, size },
+    );
+    await workerService.refresh();
+
+    expect(workerService.progress.filesTotal).toBe(1);
+    expect(workerService.progress.filesDone).toBe(1);
+    expect(workerService.getReport(7, "claude", { weeklyBudget: null, now })).toEqual(expectedReport);
+  }, 60_000);
 });

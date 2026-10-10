@@ -18,7 +18,7 @@ One choke point: `ReportService.refresh()` in `src/services/report-service.ts`. 
 | Piece | File | Change |
 |---|---|---|
 | `ScanProgress` type | `src/core/model.ts` | Type only. No I/O in `core/`. |
-| Progress state, async loop, single-flight | `src/services/report-service.ts` | `refresh()` is async. It uses the parse pool for more than 16 changed files, or yields in-process every 25 ms. Overlapping requests share one scan. |
+| Progress state, async loop, single-flight | `src/services/report-service.ts` | `refresh()` is async. It uses the parse pool for every nonempty scan, capped to the changed-file count, or yields in-process every 25 ms when workers are disabled or unavailable. Overlapping requests share one scan. |
 | Parallel transcript parsing | `src/services/parse-pool.ts`, `src/scan-worker.ts`, `src/compose.ts`, `tsup.config.ts` | Built CLI runs use up to 8 worker threads. Source runs and `TOKEN_FURNACE_WORKERS=0` use the in-process path. |
 | Background rescan | `src/server.ts` | After 5 seconds, a request starts a rescan and serves the previous report. Later polls see the refreshed report. |
 | `GET /api/status`, 202 path | `src/server.ts` (before `/api/report`, line 54) | Read `app.reports.progress`. Never await the scan. |
@@ -54,7 +54,7 @@ One choke point: `ReportService.refresh()` in `src/services/report-service.ts`. 
 
 ## Integration Ledger
 
-Verification on 2026-10-09, Node 24.16.0: typecheck, all 49 tests and build pass. Two sequential in-process CLI runs and an 8-worker run produce byte-identical JSON on the frozen 1.7 GB snapshot with plan usage disabled. The earlier Codex week mismatch did not reproduce; no cause is claimed. The fixture test selects an explicit Codex rate-limit reading and compares full reports. Worker exits with code 0 or 1 fall back without losing report data, and an unreadable fallback transcript rejects the scan. Re-run the acceptance checks after the SQLite and React merges.
+Verification on 2026-10-09, Node 24.16.0: typecheck, all 56 tests and build pass. Single-file cold scans use real parser workers with configured sizes 1 and 4; the regression makes main-thread parsing throw, so a fallback cannot falsely pass. Worker startup now also applies to small scans. Two sequential in-process CLI runs and an 8-worker run produce byte-identical JSON on the frozen 1.7 GB snapshot with plan usage disabled. The earlier Codex week mismatch did not reproduce; no cause is claimed. The fixture test selects an explicit Codex rate-limit reading and compares full reports. Worker exits with code 0 or 1 fall back without losing report data, and an unreadable fallback transcript rejects the scan. After SQLite integration and the small-scan worker change, an explicitly fresh-cache preview on 7,240 real transcripts (13.3 GB) returned scanning status in 57 ms about 1 second after launch, with 27 files already parsed; `/` contained the loading text and progress bar. Re-run the acceptance checks after the React merge.
 
 | Item | Source | Target | AC |
 |---|---|---|---|

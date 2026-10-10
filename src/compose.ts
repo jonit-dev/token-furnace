@@ -44,6 +44,8 @@ export function compose(env: Env = process.env, opts?: { noCache?: boolean }): A
  */
 function workers(env: Env): { url: URL; size: number } | null {
   const url = new URL("./scan-worker.js", import.meta.url);
-  const wanted = Number(env.TOKEN_FURNACE_WORKERS ?? Math.min(availableParallelism() - 1, 8));
-  return existsSync(fileURLToPath(url)) && wanted > 1 ? { url, size: Math.floor(wanted) } : null;
+  const wanted = env.TOKEN_FURNACE_WORKERS !== undefined
+    ? Number(env.TOKEN_FURNACE_WORKERS)
+    : Math.max(1, Math.min(availableParallelism() - 1, 8));
+  return existsSync(fileURLToPath(url)) && wanted >= 1 ? { url, size: Math.floor(wanted) } : null;
 }
