@@ -1,0 +1,13 @@
+#!/bin/sh
+# Token Furnace: detect common token leaks in local agent transcripts and recommend fixes.
+# Usage: doctor [days] [--source claude|codex]   (default: last 7 days, every agent found)
+# Also makes sure the live report runs on http://127.0.0.1:$TOKEN_FURNACE_PORT (default 8765; 0 turns it off).
+here="$(dirname "$0")"
+port="${TOKEN_FURNACE_PORT:-8765}"
+state="${XDG_CACHE_HOME:-$HOME/.cache}/token-furnace"
+mkdir -p "$state"
+if [ "$port" != 0 ] && ! python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $port), 1)" 2>/dev/null; then
+  nohup python3 "$here/burn.py" 7 --serve "$port" >"$state/serve.log" 2>&1 &
+fi
+[ "$port" != 0 ] && echo "Live report: http://127.0.0.1:$port"
+exec python3 "$here/burn.py" --doctor --html "$state/report.html" "$@"

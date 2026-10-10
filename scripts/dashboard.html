@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Furnace</title>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.js"></script>
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>
+tailwind.config = {
+  darkMode: 'media',
+  theme: {
+    extend: {
+      colors: {
+        bg: 'var(--bg)', card: 'var(--card)', ink: 'var(--ink)', muted: 'var(--muted)',
+        line: 'var(--line)', chip: 'var(--chip)',
+        accent: '#f97316', bar: '#4a9eff', ok: '#4ade80', hot: '#ef4444',
+      },
+      fontFamily: { heading: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'] },
+    },
+  },
+};
+</script>
+<style>
+/* Token Furnace runs dark: a warm near-black shell, brighter cards, flame accent. */
+:root { color-scheme: dark; --bg: #131110; --card: #1e1b19; --ink: #f6f1ec; --muted: #a49b92; --line: #322c28; --chip: #2a2521; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 0.875rem; overflow-wrap: anywhere; }
+.glow { filter: drop-shadow(0 0 6px rgba(249, 115, 22, 0.45)); }
+</style>
+<script>window.__REPORT__ = /*REPORT*/null</script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const {React, ReactDOM, htm} = window;
+const html = htm.bind(React.createElement);
+const WEEK_MS = 7 * 24 * 3600e3;
+const TABS = [['dashboard', 'Dashboard'], ['checkup', 'Checkup'], ['sessions', 'Sessions']];
+// Old hashes keep working.
+const TAB_ALIAS = {leaks: 'checkup', baseline: 'checkup', details: 'sessions'};
+const serving = location.protocol.startsWith('http');
+
+// Lucide icons, drawn from the UMD bundle's icon nodes (no emoji). Names are PascalCase.
+const iconProp = (k) => k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+const iconAttrs = (attrs, key) => {
+  const p = {key};
+  for (const k in attrs) if (k !== 'width' && k !== 'height') p[iconProp(k)] = attrs[k];
+  return p;
+};
+const iconNode = (n, key) => React.createElement(n[0], iconAttrs(n[1], key), (n[2] ?? []).map(iconNode));
+const Icon = ({name, size = 16, className = ''}) => {
+  const node = window.lucide?.icons?.[name];
+  if (!node) return null;
+  const [tag, attrs, children] = node;
+  const props = iconAttrs(attrs, 'i');
+  props.width = size;
+  props.height = size;
+  if (className) props.className = className;
+  return React.createElement(tag, props, (children ?? []).map(iconNode));
+};
+
+// Formatting helpers. Each one accepts missing values.
+const fmt = (n) => {
+  n = Number(n);
+  if (!isFinite(n)) return '—';
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
+  if (a >= 1e3) return (n / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
+  return String(Math.round(n));
+};
+const pct = (x) => {
+  const v = (Number(x) || 0) * 100;
+  return (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + '%';
+};
+const sharePct = (s) => (Number(s) || 0).toFixed(1) + '%';
+const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+const toDate = (iso) => new Date(String(iso ?? '').replace(/(\.\d{3})\d+/, '$1'));
+const clock = (d) => String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+const dayLabel = (d) => d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
+const stamp = (iso) => (iso && !isNaN(toDate(iso)) ? toDate(iso).toLocaleString() : '—');
+const sourceLabel = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const SHORT = {'Median context per turn': 'Median ctx', 'Turns over 300k context': 'Turns >300k', 'Caller reads per tool call': 'Caller reads'};
+// Severity word and dot. Critical is filled coral, warn an outline, ok green, info grey. Red stays for "Runs out in".
+const LEVEL = {critical: ['bg-accent', 'text-accent', 'Critical'], warn: ['border border-accent', 'text-muted', 'Warn'],
+  ok: ['bg-ok', 'text-muted', 'OK'], info: ['bg-muted', 'text-muted', 'Info']};
+const LEVEL_ORDER = ['critical', 'warn', 'ok', 'info'];
+const LevelTag = ({level}) => {
+  const [dot, text, label] = LEVEL[level] ?? LEVEL.info;
+  return html`<span class="inline-flex items-center gap-1.5 text-xs ${text}"><span class="size-2 shrink-0 rounded-full ${dot}"></span>${label}</span>`;
+};
+// Which agent a check or leak belongs to.
+const SOURCE_LABEL = {claude: 'Claude Code', codex: 'Codex', all: 'Both'};
+const SourceBadge = ({source}) => {
+  const label = SOURCE_LABEL[source];
+  if (!label) return null;
+  const cls = source === 'claude' ? 'bg-accent/10 text-accent'
+    : source === 'codex' ? 'bg-bar/15 text-bar' : 'bg-chip text-muted';
+  return html`<span class="px-1.5 rounded text-[10px] leading-4 whitespace-nowrap ${cls}">${label}</span>`;
+};
+const quota = (v) => (Number(v) || 0).toFixed(2) + ' %/h';
+const kpiFmt = (kpi, v) => (kpi.unit === '%' ? pct(v) : fmt(v));
+
+// Clipboard API first. A hidden textarea and execCommand are the fallback.
+const copyText = (text) => {
+  const fallback = () => {
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.style.position = 'fixed';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+    el.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(el);
+  };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).catch(fallback);
+  else fallback();
+};
+
+const CopyButton = ({text, label = 'Copy', className = ''}) => {
+  const [done, setDone] = React.useState(false);
+  const timer = React.useRef(0);
+  const onClick = () => {
+    copyText(text || '');
+    setDone(true);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setDone(false), 1500);
+  };
+  return html`<button type="button" onClick=${onClick} class=${className}>${done ? 'Copied' : label}</button>`;
+};
+
+// Measured pixel size of a box, so an SVG can draw at 1:1 and keep its text undistorted.
+const useSize = () => {
+  const ref = React.useRef(null);
+  const [size, setSize] = React.useState({w: 0, h: 0});
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const ro = new ResizeObserver(([e]) => setSize({w: Math.round(e.contentRect.width), h: Math.round(e.contentRect.height)}));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, size];
+};
+
+// Burn gauge. The dial runs from 0 to max(2x goal, 1.25x rate). Green up to the goal, coral past it.
+const GAUGE_TIP = 'Quota points per hour, calibrated each time the weekly reading refreshes (every 5 min while the status line runs).';
+const Gauge = ({burn}) => {
+  if (!burn?.goal) {
+    return html`<div class="py-6 text-center">
+      <p class="text-muted">No hourly goal yet</p>
+      <p class="text-xs text-muted mt-1">Set --weekly-budget or sign in to Claude Code.</p>
+    </div>`;
+  }
+  const pctMode = burn.ratePct != null && burn.idealPct != null;
+  const rate = Number(pctMode ? burn.ratePct : burn.rate) || 0;
+  const goal = Number(pctMode ? burn.idealPct : burn.goal);
+  const over = rate > goal;
+  const max = Math.max(2 * goal, 1.25 * rate);
+  const fr = Math.min(1, rate / max), fg = goal / max;
+  const r = 76, cx = 100, cy = 100;
+  const at = (f, rad = r) => [cx - rad * Math.cos(Math.PI * f), cy - rad * Math.sin(Math.PI * f)];
+  const arc = (f0, f1, cls) => {
+    if (f1 - f0 < 0.002) return null;
+    const [xa, ya] = at(f0), [xb, yb] = at(f1);
+    return html`<path d="M${xa} ${ya} A${r} ${r} 0 0 1 ${xb} ${yb}" fill="none" class=${cls} stroke-width="12" stroke-linecap="round"/>`;
+  };
+  const [t0x, t0y] = at(fg, r - 8), [t1x, t1y] = at(fg, r + 6), [lx, ly] = at(fg, r + 15);
+  const th = Math.PI * fr, [tx, ty] = at(fr, r - 12);
+  const px = Math.sin(th) * 3.5, py = -Math.cos(th) * 3.5;
+  const ratio = rate / goal;
+  return html`<div class="flex flex-wrap items-center justify-center gap-x-4 gap-y-1" title=${pctMode ? GAUGE_TIP : null}>
+    <svg viewBox="0 0 200 112" class="w-[210px] h-auto shrink-0" role="img" aria-label="Burn rate against ideal pace">
+      <path d="M${at(0)[0]} ${at(0)[1]} A${r} ${r} 0 0 1 ${at(1)[0]} ${at(1)[1]}" fill="none" class="stroke-line" stroke-width="12" stroke-linecap="round"/>
+      ${arc(0, Math.min(fr, fg), 'stroke-ok glow')}
+      ${arc(fg, fr, 'stroke-accent glow')}
+      <line x1=${t0x} y1=${t0y} x2=${t1x} y2=${t1y} class="stroke-ink" stroke-width="1.5"/>
+      <text x=${lx} y=${ly + 3} text-anchor="middle" font-size="10" class="fill-muted">ideal</text>
+      <polygon points="${cx + px},${cy + py} ${cx - px},${cy - py} ${tx},${ty}" class="fill-ink"/>
+      <circle cx=${cx} cy=${cy} r="5" class="fill-ink"/>
+    </svg>
+    <div class="text-center">
+      <div class="text-3xl font-semibold leading-8">${pctMode ? quota(rate) : fmt(rate) + '/h'}</div>
+      <div class="text-xs text-muted">ideal ${pctMode ? quota(goal) : fmt(goal) + '/h'}</div>
+      <div class="text-[11px] text-muted">${pctMode ? fmt(burn.rate) + ' tokens/h' : 'no quota reading'}</div>
+      <div class="mt-2 text-xs font-medium px-2.5 py-1 rounded-full inline-block ${over ? 'bg-accent/10 text-accent' : 'bg-ok/10 text-ok'}">${over ? ratio.toFixed(1) + '× the sustainable pace' : 'On pace'}</div>
+    </div>
+    ${burn.basis ? html`<p class="basis-full text-center text-[11px] text-muted">${burn.basis}</p>` : null}
+  </div>`;
+};
+
+const SourceToggle = ({sources, value, onChange}) => html`<div role="group" aria-label="Burn source"
+  class="inline-flex p-0.5 rounded-lg bg-chip border border-line">
+  ${sources.map(s => html`<button key=${s} type="button" aria-pressed=${s === value} onClick=${() => onChange(s)}
+    class="px-2 py-0.5 text-xs rounded-md ${s === value ? 'bg-card text-ink border border-line' : 'text-muted'}">${sourceLabel(s)}</button>`)}
+</div>`;
+
+const ActNow = ({r}) => {
+  const acts = r.actions ?? [];
+  const urgent = (r.issues ?? []).filter(i => i.priority === 1);
+  if (!acts.length && !urgent.length) return html`<p class="text-sm text-muted">Nothing urgent.</p>`;
+  return html`<ul class="divide-y divide-line">
+    ${acts.map(a => html`<li key=${a} class="flex gap-2 py-2 text-xs"><${Icon} name="Flame" size=${14} className="text-accent shrink-0 mt-0.5" /><span class="min-w-0" title=${a}>${a}</span></li>`)}
+    ${urgent.map(i => html`<li key=${i.title} class="flex items-center gap-2 py-2" title=${i.fix}>
+      <${Icon} name="TriangleAlert" size=${16} className="text-hot shrink-0" />
+      <div class="min-w-0 flex-1">
+        <div class="text-xs font-medium truncate">${i.title}</div>
+      </div>
+      <${CopyButton} text=${i.prompt} label="Copy fix"
+        className="shrink-0 w-[4.5rem] text-center text-[11px] px-2 py-0.5 bg-chip rounded border border-line hover:border-accent" />
+    </li>`)}
+  </ul>`;
+};
+
+// Shared table header style.
+const TH = 'text-[11px] uppercase tracking-wide text-muted font-normal [&_th]:font-normal';
+
+const ActiveSessions = ({sessions, source, limit}) => {
+  // With the source toggle on, show only that source's sessions.
+  const rows = source ? sessions.filter(s => s.source === source) : sessions;
+  if (!rows.length) {
+    const who = source ? sourceLabel(source) + ' ' : '';
+    return html`<p class="text-sm text-muted">No ${who}session had a turn in the last 30 minutes.</p>`;
+  }
+  return html`<div class="overflow-x-auto -mx-1"><table class="w-full min-w-max text-xs">
+    <thead><tr class="text-left ${TH}">
+      <th class="px-1 pb-1">Session</th><th class="px-1">Model</th>
+      <th class="px-1 text-right">Burn rate</th><th class="px-1">Burn share</th>
+      <th class="px-1 text-right">Context</th><th class="px-1 text-right">Age</th>
+      <th class="px-1 text-right">Idle</th><th class="px-1">Flags</th>
+    </tr></thead>
+    <tbody>${rows.map((s, i) => {
+      const share = Number(s.rateShare) || 0;
+      const hot = share >= 50;
+      return html`<tr key=${i} class="border-t border-line align-middle">
+        <td class="px-1 py-1 max-w-[16rem] min-w-[10rem]"><div class="truncate" title=${s.title || '(untitled)'}>${s.title || '(untitled)'}</div><div class="text-[11px] text-muted truncate">${s.project ?? '?'} · ${s.id}</div></td>
+        <td class="px-1 py-1 text-muted whitespace-nowrap">${s.model ? s.model.replace(/^claude-/, '') : '—'}</td>
+        <td class="px-1 py-1 text-right whitespace-nowrap" title=${limit ? fmt(s.rate) + '/h' : null}>${limit ? quota(100 * s.rate / limit) : fmt(s.rate) + '/h'}</td>
+        <td class="px-1 py-1 whitespace-nowrap"><span class="${hot ? 'text-accent' : ''}">${sharePct(share)}</span>
+          <div class="mt-0.5 h-1 w-14 rounded bg-line overflow-hidden"><div class="h-full ${hot ? 'bg-accent' : 'bg-bar'}" style=${{width: Math.min(100, Math.max(0, share)) + '%'}}></div></div></td>
+        <td class="px-1 py-1 text-right">${fmt(s.context)}</td>
+        <td class="px-1 py-1 text-right whitespace-nowrap">${Number(s.hours || 0).toFixed(1)} h</td>
+        <td class="px-1 py-1 text-right whitespace-nowrap">${(s.idle || 0) < 1 ? 'now' : Math.round(s.idle) + ' m'}</td>
+        <td class="px-1 py-1"><div class="flex flex-wrap gap-1">${(s.flags ?? []).map(f => html`<span key=${f} title=${f}
+          class="px-1.5 rounded text-[10px] leading-4 bg-accent/10 text-accent cursor-help whitespace-nowrap">${f.split(':')[0]}</span>`)}</div></td>
+      </tr>`;
+    })}</tbody>
+  </table></div>`;
+};
+
+const Card = ({title, sub, icon, right, className = '', children}) => html`<section class="card p-4 min-w-0 flex flex-col ${className}">
+  ${title || right ? html`<div class="flex items-start justify-between gap-3 mb-3">
+    <div class="flex items-start gap-2 min-w-0">
+      ${icon ? html`<${Icon} name=${icon} size=${16} className="text-accent shrink-0 mt-0.5" />` : null}
+      <div class="min-w-0">
+        <h2 class="text-sm font-semibold leading-5">${title}</h2>
+        ${sub ? html`<p class="text-[11px] text-muted leading-4 truncate">${sub}</p>` : null}
+      </div>
+    </div>${right}</div>` : null}
+  ${children}
+</section>`;
+
+// Small trend line. The dashed line marks the target. Lower is better for every series here.
+// Muted unless the tile is over its target.
+const Spark = ({values, target, over}) => {
+  if (values.length < 2) return null;
+  const w = 100, h = 20, maxV = Math.max(...values, target ?? 0) || 1;
+  const x = (i) => (i / (values.length - 1)) * w;
+  const y = (v) => h - 2 - (v / maxV) * (h - 4);
+  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(' ');
+  return html`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="w-full h-5 block" aria-hidden="true">
+    <path d="${line} L${w},${h} L0,${h} Z" fill-opacity="0.14" class=${over ? 'fill-hot' : 'fill-accent'}/>
+    ${target != null ? html`<line x1="0" x2=${w} y1=${y(target)} y2=${y(target)} class="stroke-muted"
+      stroke-dasharray="3 2" vector-effect="non-scaling-stroke"/>` : null}
+    <path d=${line} fill="none" class=${over ? 'stroke-hot' : 'stroke-accent'} stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+};
+
+// One compact KPI tile. state: 'crit' needs action now, 'over' misses the target, 'ok' meets it, null has no target.
+const DOT = {crit: 'bg-hot', over: 'bg-accent', ok: 'bg-ok'};
+const Tile = ({label, value, line, tip, state, icon, children}) => html`<div class="card px-3 py-2.5 flex flex-col min-w-0" title=${tip || label}>
+  <div class="flex items-center gap-1.5 min-w-0">
+    ${icon ? html`<${Icon} name=${icon} size=${13} className="text-accent shrink-0" />` : null}
+    ${state ? html`<span class="size-1.5 shrink-0 rounded-full ${DOT[state]}"></span>` : null}
+    <span class="text-[11px] uppercase tracking-wide text-muted truncate" title=${label}>${label}</span>
+  </div>
+  <div class="flex items-baseline justify-between gap-2 min-w-0">
+    <span class="text-lg leading-6 font-semibold shrink-0 ${state === 'crit' ? 'text-hot' : ''}">${value}</span>
+    ${line ? html`<span class="text-[11px] text-muted truncate" title=${line}>${line}</span>` : null}
+  </div>
+  <div class="mt-auto pt-1 min-h-6 flex flex-col justify-end">${children}</div>
+</div>`;
+
+const hoursLabel = (h) => (h >= 48 ? (h / 24).toFixed(1) + ' d' : Math.round(h) + ' h');
+const dayTime = (d) => d.toLocaleDateString(undefined, {weekday: 'short'}) + ' ' + clock(d);
+
+// Week used against week elapsed: the bar is usage, the tick is where an even pace would be.
+const WeekBar = ({used, elapsed}) => html`<div class="relative h-1.5 rounded bg-line" title=${'even pace ' + Math.round(elapsed) + '%'} aria-hidden="true">
+  <div class="h-full rounded ${used > elapsed ? 'bg-accent' : 'bg-ok'}" style=${{width: Math.min(100, used) + '%'}}></div>
+  <div class="absolute -top-0.5 h-2.5 w-0.5 bg-ink" style=${{left: Math.min(100, elapsed) + '%'}}></div>
+</div>`;
+
+const Bar = ({pct, cls}) => html`<div class="h-1 rounded bg-line"><div class="h-full rounded ${cls}" style=${{width: Math.min(100, pct) + '%'}}></div></div>`;
+
+const KpiStrip = ({r, burn, source}) => {
+  const rate = Number(burn?.rate) || 0, goal = Number(burn?.goal) || 0;
+  const hourly = (r.timeline ?? []).slice(-24).map(t => (t[1] ?? 0) + (t[2] ?? 0));
+  const used = burn?.used, left = burn?.hoursLeft;
+  const overBurn = goal && rate > goal;
+  const limit = burn?.limit, inPct = limit && burn.ratePct != null;
+  const unit = (v) => (inPct ? quota(100 * v / limit) : fmt(v) + '/h');
+  const tiles = [html`<${Tile} key="burn" label="Burn / hour" icon="Flame" value=${inPct ? html`${burn.ratePct.toFixed(2)}<span class="text-xs font-normal text-muted"> %/h</span>` : fmt(rate) + '/h'}
+      line=${goal ? `ideal ${inPct ? burn.idealPct.toFixed(2) : fmt(goal)}` : 'no ideal pace yet'}
+      tip=${goal ? `${(rate / goal).toFixed(1)}× the ideal pace of ${unit(goal)} · ${fmt(rate)} tokens/h` : 'no ideal pace yet'}
+      state=${goal ? (overBurn ? 'over' : 'ok') : null}><${Spark} values=${inPct ? hourly.map(v => 100 * v / limit) : hourly} target=${inPct ? burn.idealPct : goal || null} over=${overBurn} /></${Tile}>`];
+  if (used != null && left != null) {
+    const elapsed = 100 * (1 - left / 168);
+    // Tokens left at reset: goal is the remaining budget spread over the hours left.
+    // One run-out for the tile and the chart, from the server: points left at the last-24 h pace.
+    const proj = burn.projection;
+    const dry = proj ? (proj.hoursToEmpty ?? Infinity) : rate > 0 ? (goal * left) / rate : Infinity;
+    const crit = proj ? proj.runsOut != null : dry <= left;
+    const reset = burn.resets ? toDate(burn.resets) : null;
+    const g = burn.gains ?? {};
+    // Even pace spends 100/168 pts per hour.
+    const gain = (h) => (g[h] == null ? null : `+${Number(g[h]).toFixed(g[h] >= 10 ? 0 : 1)} pts in ${h} h (even pace ${(100 * h / 168).toFixed(1)})`);
+    const gains = [1, 6, 24].map(gain).filter(Boolean);
+    const key = [6, 24, 1].find(h => g[h] != null);
+    tiles.push(html`<${Tile} key="week" label="Weekly limit" icon="CalendarDays" value=${Math.round(used) + '%'}
+        line=${key ? gain(key).replace(/ \(.*/, '') : 'no recent spend'}
+        tip=${(gains.join(' · ') || 'no recent spend') + ` · even pace ${Math.round(elapsed)}% of the week gone`}
+        state=${used > elapsed ? 'over' : 'ok'}><${WeekBar} used=${used} elapsed=${elapsed} /></${Tile}>`);
+    const scale = Math.max(isFinite(dry) ? dry : 0, left);
+    const empty = crit ? new Date(Date.now() + dry * 3600e3) : null;
+    tiles.push(html`<${Tile} key="dry" label="Meltdown ETA" icon="Clock" value=${crit ? hoursLabel(dry) : 'never'}
+        line=${crit ? '~' + dayTime(empty) : 'no run-out'}
+        tip=${`At the last-24 h pace: ${crit ? 'empty ~' + dayTime(empty) : 'budget lasts the week'} · reset in ${hoursLabel(left)}${reset ? ' · ' + dayTime(reset) : ''}`}
+        state=${crit ? 'crit' : 'ok'}>
+        <div class="space-y-0.5" aria-hidden="true">
+          <${Bar} pct=${100 * Math.min(dry, scale) / scale} cls=${crit ? 'bg-hot' : 'bg-ok'} />
+          <${Bar} pct=${100 * left / scale} cls="bg-muted opacity-60" />
+        </div></${Tile}>`);
+  } else {
+    tiles.push(html`<${Tile} key="week" label="Weekly limit" icon="CalendarDays" value="—"
+      line="no subscription reading yet" state=${null} />`);
+  }
+  const over = Number(r.over300k) || 0;
+  const overHourly = (r.timeline ?? []).slice(-24).map(t => 100 * (t[2] ?? 0) / (((t[1] ?? 0) + (t[2] ?? 0)) || 1));
+  tiles.push(html`<${Tile} key="over" label=${'Spend >300k · ' + (r.days ?? 0) + ' d'} icon="TrendingUp" value=${Math.round(over) + '%'}
+    line=${fmt(r.total) + ' · ' + (r.days ?? 0) + ' d'} tip=${'Spend over 300k context · ' + fmt(r.total) + ' tokens in ' + (r.days ?? 0) + ' d'}
+    state=${over >= 50 ? 'over' : 'ok'}>
+    <${Spark} values=${overHourly} target=${50} over=${over >= 50} /></${Tile}>`);
+  for (const k of r.kpis ?? []) {
+    const vals = k.values ?? [], last = vals[vals.length - 1];
+    const isOver = k.target != null && last != null && last > k.target;
+    tiles.push(html`<${Tile} key=${k.name} label=${(SHORT[k.name] ?? k.name) + ' · 3 h'} icon="Activity" tip=${k.name + ' · latest 3 h block' + (k.target != null ? ' · target ' + kpiFmt(k, k.target) : '')} value=${last == null ? '—' : kpiFmt(k, last)}
+      line=${k.target != null ? 'target ' + kpiFmt(k, k.target) : ''}
+      state=${k.target == null || last == null ? null : isOver ? 'over' : 'ok'}>
+      <${Spark} values=${vals} target=${k.target ?? null} over=${isOver} /></${Tile}>`);
+  }
+  const active = (r.active ?? []).filter(s => !source || s.source === source);
+  const top = active[0];
+  tiles.push(html`<${Tile} key="active" label="Active sessions" icon="Users" value=${active.length}
+    line=${top ? `top ${Math.round(top.rateShare)}%` : 'none in 30 min'}
+    tip=${top ? 'Top burner: ' + (top.title || top.id) : 'No session had a turn in the last 30 minutes'}
+    state=${top && top.rateShare >= 50 && overBurn ? 'over' : null}>
+    ${top ? html`<div class="text-[11px] truncate" title=${top.title || top.id}>${top.title || top.id}</div>` : null}</${Tile}>`);
+  return html`<div class="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">${tiles}</div>`;
+};
+
+const Dashboard = ({r, burn, sources, source, onSource}) => {
+  const toggle = sources.length > 1
+    ? html`<${SourceToggle} sources=${sources} value=${source} onChange=${onSource} />` : null;
+  return html`<div class="space-y-4">
+    <div class="grid gap-4 lg:grid-cols-3">
+      <${Card} title="Combustion rate" sub="Token burn, last hour" icon="Flame" right=${toggle}><div class="flex-1 flex items-center justify-center"><${Gauge} burn=${burn} /></div></${Card}>
+      ${burn?.weekBurndown?.length > 1 ? html`<${Card} title="Weekly quota" sub="Total token burn this week" icon="ChartLine" className="lg:col-span-2">
+        <${WeeklyQuota} burn=${burn} benchWindow=${r.benchWindow} />
+      </${Card}>` : html`<${Card} title="Burndown" icon="ChartLine" right=${html`<span class="text-xs text-muted">no quota reading</span>`} className="lg:col-span-2">
+        <${Burndown} rows=${r.burndown ?? []} budget=${r.budget} benchWindow=${r.benchWindow} />
+      </${Card}>`}
+    </div>
+    <${KpiStrip} r=${r} burn=${burn} source=${sources.length > 1 ? source : null} />
+    <${Card} title="Hourly spend by context" sub="Tokens burned per hour, split by context window" icon="ChartColumn">
+      <${Hourly} rows=${r.timeline ?? []} goal=${burn?.goal} />
+    </${Card}>
+    <div class="grid gap-4 lg:grid-cols-5">
+      <${Card} title="Act now" sub="Quick fixes to keep the furnace under control" icon="TriangleAlert" className="lg:col-span-2"><${ActNow} r=${r} /></${Card}>
+      <${Card} title="Active sessions" sub="Sessions currently feeding the furnace" icon="Users" className="lg:col-span-3">
+        <${ActiveSessions} sessions=${r.active ?? []} source=${sources.length > 1 ? source : null} limit=${burn?.limit} />
+      </${Card}>
+    </div>
+  </div>`;
+};
+
+// One row per leak. The row opens in place; the prompt holds the why text and the evidence lines.
+const LeakRow = ({i, open, onToggle}) => {
+  const meta = i.share == null ? 'config check' : `${Math.round(i.share)}% · ${plural(i.sessions ?? 0, 'session')}`;
+  const why = (String(i.prompt ?? '').match(/Why it costs tokens: (.*)/) ?? [])[1];
+  const evidence = String(i.prompt ?? '').split('\n').filter(l => l.startsWith('- '))
+    // "- title (session id, 20.4% of spend, ...): label: measure. advice" -> "title · id · 20.4% · measure"
+    .map(l => { const m = l.match(/^- (.*) \(session (\w+), ([\d.]+)% of spend[^)]*\): [^:]+: (.*?)(?:\. |\.$|$)/);
+      return m ? [m[1], m[2], m[3] + '%', m[4].replace(' in this session', '')].join(' · ') : l.slice(2); });
+  return html`<li class="border-t border-line first:border-t-0">
+    <div class="flex items-center gap-2">
+      <button type="button" aria-expanded=${open} onClick=${onToggle}
+        class="flex-1 min-w-0 text-left grid items-center gap-x-3 gap-y-0.5 py-2 grid-cols-[4.5rem_minmax(0,1fr)] md:grid-cols-[4.5rem_19rem_15.5rem_minmax(0,1fr)]">
+        <${LevelTag} level=${i.level ?? 'info'} />
+        <span class="text-sm font-medium truncate" title=${i.title}>${i.title}</span>
+        <span class="col-start-2 md:col-start-auto flex items-center gap-2 text-xs text-muted">
+          <span class="w-20 h-1.5 rounded bg-line overflow-hidden shrink-0">${i.share == null ? null
+            : html`<span class="block h-full bg-ink opacity-60" style=${{width: Math.min(100, Math.max(0, i.share)) + '%'}}></span>`}</span>
+          <span class="whitespace-nowrap">${meta}</span>
+        </span>
+        <span class="hidden md:flex items-center gap-2 text-xs text-muted truncate" title=${i.fix}><${SourceBadge} source=${i.source} /><span class="truncate">${i.fix}</span></span>
+      </button>
+      <${CopyButton} text=${i.prompt} label="Copy"
+        className="shrink-0 w-14 text-center text-[11px] px-2 py-0.5 bg-chip rounded border border-line hover:border-accent" />
+    </div>
+    ${open ? html`<div class="pl-[5.25rem] pb-3 space-y-2 text-xs">
+      ${why ? html`<p class="text-muted">${why}</p>` : null}
+      ${evidence.length ? html`<ul class="space-y-0.5 text-muted list-disc pl-4">${evidence.map((e, n) => html`<li key=${n}>${e}</li>`)}</ul>` : null}
+      <pre class="p-2 max-h-48 overflow-auto whitespace-pre-wrap break-words bg-bg rounded border border-line">${i.prompt}</pre>
+    </div>` : null}
+  </li>`;
+};
+
+const Leaks = ({issues, hours}) => {
+  const [open, setOpen] = React.useState(null);
+  if (!issues.length) return html`<${Card} title="Leaks" icon="TriangleAlert"><p class="text-sm text-muted">No leaks in the last ${hours} h.</p></${Card}>`;
+  const all = issues.map(i => i.prompt).filter(Boolean).join('\n\n');
+  const keyOf = (i) => i.title + '|' + (i.source ?? '');
+  const copyAll = html`<${CopyButton} text=${all} label="Copy all fixes"
+    className="text-xs px-2.5 py-1 bg-chip rounded-lg border border-line hover:border-accent" />`;
+  return html`<${Card} title="Leaks" icon="TriangleAlert" right=${copyAll}>
+    <p class="text-xs text-muted mb-2">From sessions active in the last ${hours} h. One session can trigger several leaks, so the shares overlap.</p>
+    <ul>${issues.map(i => html`<${LeakRow} key=${keyOf(i)} i=${i} open=${open === keyOf(i)}
+      onToggle=${() => setOpen(open === keyOf(i) ? null : keyOf(i))} />`)}</ul>
+  </${Card}>`;
+};
+
+// Cumulative burn over time. Dashed: the same turns with context capped at benchWindow.
+// Dotted: a straight line that spends the weekly budget at a steady pace.
+const Burndown = ({rows, budget, benchWindow}) => {
+  const [ref, {w, h}] = useSize();
+  if (!rows.length) return html`<p class="text-sm text-muted">No burndown data.</p>`;
+  const t = rows.map(d => toDate(d[0]).getTime());
+  const t0 = t[0], n = rows.length - 1, span = Math.max(t[n] - t0, 1);
+  const paceEnd = budget ? budget * span / WEEK_MS : 0;
+  const peak = Math.max(paceEnd, ...rows.map(d => Math.max(d[1] ?? 0, d[2] ?? 0))) || 1;
+  // Round step (1, 2 or 5 x 10^k) giving at most 4 gridlines; the axis tops out on a round value.
+  const mag = 10 ** Math.floor(Math.log10(peak / 4));
+  const step = [1, 2, 5, 10].map(m => m * mag).find(v => peak / v <= 4);
+  const maxV = Math.ceil(peak / step - 1e-9) * step;
+  const l = 44, rt = 10, tp = 8, b = 20;
+  const x = (i) => l + ((t[i] - t0) / span) * (w - l - rt);
+  const y = (v) => h - b - (v / maxV) * (h - b - tp);
+  const path = (k) => rows.map((d, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(d[k] ?? 0).toFixed(1)}`).join(' ');
+  const last = rows[n];
+  const ticks = Array.from({length: Math.round(maxV / step)}, (_, i) => (i + 1) * step / maxV);
+  const mid = new Date(t0 + span / 2);
+  return html`<div class="flex-1 flex flex-col">
+    <div ref=${ref} class="relative flex-1 min-h-[8rem]">
+      ${w > 0 ? html`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="absolute inset-0 w-full h-full" role="img" aria-label="Cumulative burn">
+        ${ticks.map(f => html`<g key=${f}>
+          <line x1=${l} x2=${w - rt} y1=${y(maxV * f)} y2=${y(maxV * f)} class="stroke-line"/>
+          <text x=${l - 6} y=${y(maxV * f) + 4} text-anchor="end" font-size="10" class="fill-muted">${fmt(maxV * f).replace(/\.0(?=[a-zA-Z])/, '')}</text>
+        </g>`)}
+        <line x1=${l} y1=${h - b} x2=${w - rt} y2=${h - b} class="stroke-muted"/>
+        <text x=${l - 6} y=${h - b + 4} text-anchor="end" font-size="10" class="fill-muted">0</text>
+        <text x=${l} y=${h - 6} font-size="10" class="fill-muted">${dayLabel(new Date(t0))}</text>
+        <text x=${(l + w - rt) / 2} y=${h - 6} text-anchor="middle" font-size="10" class="fill-muted">${dayLabel(mid)}</text>
+        <text x=${w - rt} y=${h - 6} text-anchor="end" font-size="10" class="fill-muted">${dayLabel(new Date(t[n]))}</text>
+        ${budget ? html`<line x1=${x(0)} y1=${y(0)} x2=${x(n)} y2=${y(paceEnd)} class="stroke-muted" stroke-dasharray="1 3" stroke-width="1.5"/>` : null}
+        <path d=${path(2)} fill="none" class="stroke-muted" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <path d=${path(1)} fill="none" class="stroke-accent" stroke-width="2"/>
+      </svg>` : null}
+    </div>
+    <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted mt-1">
+      <span><span class="inline-block w-4 border-t-2 border-accent align-middle"></span> actual ${fmt(last[1])}</span>
+      <span><span class="inline-block w-4 border-t-2 border-dashed border-muted align-middle"></span> benchmark ${fmt(last[2])} (context capped at ${fmt(benchWindow)})</span>
+      ${budget ? html`<span><span class="inline-block w-4 border-t-2 border-dotted border-muted align-middle"></span> weekly budget pace</span>` : null}
+    </div>
+  </div>`;
+};
+
+// Weekly quota used, 0 to 100 %, across the whole week. The future stays empty.
+// Solid: used so far. Thin: an even pace to the reset. Dashed: the last-24 h pace from now. Dotted: the same turns with context capped.
+const WeeklyQuota = ({burn, benchWindow}) => {
+  const [ref, {w, h}] = useSize();
+  const pts = burn.weekBurndown.map(d => [toDate(d[0]).getTime(), d[1] ?? 0, d[2] ?? 0]);
+  const t0 = toDate(burn.start).getTime(), t1 = toDate(burn.resets).getTime(), span = Math.max(t1 - t0, 1);
+  const [now, used] = pts[pts.length - 1];
+  const rate = burn.projection?.ratePct ?? 0;
+  const runsOut = burn.projection?.runsOut ? toDate(burn.projection.runsOut).getTime() : null;
+  const hit = runsOut && runsOut < t1;
+  const end = rate > 0 ? (hit ? runsOut : Math.min(t1, now + (100 - used) / rate * 3600000)) : now;
+  const endV = rate > 0 ? Math.min(100, used + rate * (end - now) / 3600000) : used;
+  const l = 34, rt = 10, tp = 12, b = 20;
+  const x = (t) => l + ((t - t0) / span) * (w - l - rt);
+  const y = (v) => h - b - (v / 100) * (h - b - tp);
+  const path = (k) => pts.map((d, i) => `${i ? 'L' : 'M'}${x(d[0]).toFixed(1)},${y(d[k]).toFixed(1)}`).join(' ');
+  const days = Array.from({length: 7}, (_, i) => new Date(t0 + i * span / 7));
+  const when = (t) => new Date(t).toLocaleDateString(undefined, {weekday: 'short'}) + ' ' + clock(new Date(t));
+  const nowRight = x(now) > w * 0.8;
+  return html`<div class="flex-1 flex flex-col">
+    <div ref=${ref} class="relative flex-1 min-h-[8rem]">
+      ${w > 0 ? html`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="absolute inset-0 w-full h-full" role="img" aria-label="Weekly quota used">
+        ${[25, 50, 75, 100].map(v => html`<g key=${v}>
+          <line x1=${l} x2=${w - rt} y1=${y(v)} y2=${y(v)} class="stroke-line"/>
+          <text x=${l - 6} y=${y(v) + 4} text-anchor="end" font-size="10" class="fill-muted">${v}%</text>
+        </g>`)}
+        <line x1=${l} y1=${h - b} x2=${w - rt} y2=${h - b} class="stroke-muted"/>
+        <text x=${l - 6} y=${h - b + 4} text-anchor="end" font-size="10" class="fill-muted">0</text>
+        ${days.map((d, i) => html`<text key=${i} x=${i === 0 ? l : x(d.getTime())} y=${h - 6} text-anchor=${i === 0 ? 'start' : 'middle'} font-size="10" class="fill-muted">${d.toLocaleDateString(undefined, {weekday: 'short'})}</text>`)}
+        <line x1=${x(t0)} y1=${y(0)} x2=${x(t1)} y2=${y(100)} class="stroke-muted" stroke-width="1" opacity="0.6"/>
+        <path d=${path(2)} fill="none" class="stroke-muted" stroke-width="1.5" stroke-dasharray="1 3"/>
+        ${rate > 0 ? html`<line x1=${x(now)} y1=${y(used)} x2=${x(end)} y2=${y(endV)} class="stroke-accent" stroke-width="1.5" stroke-dasharray="4 3"/>` : null}
+        ${hit ? html`<g>
+          <line x1=${x(runsOut)} x2=${x(runsOut)} y1=${y(100) - 4} y2=${y(100) + 4} class="stroke-hot" stroke-width="2"/>
+          <text x=${x(runsOut) + (x(runsOut) > w * 0.7 ? -6 : 6)} y=${y(100) + 14} text-anchor=${x(runsOut) > w * 0.7 ? 'end' : 'start'} font-size="10" class="fill-hot">runs out ${when(runsOut)}</text>
+        </g>` : null}
+        <path d=${path(1)} fill="none" class="stroke-accent" stroke-width="2"/>
+        <line x1=${x(now)} x2=${x(now)} y1=${y(100)} y2=${h - b} class="stroke-muted" stroke-width="1" stroke-dasharray="2 2"/>
+        <circle cx=${x(now)} cy=${y(used)} r="3.5" class="fill-accent"/>
+        <text x=${x(now) + (nowRight ? -6 : 6)} y=${Math.max(y(used) - 8, 10)} text-anchor=${nowRight ? 'end' : 'start'} font-size="11" class="fill-ink">now ${used.toFixed(0)}%</text>
+      </svg>` : null}
+    </div>
+    <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted mt-1">
+      <span><span class="inline-block w-4 border-t-2 border-accent align-middle"></span> used</span>
+      <span><span class="inline-block w-4 border-t border-muted align-middle"></span> even pace</span>
+      <span><span class="inline-block w-4 border-t-2 border-dashed border-accent align-middle"></span> projection</span>
+      <span><span class="inline-block w-4 border-t-2 border-dotted border-muted align-middle"></span> if capped at ${fmt(benchWindow)}</span>
+    </div>
+  </div>`;
+};
+
+// Hourly spend. Under 300k context at the bottom, over 300k on top.
+const Hourly = ({rows, goal}) => {
+  if (!rows.length) return html`<p class="text-sm text-muted">No timeline data.</p>`;
+  const step = 7, bw = 5, h = 100, base = 100, top = 4;
+  const n = rows.length, w = n * step;
+  const max = Math.max(goal || 0, ...rows.map(t => (t[1] ?? 0) + (t[2] ?? 0))) || 1;
+  const scale = (v) => (v / max) * (base - top);
+  const hourLabel = (iso) => dayLabel(toDate(iso)) + ' ' + clock(toDate(iso));
+  // One tick per local midnight, away from the end labels.
+  const days = rows.map((t, i) => [toDate(t[0]), i]).filter(([d, i]) => d.getHours() === 0 && i > n * 0.08 && i < n * 0.92);
+  return html`<div class="flex flex-col">
+    <div class="relative min-h-[7.5rem] h-[7.5rem] sm:h-[9rem]">
+      <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="absolute inset-0 w-full h-full" role="img" aria-label="Hourly spend">
+        ${[0.5, 1].map(f => html`<line key=${f} x1="0" x2=${w} y1=${base - scale(max * f)} y2=${base - scale(max * f)}
+          class="stroke-line" stroke-width="1" vector-effect="non-scaling-stroke"/>`)}
+        ${rows.map((t, i) => {
+          const cool = scale(t[1] ?? 0), hot = scale(t[2] ?? 0), x = i * step + 1;
+          return html`<g key=${t[0]}>
+            <rect x=${x} y=${base - cool} width=${bw} height=${cool} class="fill-bar" fill-opacity="0.85" rx="1"/>
+            <rect x=${x} y=${base - cool - hot} width=${bw} height=${hot} class="fill-accent" fill-opacity="0.85" rx="1"/>
+          </g>`;
+        })}
+        ${goal ? html`<line x1="0" x2=${w} y1=${base - scale(goal)} y2=${base - scale(goal)} class="stroke-ok"
+          stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>` : null}
+      </svg>
+      <span class="absolute left-1 top-0 text-[11px] text-muted bg-card/80 px-1 rounded">${fmt(max)}/h</span>
+      <span class="absolute left-1 text-[11px] text-muted bg-card/80 px-1 rounded" style=${{top: 'calc(50% - 0.5rem)'}}>${fmt(max / 2)}/h</span>
+    </div>
+    <div class="relative h-5 border-t border-line text-[11px] text-muted">
+      <span class="absolute left-0 top-0.5">${hourLabel(rows[0][0])}</span>
+      ${days.map(([d, i]) => html`<span key=${i} class="absolute top-0.5 -translate-x-1/2 hidden sm:block" style=${{left: (100 * (i + 0.5) / n) + '%'}}>${dayLabel(d)}</span>`)}
+      <span class="absolute right-0 top-0.5">${hourLabel(rows[n - 1][0])}</span>
+    </div>
+    <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted mt-1">
+      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-bar"></span>under 300k context</span>
+      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-accent opacity-85"></span>over 300k context</span>
+      ${goal ? html`<span class="flex items-center gap-1"><span class="inline-block w-4 border-t-2 border-dashed border-ok"></span>ideal ${fmt(goal)}/h</span>` : null}
+    </div>
+  </div>`;
+};
+
+// Worst level first, then the biggest miss. A green arrow marks a 24 h value that beats the whole-window value (lower is better).
+const Checks = ({rows, hours, days}) => {
+  if (!rows.length) return null;
+  // Evaluate per provider: group each agent's rows together, worst level first.
+  const srcOrder = {claude: 0, codex: 1, all: 2};
+  const sorted = [...rows].sort((a, b) => (srcOrder[a.source] ?? 3) - (srcOrder[b.source] ?? 3)
+    || LEVEL_ORDER.indexOf(a.level) - LEVEL_ORDER.indexOf(b.level) || (b.ratio ?? 0) - (a.ratio ?? 0));
+  const better = (row) => parseFloat(row.now_24h) < parseFloat(row.value_7d);
+  const summary = LEVEL_ORDER.map(l => [l, rows.filter(r => r.level === l).length]).filter(([, n]) => n)
+    .map(([l, n]) => n + ' ' + LEVEL[l][2].toLowerCase()).join(' · ');
+  const bySource = ['claude', 'codex'].map(s => [s, rows.filter(r => r.source === s).length]).filter(([, n]) => n)
+    .map(([s, n]) => n + ' ' + SOURCE_LABEL[s]).join(' · ');
+  return html`<${Card} title="Checks" icon="ListChecks" right=${html`<span class="text-xs text-muted">${summary}</span>`}>
+    <p class="text-xs text-muted mb-1">Judged per provider (${bySource}). Checks and leaks use the last ${hours} h; the ${days}-day value is in grey.</p>
+    <div class="overflow-x-auto -mx-2"><table class="w-full text-sm tabular-nums">
+      <thead><tr class="text-left whitespace-nowrap ${TH}">
+        <th class="px-2 py-1">Check</th><th class="px-2">Last ${hours} h</th><th class="px-2">${days} d</th><th class="px-2 hidden sm:table-cell">Target</th><th class="px-2">Level</th><th class="px-2">Source</th>
+      </tr></thead>
+      <tbody>${sorted.map(row => html`<tr key=${row.name + '|' + row.source} class="border-t border-line">
+        <td class="px-2 py-1">${row.name}${row.advisory ? html` <span class="text-[11px] text-muted" title="Advisory: a hint, never a leak">advisory</span>` : null}<div class="sm:hidden text-[11px] text-muted">${row.target}</div></td>
+        <td class="px-2 py-1 whitespace-nowrap">${row.now_24h}${better(row) ? html` <span class="text-ok" title=${'Better than the ' + days + '-day value'}>↓</span>` : null}</td>
+        <td class="px-2 py-1 text-muted whitespace-nowrap">${row.value_7d ?? ''}</td>
+        <td class="px-2 py-1 text-muted whitespace-nowrap hidden sm:table-cell">${row.target}</td>
+        <td class="px-2 py-1 whitespace-nowrap"><${LevelTag} level=${row.level} /></td>
+        <td class="px-2 py-1 whitespace-nowrap"><${SourceBadge} source=${row.source} /></td>
+      </tr>`)}</tbody>
+    </table></div>
+  </${Card}>`;
+};
+
+const SimpleTable = ({headers, rows}) => html`<div class="overflow-x-auto -mx-2"><table class="w-full text-sm">
+  <thead><tr class=${TH}>${headers.map(h => html`<th key=${h} class="px-2 py-1.5 text-left">${h}</th>`)}</tr></thead>
+  <tbody>${rows.map((row, i) => html`<tr key=${i} class="border-t border-line align-top">
+    ${row.map((c, j) => html`<td key=${j} class="px-2 py-2">${c}</td>`)}
+  </tr>`)}</tbody>
+</table></div>`;
+
+const Block = ({title, headers, rows}) => (rows.length ? html`<${Card} title=${title}>
+  <${SimpleTable} headers=${headers} rows=${rows} />
+</${Card}>` : null);
+
+const Sessions = ({r}) => {
+  const unpriced = r.unpriced ?? null;
+  const blocks = [
+    {title: 'Top sessions', headers: ['Project', 'ID', 'Title', 'Share', 'Turns', 'Peak', 'Hours'],
+     rows: (r.topSessions ?? []).map(s => [s.project ?? '?', s.id ?? '', html`<div class="truncate max-w-[22rem]" title=${s.title || s.id}>${s.title || s.id}</div>`, sharePct(s.share),
+       s.turns ?? 0, fmt(s.peak), Number(s.hours || 0).toFixed(1) + 'h'])},
+    {title: 'Context size buckets', headers: ['Bucket', 'Type', 'Share', 'Turns'],
+     rows: (r.buckets ?? []).map(b => [b.label, b.hot ? 'over 300k' : 'under 300k', sharePct(b.share), b.turns ?? 0])},
+    {title: 'Projects', headers: ['Project', 'Share'],
+     rows: (r.projects ?? []).map(([n, s]) => [n, sharePct(s)])},
+    {title: 'Tools', headers: ['Tool', 'Calls'],
+     rows: (r.tools ?? []).map(([n, c]) => [n, c])},
+    {title: 'Config checks', headers: ['Check'],
+     rows: (r.config ?? []).filter(c => c !== 'none').map(c => [c])},
+    {title: unpriced ? `Unpriced models (${sharePct(unpriced[0])} of spend)` : 'Unpriced models', headers: ['Model', 'Turns'],
+     rows: (unpriced?.[1] ?? []).map(([m, c]) => [m, c])},
+  ];
+  if (!blocks.some(b => b.rows.length)) return html`<${Card}><p class="text-sm text-muted">No detail data.</p></${Card}>`;
+  return html`<div class="space-y-4">
+    ${blocks.map(b => html`<${Block} key=${b.title} title=${b.title} headers=${b.headers} rows=${b.rows} />`)}
+  </div>`;
+};
+
+// Age of the report. Ticks every second; the title holds the absolute time.
+const Updated = ({iso}) => {
+  const [, tick] = React.useReducer((x) => x + 1, 0);
+  React.useEffect(() => {
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+  const d = iso ? toDate(iso) : null;
+  if (!d || isNaN(d)) return html`<span>no report yet</span>`;
+  const s = Math.max(0, Math.round((Date.now() - d) / 1000));
+  const age = s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' min' : Math.floor(s / 3600) + ' h';
+  return html`<span title=${stamp(iso)}>updated ${age} ago</span>`;
+};
+
+const App = () => {
+  const [report, setReport] = React.useState(window.__REPORT__ ?? {});
+  const [link, setLink] = React.useState(serving ? 'live' : 'snapshot');
+  const [source, setSource] = React.useState('claude');
+  const [tab, setTab] = React.useState(location.hash.slice(1));
+
+  React.useEffect(() => {
+    const onHash = () => setTab(location.hash.slice(1));
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // Refresh every 60 s. A failed fetch keeps the old data and shows the offline tag.
+  React.useEffect(() => {
+    if (!serving) return undefined;
+    const load = async () => {
+      try {
+        const resp = await fetch('/api/report', {cache: 'no-store'});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        if (data) setReport(data);
+        setLink('live');
+      } catch (e) {
+        setLink('offline');
+      }
+    };
+    load();
+    const timer = setInterval(load, 60000);
+    // Reload when the page source changes. The raw page costs the server no report rebuild.
+    const pageText = async () => (await fetch('/dashboard.html', {cache: 'no-store'})).text();
+    let first = null;
+    const watch = setInterval(async () => {
+      try {
+        const now = await pageText();
+        if (first === null) first = now;
+        else if (now !== first) location.reload();
+      } catch (e) { /* server busy or gone: try again next tick */ }
+    }, 2000);
+    return () => { clearInterval(timer); clearInterval(watch); };
+  }, []);
+
+  const burns = report.burns ?? (report.burn ? {claude: report.burn} : {});
+  const sources = Object.keys(burns);
+  const current = sources.includes(source) ? source : sources[0];
+  const hours = report.checkHours ?? 24;
+  const wanted = TAB_ALIAS[tab] ?? tab;
+  const tabId = TABS.some(([id]) => id === wanted) ? wanted : 'dashboard';
+  const bodies = {
+    dashboard: html`<${Dashboard} r=${report} burn=${burns[current]} sources=${sources} source=${current} onSource=${setSource} />`,
+    checkup: html`<div class="space-y-3">
+      <${Checks} rows=${report.baseline ?? []} hours=${hours} days=${report.days ?? 7} />
+      <${Leaks} issues=${report.issues ?? []} hours=${hours} />
+    </div>`,
+    sessions: html`<${Sessions} r=${report} />`,
+  };
+  const linkClass = link === 'offline' ? 'bg-hot/10 text-hot' : link === 'live' ? 'bg-ok/10 text-ok' : 'bg-chip text-muted';
+
+  return html`<div class="max-w-7xl mx-auto px-4 pb-3">
+    <header class="flex flex-wrap items-stretch gap-x-5 border-b border-line">
+      <a href="#dashboard" class="flex items-center gap-2 py-2.5" aria-label="Token Furnace - Dashboard"><${Icon} name="Flame" size=${20} className="text-accent glow" /><h1 class="font-heading text-lg font-bold tracking-tight">Token Furnace</h1></a>
+      <nav class="flex order-last w-full sm:order-none sm:w-auto">
+        ${TABS.map(([id, name]) => html`<a key=${id} href="#${id}"
+          class="flex items-center px-3 text-sm -mb-px border-b-2 ${id === tabId ? 'border-accent text-ink' : 'border-transparent text-muted hover:text-ink'}">${name}</a>`)}
+      </nav>
+      <div class="ml-auto flex items-center gap-2 text-xs text-muted py-2.5">
+        <span class="px-2 py-0.5 rounded ${linkClass}">${link}</span>
+        <${Updated} iso=${report.generated} /><span>· ${report.days ?? 0}-day window</span>
+      </div>
+    </header>
+    <main class="mt-3">${bodies[tabId]}</main>
+  </div>`;
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+</script>
+</body>
+</html>
