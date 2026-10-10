@@ -286,6 +286,9 @@ describe("tips", () => {
     for (const title of ["Run the auto fix", "Add an OpenCode Go plan", "Create a save-tokens plan"]) {
       hasText(title);
     }
+    // deepseek-v4.1-flash is a paid Go model, never presented as free.
+    expect(screen.getByText(/opens the free Zen models/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("deepseek");
     hasText("3 left");
     fireEvent.click(screen.getAllByRole("button", { name: /Done/ })[0]);
     expect(useUi.getState().doneTips).toEqual(["auto-fix"]);

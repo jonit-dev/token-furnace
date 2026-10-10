@@ -1,6 +1,6 @@
 {
   "name": "token-furnace",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Where the token budget actually went. Reads local coding-agent transcripts and reports token leaks.",
   "license": "MIT",
   "type": "module",

@@ -68,9 +68,9 @@ export function Tips() {
       title: "Add an OpenCode Go plan",
       body: (
         <>
-          For about $10/month, the OpenCode Go plan opens the free Zen models. Use a cheap model such as
-          <code className="mx-1 px-1 rounded bg-chip">deepseek-v4.1-flash</code> to absorb routine workload,
-          and keep your paid plan for the hard turns.
+          For about $10/month, the OpenCode Go plan opens the free Zen models and adds a weekly quota to
+          absorb routine workload. Route the easy work to a free Zen model and keep your paid plan for the
+          hard turns. The save-tokens plan below picks the best free model for coding.
         </>
       ),
       action: (
