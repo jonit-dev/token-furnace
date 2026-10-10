@@ -18,7 +18,8 @@ Do the PRDs in this order. PRDs in the same wave can run in parallel.
 | 4 | [PRD-004](PRD-004-sqlite-cache.md) | SQLite cache for incremental scans | PRD-003 | P2 |
 | 4 | [PRD-005](PRD-005-react-dashboard.md) | React dashboard replaces `dashboard.html` | PRD-003 | P2 |
 | 4 | [PRD-006](PRD-006-setup-and-hook-port.md) | Port the installer and the churn hook | PRD-003 | P2 |
-| 5 | [PRD-007](PRD-007-package-and-release.md) | Package smoke test and release | PRD-004, PRD-005, PRD-006 | P2 |
+| 5 | [PRD-008](PRD-008-scan-progress.md) | Scan progress and a cold start that never looks frozen | PRD-004, PRD-005 | P1 |
+| 6 | [PRD-007](PRD-007-package-and-release.md) | Package smoke test and release | PRD-006, PRD-008 | P2 |
 
 ```mermaid
 flowchart LR
@@ -26,8 +27,9 @@ flowchart LR
   P3 --> P4[PRD-004 SQLite cache]
   P3 --> P5[PRD-005 React dashboard]
   P3 --> P6[PRD-006 setup + hook]
-  P4 --> P7[PRD-007 release]
-  P5 --> P7
+  P4 --> P8[PRD-008 scan progress]
+  P5 --> P8
+  P8 --> P7[PRD-007 release]
   P6 --> P7
 ```
 
