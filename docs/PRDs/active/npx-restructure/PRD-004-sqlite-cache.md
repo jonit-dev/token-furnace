@@ -1,6 +1,6 @@
 # PRD-004 — SQLite cache for incremental scans
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — acceptance criteria verified on Node 24; merge with the async worker scan remains pending.
 **Priority:** P2 — AC-2 makes repeat runs and every `/api/report` refresh parse only changed files.
 **Complexity:** 4 (MEDIUM)
 **Owner:** João
@@ -20,12 +20,12 @@
 
 ## Acceptance Criteria
 
-- [ ] AC-1 [local]: For the same fixture, the report from the SQLite repository equals the report from the memory repository. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: pending.
-- [ ] AC-2 [local]: A second run parses 0 files. After one transcript gets a new line, the next run parses exactly that file. A deleted transcript loses its rows. proof: `npx vitest run test/sqlite-repo.test.ts` (count calls to `source.parse`) — Evidence: pending.
-- [ ] AC-3 [local]: A cache file with `user_version = 0`, or with garbage bytes, is rebuilt, and the run succeeds. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: pending.
-- [ ] AC-4 [local]: `--no-cache` creates no cache file. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: pending.
-- [ ] AC-5 [local]: The cache holds no message text: a fixture with a unique marker string in user and assistant text leaves no marker in the cache file. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: pending.
-- [ ] AC-6 [local]: Cold and warm run times on João's real transcripts are recorded here. proof: `time npx token-furnace --json >/dev/null` twice — Evidence: pending.
+- [x] AC-1 [local]: For the same fixture, the report from the SQLite repository equals the report from the memory repository. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: 2026-10-09, 5 cache tests pass on Node 24.16.0. Cold, warm and uncached CLI JSON are byte-identical on the frozen 1.7 GB real-data snapshot.
+- [x] AC-2 [local]: A second run parses 0 files. After one transcript gets a new line, the next run parses exactly that file. A deleted transcript loses its rows. proof: `npx vitest run test/sqlite-repo.test.ts` (count calls to `source.parse`) — Evidence: call counts and deletion assertions pass. Appending a valid assistant turn to an isolated copy of a real transcript changes the cached CLI report; that report equals a full uncached parse.
+- [x] AC-3 [local]: A cache file with `user_version = 0`, or with garbage bytes, is rebuilt, and the run succeeds. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: both rebuild cases pass. A CLI run with a disposable garbage DB rebuilds the full snapshot and produces byte-identical cold-run JSON. Missing DB creation also passes.
+- [x] AC-4 [local]: `--no-cache` creates no cache file. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: fixture assertion and snapshot CLI run pass; the isolated uncached run creates no database.
+- [x] AC-5 [local]: The cache holds no message text: a fixture with a unique marker string in user and assistant text leaves no marker in the cache file. proof: `npx vitest run test/sqlite-repo.test.ts` — Evidence: marker test passes and asserts one parsed turn exists. A unique assistant-text marker appended to a real transcript copy is also absent from its cache DB.
+- [x] AC-6 [local]: Cold and warm run times on João's real transcripts are recorded here. proof: timed `node dist/cli.js --json` runs — Evidence: frozen 1.7 GB snapshot, Node 24.16.0, in-process parsing: cold 10.369 s, warm 0.613 s, uncached 10.776 s. Times cover this snapshot, not the full live transcript collection.
 
 ## Integration Ledger
 

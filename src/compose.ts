@@ -1,4 +1,7 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { MemorySessionRepository } from "./repo/memory-repo";
+import { SqliteSessionRepository } from "./repo/sqlite-repo";
 import type { SessionRepository } from "./repo/session-repo";
 import { ReportService } from "./services/report-service";
 import { ClaudeSource } from "./sources/claude";
@@ -14,11 +17,16 @@ export interface App {
   now: () => Date;
 }
 
+export function sqliteCachePath(env: Env): string {
+  const base = env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
+  return join(base, "token-furnace", "cache.sqlite");
+}
+
 /** The composition root: the only place that calls `new`. architecture.md */
-export function compose(env: Env = process.env): App {
+export function compose(env: Env = process.env, opts?: { noCache?: boolean }): App {
   const sources: AgentSource[] = [new ClaudeSource(env), new CodexSource(env)];
-  // PRD-004 swaps this for SqliteSessionRepository(cachePath(env)) unless --no-cache.
-  const repo = new MemorySessionRepository();
+  const noCache = opts?.noCache ?? Boolean(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0");
+  const repo = noCache ? new MemorySessionRepository() : new SqliteSessionRepository(sqliteCachePath(env));
   return {
     env,
     sources,
