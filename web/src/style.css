@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Token Furnace runs dark: a warm near-black shell, brighter cards, flame accent. */
+:root { color-scheme: dark; --bg: #131110; --card: #1e1b19; --ink: #f6f1ec; --muted: #a49b92; --line: #322c28; --chip: #2a2521; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 0.875rem; overflow-wrap: anywhere; }
+.glow { filter: drop-shadow(0 0 6px rgba(249, 115, 22, 0.45)); }
