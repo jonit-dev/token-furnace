@@ -1,9 +1,10 @@
+#!/usr/bin/env node
 /**
  * The CLI: node:util parseArgs, the commands from architecture.md "Entry points", and the exit
  * codes of burn.py main(): 1 with no data, 1 with leaks or a failing doctor, 0 otherwise.
  */
 
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -34,7 +35,7 @@ Where the token budget actually went. Reads local Claude Code and Codex transcri
   --weekly-budget <M>  weekly budget in millions of weighted tokens
   --no-plan-usage      never call api.anthropic.com for the subscription window (a saved reading is still used)
   --no-cache           parse every file, write no cache
-  serve [--port 8765]  live report on http://127.0.0.1:<port>, rebuilt per request
+  serve [--port 8765]  live report on http://127.0.0.1:<port>, refreshed in the background
   -h, --help           this text
 `;
 
@@ -229,7 +230,18 @@ function existsDir(path: string): boolean {
   }
 }
 
+/** True when this module is the process entry, even through an npm bin symlink. */
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
 // Only when run as the binary: a test imports main() without starting a command.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isEntryPoint()) {
   process.exitCode = await main();
 }
