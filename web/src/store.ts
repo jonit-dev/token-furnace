@@ -2,11 +2,14 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { Source } from "../../src/core/model";
 
-export type Tab = "dashboard" | "checkup" | "sessions";
+export type Tab = "dashboard" | "checkup" | "sessions" | "tips";
 
 interface UiState {
   /** Active tab id. */
   tab: Tab;
+  /** Tips the user marked done. Hidden from the Tips tab. */
+  doneTips: string[];
+  toggleTip: (id: string) => void;
   modal: "auto-fixes" | null;
   setModal: (modal: UiState["modal"]) => void;
   /** Burn source shown on the dashboard. */
@@ -27,6 +30,12 @@ export const useUi = create<UiState>()(persist((set) => ({
   tab: "dashboard",
   modal: null,
   setModal: (modal) => set({ modal }),
+  doneTips: [],
+  toggleTip: (id) => set((state) => ({
+    doneTips: state.doneTips.includes(id)
+      ? state.doneTips.filter((tip) => tip !== id)
+      : [...state.doneTips, id],
+  })),
   source: "claude",
   hourlySource: "all",
   pins: {},
@@ -52,13 +61,18 @@ export const useUi = create<UiState>()(persist((set) => ({
     setItem: (name, value) => { try { localStorage.setItem(name, value); } catch { /* Storage is optional. */ } },
     removeItem: (name) => { try { localStorage.removeItem(name); } catch { /* Storage is optional. */ } },
   })),
-  partialize: (state) => ({ pins: state.pins }),
+  partialize: (state) => ({ pins: state.pins, doneTips: state.doneTips }),
   merge: (saved, current) => {
-    const pins = (saved as { pins?: UiState["pins"] } | undefined)?.pins;
+    const state = saved as { pins?: UiState["pins"]; doneTips?: unknown } | undefined;
+    const pins = state?.pins;
     const valid = (value: unknown): value is Source => value === "claude" || value === "codex" || value === "opencode";
     const source = valid(pins?.source) ? pins.source : undefined;
     const hourlySource = valid(pins?.hourlySource) || pins?.hourlySource === "all" ? pins.hourlySource : undefined;
+    const doneTips = Array.isArray(state?.doneTips)
+      ? state.doneTips.filter((tip): tip is string => typeof tip === "string")
+      : [];
     return { ...current, source: source ?? current.source, hourlySource: hourlySource ?? current.hourlySource,
+      doneTips,
       pins: { ...(source ? { source } : {}), ...(hourlySource ? { hourlySource } : {}) },
     };
   },

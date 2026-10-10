@@ -180,7 +180,7 @@ snapshot restores by running its own `restore.sh`.
 
 What it does:
 
-1. **Skills** — links `token-furnace`, `prd-creator` and `prd-manager` into
+1. **Skills** — links `token-furnace`, `save-tokens-creator`, `prd-creator` and `prd-manager` into
    `~/.claude/skills/` and `~/.codex/skills/` from one shared checkout, so both agents read
    the same file and an update lands in both.
 2. **The always-on line** — appends one line to `~/.claude/CLAUDE.md` and

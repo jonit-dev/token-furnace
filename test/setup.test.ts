@@ -409,6 +409,17 @@ describe("token-furnace setup", () => {
     }
   });
 
+  it("links the bundled save-tokens-creator skill for both agents", async () => {
+    const app = appFor();
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    for (const dir of [".claude", ".codex"]) {
+      const skill = join(testHome, dir, "skills", "save-tokens-creator", "SKILL.md");
+      expect(existsSync(skill), skill).toBe(true);
+      expect(readFileSync(skill, "utf8")).toContain("save-tokens-creator");
+    }
+    expect(await main(["setup", "--verify"], app)).toBe(0);
+  });
+
   it("built CLI runs setup dry-run without writing to isolated HOME", () => {
     const cliBin = resolve(__dirname, "..", "dist", "cli.js");
     const result = execFileSync(process.execPath, [cliBin, "setup"], {

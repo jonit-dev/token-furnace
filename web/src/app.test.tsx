@@ -40,7 +40,7 @@ const okFetch = (body: unknown) =>
 beforeEach(() => {
   window.__REPORT__ = fixtureReport;
   localStorage.clear();
-  useUi.setState({ tab: "dashboard", source: "claude", hourlySource: "all", pins: {}, online: true, modal: null });
+  useUi.setState({ tab: "dashboard", source: "claude", hourlySource: "all", pins: {}, online: true, modal: null, doneTips: [] });
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
   vi.stubGlobal("fetch", okFetch(fixtureReport));
   Object.defineProperty(navigator, "clipboard", {
@@ -99,13 +99,15 @@ describe("App", () => {
     vi.stubGlobal("fetch", okFetch(report));
     render(<App />);
     const table = screen.getByRole("table");
-    expect(within(table).getByText("Claude active")).toBeTruthy();
-    expect(within(table).getByText("Codex active")).toBeTruthy();
+    // The title shows twice per row (cell and the Details block), so count, not getByText.
+    const present = (text: string) => within(table).getAllByText(text).length;
+    expect(present("Claude active")).toBeGreaterThan(0);
+    expect(present("Codex active")).toBeGreaterThan(0);
     expect(within(table).getByText("10.00 %/h")).toBeTruthy();
     expect(within(table).getByText("5.00 %/h")).toBeTruthy();
     fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
-    expect(within(table).getByText("Claude active")).toBeTruthy();
-    expect(within(table).getByText("Codex active")).toBeTruthy();
+    expect(present("Claude active")).toBeGreaterThan(0);
+    expect(present("Codex active")).toBeGreaterThan(0);
     expect(within(table).getByText("10.00 %/h")).toBeTruthy();
     expect(within(table).getByText("5.00 %/h")).toBeTruthy();
   });
@@ -269,6 +271,53 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(useUi.getState().online).toBe(true);
     hasText("16M · 7 d");
+  });
+});
+
+describe("tips", () => {
+  beforeEach(() => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
+  });
+
+  it("lists the setup tips and hides each one when marked done", () => {
+    render(<App />);
+    act(() => useUi.getState().setTab("tips"));
+    for (const title of ["Run the auto fix", "Add an OpenCode Go plan", "Create a save-tokens plan"]) {
+      hasText(title);
+    }
+    hasText("3 left");
+    fireEvent.click(screen.getAllByRole("button", { name: /Done/ })[0]);
+    expect(useUi.getState().doneTips).toEqual(["auto-fix"]);
+    expect(screen.queryByText("Run the auto fix")).toBeNull();
+    hasText("2 left");
+  });
+
+  it("completes the auto-fix tip when the fixes are applied", () => {
+    render(<App />);
+    act(() => useUi.getState().setTab("tips"));
+    act(() => { window.dispatchEvent(new Event("config-fixed")); });
+    expect(useUi.getState().doneTips).toContain("auto-fix");
+    expect(screen.queryByText("Run the auto fix")).toBeNull();
+  });
+
+  it("copies the full skill and its setup steps for another agent", () => {
+    render(<App />);
+    act(() => useUi.getState().setTab("tips"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy skill" }));
+    const copied = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0] as string;
+    expect(copied).toContain("~/.claude/skills/save-tokens-creator/SKILL.md");
+    expect(copied).toContain("npx -y token-furnace setup --apply");
+    expect(copied).toContain("name: save-tokens-creator");
+  });
+
+  it("opens the auto-fix dialog from the first tip and shows an all-set state", () => {
+    render(<App />);
+    act(() => useUi.getState().setTab("tips"));
+    fireEvent.click(screen.getByRole("button", { name: "Open Auto Fixes" }));
+    expect(useUi.getState().modal).toBe("auto-fixes");
+    act(() => useUi.setState({ modal: null, doneTips: ["auto-fix", "opencode-go", "save-tokens-creator"] }));
+    hasText("You are all set. No tips left.");
   });
 });
 

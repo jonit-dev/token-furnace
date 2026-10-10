@@ -7,11 +7,13 @@ import { Icon } from "./components/icons";
 import { Updated } from "./components/ui";
 import { Dashboard } from "./components/panels";
 import { Checks, Leaks, Sessions } from "./components/tables";
+import { Tips } from "./components/tips";
 
 const TABS: [Tab, string][] = [
   ["dashboard", "Dashboard"],
   ["checkup", "Checkup"],
   ["sessions", "Sessions"],
+  ["tips", "Tips"],
 ];
 
 // Old hashes keep working.
@@ -53,6 +55,7 @@ export function App() {
       </div>
     ),
     sessions: <Sessions r={r} />,
+    tips: <Tips />,
   };
   const filePage = location.protocol !== "http:" && location.protocol !== "https:";
   const linkClass = filePage

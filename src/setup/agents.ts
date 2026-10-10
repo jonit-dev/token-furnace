@@ -28,7 +28,7 @@ export interface SetupOptions {
   verify?: boolean;
 }
 
-const SKILLS = ["token-furnace", "prd-creator", "prd-manager"];
+const SKILLS = ["token-furnace", "save-tokens-creator", "prd-creator", "prd-manager"];
 
 const BEGIN = "<!-- token-furnace:begin -->";
 const END = "<!-- token-furnace:end -->";
@@ -144,6 +144,18 @@ export function runSetup(
       : resolve(here, "..", "..");
   const skillsParent = resolve(packageRoot, "..");
 
+  // A skill ships inside the package under skills/<name>; the rest live as siblings in the
+  // skills hub. token-furnace itself is the package root.
+  const repoSkill = (s: string) => join(packageRoot, "skills", s);
+  const skillSource = (s: string): string =>
+    s === "token-furnace"
+      ? existsSync(join(packageRoot, "SKILL.md"))
+        ? packageRoot
+        : join(skillsParent, s)
+      : existsSync(join(repoSkill(s), "SKILL.md"))
+        ? repoSkill(s)
+        : join(skillsParent, s);
+
   const tracked: Array<{ label: string; path: string }> = [
     { label: "claude-settings.json", path: join(claudeDir, "settings.json") },
     { label: "claude-mcp.json", path: join(home, ".claude.json") },
@@ -257,9 +269,9 @@ export function runSetup(
     }
 
     for (const s of SKILLS) {
-      // token-furnace must always resolve; prd-* are optional, only checked when the
-      // installer had them available.
-      if (s !== "token-furnace" && !existsSync(join(skillsParent, s))) continue;
+      // token-furnace and save-tokens-creator ship in the package; prd-* are optional,
+      // only checked when the installer had them available.
+      if (s !== "token-furnace" && !existsSync(join(skillsParent, s)) && !existsSync(join(repoSkill(s), "SKILL.md"))) continue;
       for (const d of [join(claudeDir, "skills", s), join(codexDir, "skills", s)]) {
         const skillFile = join(d, "SKILL.md");
         const disp = collapseHome(d, home);
@@ -450,9 +462,7 @@ export function runSetup(
   };
 
   for (const s of SKILLS) {
-    const srcPath = s === "token-furnace"
-      ? (existsSync(join(packageRoot, "SKILL.md")) ? packageRoot : join(skillsParent, s))
-      : join(skillsParent, s);
+    const srcPath = skillSource(s);
     if (!existsSync(srcPath)) {
       warn(`${s} not found`);
       continue;
