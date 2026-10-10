@@ -31,6 +31,7 @@ npm install -g token-furnace
 | `token-furnace --list-sources` | Each agent, its path, and its transcript count. |
 | `token-furnace serve [--port 8765]` | Live dashboard on `http://127.0.0.1:<port>`. It serves the last scan and refreshes it in the background. |
 | `token-furnace setup [--apply] [--verify] [--rollback] [--aggressive]` | Installer. Dry run unless `--apply`. |
+| `token-furnace fix-config` | Repairs context and worker settings; backs up changed files first. Optional `--include-depth`. |
 | `token-furnace hook churn` | Claude Code PostToolUse churn hook. Reads the payload on stdin. Never blocks. |
 
 Options:
@@ -40,6 +41,39 @@ Options:
 - `--no-cache` — parse every file and write no cache.
 - `--no-plan-usage` — never call `api.anthropic.com`. A saved reading is still used.
 - `-h`, `--help` — usage text.
+
+## Context targets
+
+`src/core/context.ts` is the single source for ideal context sizes: **Claude Code 400k** and
+**Codex 300k**. Checkup, session flags, dashboard KPIs, hourly spend charts, benchmark estimates,
+and configuration repair all use these values. A turn exactly at its provider target is within
+target. Mixed-provider charts compare each turn against its own provider target.
+
+## Auto Fixes
+
+In the live dashboard, click **Auto Fixes** in the page header, review the changes, and select
+**Back up and apply**. Cancel closes the modal without changing files.
+
+The **Auto Fixes** button opens a checklist with every repair checked by default. Uncheck any
+setting to leave it unchanged; only selected repairs are applied. Backups are always made first.
+The CLI defaults still exclude depth limits unless `--include-depth` is supplied.
+Both providers get a concurrent worker cap of 3; Claude gets tool concurrency capped at 4
+and Sonnet workers if no worker model is pinned. Codex worker reasoning is set to medium
+unless already medium or lower. Existing lower caps and pinned models are preserved.
+Use `token-furnace fix-config --include-depth` or keep the modal depth checkboxes selected to also cap
+nesting at 1. This is optional because some agent versions may reject it or block spawning.
+Session age, caller reads, wakeups and unbounded loops require workflow changes; configuration
+repairs cannot rewrite those historical measurements.
+
+Run `token-furnace fix-config` to set Claude Code's `autoCompactWindow` to `400000` and
+Codex's `model_auto_compact_token_limit` to `300000`. Checks warn when these settings differ.
+The command respects `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, preserves unrelated settings,
+and saves each existing changed file beside the original as `.token-furnace-backup`
+(with a numbered suffix when needed). No backup is needed for a newly created file.
+Invalid or unsupported configuration exits 1 before editing either file. Repeated runs make
+no changes once targets match. Restore by copying the printed backup path over its original.
+Restart agents after repair. A shell `CLAUDE_CODE_AUTO_COMPACT_WINDOW` override must be unset
+in the shell; the command reports it when present.
 
 ## Setup and hook
 

@@ -1,6 +1,6 @@
 import {
   ACTIVE_MINUTES,
-  BENCH_WINDOW,
+  CONTEXT_TARGET,
   CHECK_HOURS,
   GAIN_HOURS,
   sessionFlags,
@@ -18,6 +18,7 @@ import {
 import { configChecks } from "./config-checks";
 import { baseline } from "./baseline";
 import { weekPoints } from "./burn";
+import { PROVIDERS } from "../providers";
 import type {
   ActiveSession,
   HourSlot,
@@ -43,6 +44,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   const gainCuts = GAIN_HOURS.map((h) => [h, new Date(now.getTime() - h * 3_600_000)] as const);
 
   const bySize = new Map<string, number>();
+  const aboveBySize = new Map<string, number>();
   const turnsBySize = new Map<string, number>();
   const byProject = new Map<string, number>();
   const bySource = new Map<string, number>();
@@ -109,6 +111,8 @@ export function buildReport(input: ReportInput): RawReport | null {
       for (const item of file.turns) {
         if (item.when < cutoff) continue;
         const context = item.baseIn + item.cacheRead + item.cacheWrite;
+        const target = CONTEXT_TARGET[source];
+        const aboveTarget = context > target;
         if (!context) continue;
 
         const rate = modelRate(item.model);
@@ -142,7 +146,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         const isTop = rate !== null && rate >= topRate;
         stats7.turns += 1;
         if (isTop) stats7.top += weighted;
-        if (source === "claude") {
+        if (PROVIDERS[source].cacheWrites) {
           // Codex logs no cache writes, so it would read as 0%
           stats7.cache_write += item.cacheWrite;
           stats7.cache_input += context;
@@ -152,13 +156,14 @@ export function buildReport(input: ReportInput): RawReport | null {
         bump(bySource, source, weighted);
         const label = bucketLabel(context);
         bump(bySize, label, weighted);
+        if (aboveTarget) bump(aboveBySize, label, weighted);
         turnsBySize.set(label, (turnsBySize.get(label) ?? 0) + 1);
         for (const name of item.tools) if (name) bump(tools, name);
         const hour = hourStart(item.when);
         const slot = timeline.get(hour) ?? (timeline.set(hour, [0, 0]), timeline.get(hour)!);
-        slot[context >= 300_000 ? 1 : 0] += weighted;
-        // Benchmark: the same turn if auto-compact had kept context at BENCH_WINDOW.
-        const trimmed = Math.max(item.cacheRead - Math.max(context - BENCH_WINDOW, 0), 0);
+        slot[aboveTarget ? 1 : 0] += weighted;
+        // Benchmark: cap this turn at its provider’s ideal context size.
+        const trimmed = Math.max(item.cacheRead - Math.max(context - target, 0), 0);
         const hourSlot = hourly.get(hour) ?? emptySlot();
         const benchTurn = weighted - priced * (CACHE_READ_RATE * (item.cacheRead - trimmed));
         hourSlot.bench += benchTurn;
@@ -172,6 +177,8 @@ export function buildReport(input: ReportInput): RawReport | null {
           per2.set(hour, bucket);
         }
         hourSlot.ctx.push(context);
+        (hourSlot.ctxBySource[source] ??= []).push(context);
+        if (aboveTarget) hourSlot.aboveTurns++;
         hourSlot.reads += item.reads;
         hourSlot.calls += item.tools.length;
         contexts.push(context);
@@ -184,7 +191,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         const p = perSource(per, source);
         p.total += weighted;
         p.turns += 1;
-        if (context >= 300_000) p.over += weighted;
+        if (aboveTarget) p.over += weighted;
         p.sessions.add(key);
         p.contexts.push(context);
         p.stats7.turns += 1;
@@ -192,7 +199,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         p.totals.tool_calls += item.tools.length;
         p.totals.reads += item.reads;
         for (const wake of item.wakes) p.totals[wake] += 1;
-        if (source === "claude") {
+        if (PROVIDERS[source].cacheWrites) {
           p.stats7.cache_write += item.cacheWrite;
           p.stats7.cache_input += context;
         }
@@ -204,27 +211,27 @@ export function buildReport(input: ReportInput): RawReport | null {
           cReads += item.reads;
           for (const wake of item.wakes) cWakes[wake] += 1;
           last24.total += weighted;
-          if (context >= 300_000) last24.over += weighted;
+          if (aboveTarget) last24.over += weighted;
           last24.turns += 1;
           last24.contexts.push(context);
           last24.tool_calls += item.tools.length;
           last24.reads += item.reads;
           for (const wake of item.wakes) last24.wakes[wake] += 1;
           if (isTop) last24.top += weighted;
-          if (source === "claude") {
+          if (PROVIDERS[source].cacheWrites) {
             last24.cache_write += item.cacheWrite;
             last24.cache_input += context;
           }
           const p24 = p.recent;
           p24.total += weighted;
-          if (context >= 300_000) p24.over += weighted;
+          if (aboveTarget) p24.over += weighted;
           p24.turns += 1;
           p24.contexts.push(context);
           p24.tool_calls += item.tools.length;
           p24.reads += item.reads;
           for (const wake of item.wakes) p24.wakes[wake] += 1;
           if (isTop) p24.top += weighted;
-          if (source === "claude") {
+          if (PROVIDERS[source].cacheWrites) {
             p24.cache_write += item.cacheWrite;
             p24.cache_input += context;
           }
@@ -260,7 +267,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       if (hours > p.hours_all) p.hours_all = hours;
       if (hours > p.hours24) p.hours24 = hours;
       paths.set(key, file.path);
-      if (source === "claude") titles.set(key, file.title);
+      titles.set(key, file.title);
       const idle = lastSeen ? (now.getTime() - lastSeen.getTime()) / 60_000 : 0;
       if (idle <= ACTIVE_MINUTES) active.push([key, lastContext, idle, model, hourCost]);
     }
@@ -276,7 +283,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   for (const [low, high] of SIZE_BUCKETS) {
     const label = bucketRowLabel(low, high);
     if (bySize.get(label)) {
-      buckets.push([label, low, share(bySize.get(label)!), turnsBySize.get(label)!]);
+      buckets.push([label, low, share(bySize.get(label)!), turnsBySize.get(label)!, 100 * (aboveBySize.get(label) ?? 0) / bySize.get(label)!]);
     }
   }
   preambles.sort((a, b) => a - b);
@@ -287,7 +294,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     if (!row) return [];
     const [, turns, cPeak, hours] = row;
     const [cReads, cWakes] = signals24.get(key)!;
-    return sessionFlags(turns, cPeak, hours, cReads, cWakes);
+    return sessionFlags(turns, cPeak, hours, cReads, cWakes, splitKey(key)[0] as Source);
   };
   const sessionRow = (
     key: string,
@@ -316,7 +323,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     session_count: sessions.size,
     sources: [...bySource.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([name, value]) => [name as Source, share(value)]),
     buckets,
-    over_300k: buckets.filter((b) => b[1] >= 300).reduce((sum, b) => sum + b[2], 0),
+    over_target: share([...aboveBySize.values()].reduce((sum, cost) => sum + cost, 0)),
     preamble: preambles.length
       ? [preambles[preambles.length >> 1], preambles[Math.trunc(preambles.length * 0.9)], (100 * preambleReread) / allContext]
       : null,
@@ -378,7 +385,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       totals: p.totals,
       turns: p.turns,
       total: p.total,
-      over_300k: p.over,
+      over_target: (100 * p.over) / p.total,
       session_count: p.sessions.size,
       hours24: p.hours24,
       hours_all: p.hours_all,
@@ -463,7 +470,7 @@ function emptyRecent(): RawRecent {
 }
 
 function emptySlot(): HourSlot {
-  return { bench: 0, ctx: [], reads: 0, calls: 0 };
+  return { bench: 0, ctx: [], ctxBySource: {}, aboveTurns: 0, reads: 0, calls: 0 };
 }
 
 interface PerSource {

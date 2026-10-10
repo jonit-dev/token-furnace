@@ -239,8 +239,8 @@ export function Sessions({ r }: { r: Partial<Report> }) {
     },
     {
       title: "Context size buckets",
-      headers: ["Bucket", "Type", "Share", "Turns"],
-      rows: (r.buckets ?? []).map((b) => [b.label, b.hot ? "over 300k" : "under 300k", sharePct(b.share), b.turns ?? 0]),
+      headers: ["Bucket", "Above provider target", "Share", "Turns"],
+      rows: (r.buckets ?? []).map((b) => [b.label, sharePct(b.aboveTargetShare), sharePct(b.share), b.turns ?? 0]),
     },
     {
       title: "Projects",

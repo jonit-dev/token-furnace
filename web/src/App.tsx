@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import type { Burn, Report, Source } from "../../src/core/model";
 import { useReport } from "./use-report";
 import { useUi, type Tab } from "./store";
+import { FixConfig } from "./components/fix-config";
 import { Icon } from "./components/icons";
 import { Updated } from "./components/ui";
 import { Dashboard } from "./components/panels";
@@ -80,7 +81,8 @@ export function App() {
             </a>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-2 text-xs text-muted py-2.5">
+        <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted py-2.5">
+          <FixConfig />
           <span className={`px-2 py-0.5 rounded ${linkClass}`}>
             {filePage ? "snapshot" : online ? "live" : "offline"}
           </span>

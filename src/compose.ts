@@ -6,8 +6,7 @@ import { MemorySessionRepository } from "./repo/memory-repo";
 import { SqliteSessionRepository } from "./repo/sqlite-repo";
 import type { SessionRepository } from "./repo/session-repo";
 import { ReportService } from "./services/report-service";
-import { ClaudeSource } from "./sources/claude";
-import { CodexSource } from "./sources/codex";
+import { createSources } from "./sources";
 import type { AgentSource, Env } from "./sources/agent-source";
 
 export interface App {
@@ -28,7 +27,7 @@ export function sqliteCachePath(env: Env): string {
 export function compose(env: Env = process.env, opts?: { noCache?: boolean }): App {
   const noCache = opts?.noCache ?? Boolean(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0");
   const effective: Env = { ...env, TOKEN_FURNACE_NO_CACHE: noCache ? "1" : "0" };
-  const sources: AgentSource[] = [new ClaudeSource(effective), new CodexSource(effective)];
+  const sources = createSources(effective);
   const repo = noCache ? new MemorySessionRepository() : new SqliteSessionRepository(sqliteCachePath(effective));
   return {
     env: effective,

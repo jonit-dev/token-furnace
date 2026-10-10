@@ -1,6 +1,6 @@
 /** Data contracts shared by every layer. See docs/PRDs/active/npx-restructure/schema.md. */
 
-export type Source = "claude" | "codex";
+export type Source = keyof typeof import("./providers").PROVIDERS;
 
 /** What arrived before a turn: a human prompt, a teammate, a task, or a peer agent. */
 export type Wake = "human" | "teammate" | "task" | "peer";
@@ -190,6 +190,8 @@ export interface ActiveSession {
 export interface HourSlot {
   bench: number;
   ctx: number[];
+  ctxBySource: Partial<Record<Source, number[]>>;
+  aboveTurns: number;
   reads: number;
   calls: number;
 }
@@ -221,7 +223,7 @@ export interface RawPerSource {
   totals: Totals;
   turns: number;
   total: number;
-  over_300k: number;
+  over_target: number;
   session_count: number;
   hours24: number;
   hours_all: number;
@@ -249,9 +251,9 @@ export interface RawReport {
   turns: number;
   session_count: number;
   sources: [Source, number][];
-  /** [label, low edge in k, share %, turns] */
-  buckets: [string, number, number, number][];
-  over_300k: number;
+  /** [label, low edge in k, share %, turns, share within bucket above provider target] */
+  buckets: [string, number, number, number, number][];
+  over_target: number;
   /** [p50, p90, share of every token read] */
   preamble: [number, number, number] | null;
   projects: [string, number][];
@@ -283,7 +285,7 @@ export interface Report {
   total: number;
   sessions: number;
   turns: number;
-  over300k: number;
+  overTarget: number;
   burns: Partial<Record<Source, Burn>>;
   /** burns.claude, else the first burn. */
   burn: Burn | null;
@@ -293,8 +295,7 @@ export interface Report {
   active: ActiveSession[];
   /** [hour end, actual, benchmark] */
   burndown: [string, number, number][];
-  /** 200_000 */
-  benchWindow: number;
+  contextTargets: Record<Source, number>;
   budget: number | null;
   kpis: { name: string; unit: "k" | "%"; target: number; values: number[] }[];
   /** [hour, cool, hot] */
@@ -303,7 +304,7 @@ export interface Report {
   checkHours: number;
   baseline: BaselineRow[];
   topSessions: SessionRow[];
-  buckets: { label: string; hot: boolean; share: number; turns: number }[];
+  buckets: { label: string; aboveTargetShare: number; share: number; turns: number }[];
   projects: [string, number][];
   config: string[];
   tools: [string, number][];

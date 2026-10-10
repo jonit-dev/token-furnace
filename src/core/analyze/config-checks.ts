@@ -1,5 +1,6 @@
+import { parse as parseToml } from "smol-toml";
 import { int0 } from "./format";
-import { COMPACT_WINDOW_MAX, MEMORY_INDEX_LINES, SUBAGENT_CAP, SUBAGENT_DEPTH, TOOL_CONCURRENCY, SUBAGENT_ENV, CODEX_SUBAGENT_KEY } from "./flags";
+import { CONTEXT_TARGET, MEMORY_INDEX_LINES, SUBAGENT_CAP, SUBAGENT_DEPTH, TOOL_CONCURRENCY, SUBAGENT_ENV, CODEX_SUBAGENT_KEY } from "./flags";
 import type { ConfigInput, ConfigNote, Source } from "../model";
 
 /** A numeric note where lower is better: unset or over the limit warns. burn.py:410 */
@@ -65,7 +66,8 @@ function isSet(
 export function compactWindow(
   config: ConfigInput,
 ): [number | null, string | null] {
-  const env = config.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  const savedEnv = (settings(config)?.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  const env = config.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || (savedEnv == null ? undefined : String(savedEnv));
   if (env) {
     const text = env.trim().toLowerCase();
     const scale: Record<string, number> = { k: 1_000, m: 1_000_000 };
@@ -74,7 +76,7 @@ export function compactWindow(
     const parsed = Number.parseFloat(text.replace(/[km]+$/, ""));
     if (!Number.isFinite(parsed)) return [null, `env (unparsed: ${env})`];
     const value = parsed * factor;
-    return [Math.trunc(value >= 1000 ? value : value * 1000), "env"];
+    return [Math.trunc(value >= 1000 ? value : value * 1000), config.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ? "env" : "settings.env"];
   }
   const value = settings(config)?.autoCompactWindow;
   return typeof value === "number" && Number.isFinite(value) ? [Math.trunc(value), "settings"] : [null, null];
@@ -112,13 +114,16 @@ export function claudeSubagentCap(config: ConfigInput): [number | null, string |
 
 /** A value (string) from Codex config.toml, under [table] or as a dotted key. burn.py:390 */
 export function codexValue(config: ConfigInput, key: string): string | null {
-  const text = config.codexConfig;
-  if (text === null) return null;
-  const match = new RegExp(
-    `^\\s*(?:[a-z_]+\\s*\\.\\s*)?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*(.+)$`,
-    "m",
-  ).exec(text);
-  return match ? match[1].trim().replace(/^["']|["']$/g, "") : null;
+  if (config.codexConfig === null) return null;
+  try {
+    const data = parseToml(config.codexConfig);
+    const scope = key === "model_auto_compact_token_limit" ? data : data.agents;
+    if (typeof scope !== "object" || scope === null || Array.isArray(scope)) return null;
+    const value = (scope as Record<string, unknown>)[key];
+    return typeof value === "string" || typeof value === "number" ? String(value) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Codex's [agents] max_concurrent_threads_per_session. burn.py:401 */
@@ -133,13 +138,13 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
   const notes: ConfigNote[] = [];
   if (live.includes("claude")) {
     const [window, wsource] = compactWindow(config);
-    const within = Boolean(window) && Math.abs((window as number) - 200_000) <= 50_000;
+    const within = window === CONTEXT_TARGET.claude;
     let line: string;
     if (window === null) {
       line =
-        'autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": 200000.';
-    } else if (window > COMPACT_WINDOW_MAX) {
-      line = `autoCompactWindow is ${int0(window / 1000)}k (from ${wsource}): too high. Use about 200k.`;
+        `autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": ${CONTEXT_TARGET.claude}.`;
+    } else if (!within) {
+      line = `autoCompactWindow is ${int0(window / 1000)}k (from ${wsource}): use ${int0(CONTEXT_TARGET.claude / 1000)}k.`;
     } else {
       line = `autoCompactWindow is ${int0(window / 1000)}k (from ${wsource}): ok.`;
     }
@@ -147,10 +152,10 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
       name: "autoCompactWindow",
       source: "claude",
       value: window ? `${int0(window / 1000)}k` : "unset (model max)",
-      target: "about 200k",
+      target: `${int0(CONTEXT_TARGET.claude / 1000)}k`,
       ok: within,
       level: within ? "ok" : "warn",
-      ratio: window ? window / 200_000 : null,
+      ratio: window ? window / CONTEXT_TARGET.claude : null,
       line,
     });
     const [cap, csrc] = claudeSubagentCap(config);
@@ -206,18 +211,18 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
         : `agents.default_subagent_reasoning_effort is ${effort || "unset"}: set it to low or medium so workers don't inherit a costly effort.`,
     });
     const compact = codexValue(config, "model_auto_compact_token_limit");
-    const compactOk = compact !== null && /^\d+$/.test(compact) && Number.parseInt(compact, 10) <= COMPACT_WINDOW_MAX;
+    const compactOk = compact !== null && /^\d+$/.test(compact) && Number.parseInt(compact, 10) === CONTEXT_TARGET.codex;
     notes.push({
       name: "Auto-compact token limit",
       source: "codex",
       value: compact || "unset",
-      target: "about 160k",
+      target: `${int0(CONTEXT_TARGET.codex / 1000)}k`,
       ok: compactOk,
       level: compactOk ? "ok" : "warn",
       ratio: null,
       line: compactOk
         ? `model_auto_compact_token_limit is ${compact}: ok.`
-        : `model_auto_compact_token_limit is ${compact || "unset"}: set about 160000 for a >=200K window.`,
+        : `model_auto_compact_token_limit is ${compact || "unset"}: set ${CONTEXT_TARGET.codex}.`,
     });
   }
   return notes;

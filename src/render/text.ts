@@ -5,9 +5,10 @@
  * recent_sessions). `%f` goes through core/analyze/format so the numbers round like Python's.
  */
 
+import { CONTEXT_TARGET_LABEL } from "../core/context";
 import { burnGoal } from "../core/analyze/burn";
 import { fixed, int0 } from "../core/analyze/format";
-import { BENCH_WINDOW, CHECK_HOURS } from "../core/analyze/flags";
+import { CHECK_HOURS } from "../core/analyze/flags";
 import { topIssues } from "../core/analyze/issues";
 import { CACHE_READ_RATE, CACHE_WRITE_RATE } from "../core/analyze/pricing";
 import type { RawBurn, RawReport, Source } from "../core/model";
@@ -58,7 +59,7 @@ export function printDoctor(report: RawReport, htmlPath: string | null): string 
     }
   });
   out.push(
-    `\nBenchmark: the same turns at a ${fixed(BENCH_WINDOW / 1000)}k compaction window would cost ` +
+    `\nBenchmark: the same turns at ${CONTEXT_TARGET_LABEL} compaction targets would cost ` +
       `about ${fixed(report.bench_total / 1e6)}M ` +
       `(${fixed(100 * (1 - report.bench_total / report.total))}% less). Estimate: trims cached ` +
       `context only.`,
@@ -93,7 +94,7 @@ export function printText(report: RawReport): string {
     out.push(`  ${end(label, 12)} ${start(fixed(pct, 1), 6)}%   ${start(int0(turns), 6)} turns`);
   }
   out.push(
-    `  --> ${fixed(report.over_300k)}% of spend is on turns carrying more than 300k of context`,
+    `  --> ${fixed(report.over_target)}% of spend is on turns carrying more than their provider context target (${CONTEXT_TARGET_LABEL})`,
   );
 
   if (report.preamble) {

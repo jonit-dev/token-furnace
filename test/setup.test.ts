@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -445,4 +446,81 @@ describe("token-furnace setup", () => {
     expect(readFileSync(codexConfig, "utf8")).toBe(initial);
   });
 
+});
+
+describe("token-furnace fix-config", () => {
+  let testHome: string;
+  beforeEach(() => { testHome = mkdtempSync(join(tmpdir(), "tf-fix-config-")); });
+  afterEach(() => { rmSync(testHome, { recursive: true, force: true }); });
+
+  it("repairs both custom config paths, backs up original bytes, and is idempotent", async () => {
+    const claudeDir = join(testHome, "claude-custom");
+    const codexDir = join(testHome, "codex-custom");
+    mkdirSync(claudeDir); mkdirSync(codexDir);
+    const claudePath = join(claudeDir, "settings.json");
+    const codexPath = join(codexDir, "config.toml");
+    const claudeBytes = '{"autoCompactWindow":200000,"permissions":{"allow":[]},"env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"800k","CUSTOM":"keep"}}';
+    const codexBytes = '# keep comment\n"model_auto_compact_token_limit" = 160000\n[agents]\nmax_depth = 2\n';
+    writeFileSync(claudePath, claudeBytes); writeFileSync(codexPath, codexBytes);
+    const app = compose({ HOME: testHome, CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexDir }, { noCache: true });
+    expect(await main(["fix-config"], app)).toBe(0);
+    expect(readFileSync(`${claudePath}.token-furnace-backup`, "utf8")).toBe(claudeBytes);
+    expect(readFileSync(`${codexPath}.token-furnace-backup`, "utf8")).toBe(codexBytes);
+    expect(JSON.parse(readFileSync(claudePath, "utf8"))).toEqual({ autoCompactWindow: 400000, permissions: { allow: [] }, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000", CUSTOM: "keep", CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "3", CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "4", CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" } });
+    expect(parseToml(readFileSync(codexPath, "utf8"))).toEqual({ model_auto_compact_token_limit: 300000, agents: { max_depth: 2, max_concurrent_threads_per_session: 3, default_subagent_reasoning_effort: "medium" } });
+    expect(readFileSync(codexPath, "utf8")).toContain("# keep comment");
+    expect(await main(["fix-config"], app)).toBe(0);
+    expect(readdirSync(claudeDir)).toHaveLength(2);
+    expect(readdirSync(codexDir)).toHaveLength(2);
+  });
+
+  it("leaves live config untouched when creating a backup fails", async () => {
+    mkdirSync(join(testHome, ".claude"));
+    const path = join(testHome, ".claude", "settings.json");
+    writeFileSync(path, '{}');
+    chmodSync(join(testHome, ".claude"), 0o500);
+    try {
+      expect(await main(["fix-config"], compose({ HOME: testHome }, { noCache: true }))).toBe(1);
+      expect(readFileSync(path, "utf8")).toBe('{}');
+      expect(existsSync(join(testHome, ".codex", "config.toml"))).toBe(false);
+    } finally { chmodSync(join(testHome, ".claude"), 0o700); }
+  });
+
+  it("creates missing configuration with the requested targets", async () => {
+    expect(await main(["fix-config"], compose({ HOME: testHome }, { noCache: true }))).toBe(0);
+    expect(JSON.parse(readFileSync(join(testHome, ".claude", "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+    expect(parseToml(readFileSync(join(testHome, ".codex", "config.toml"), "utf8")).model_auto_compact_token_limit).toBe(300000);
+  });
+
+  it("preserves healthy worker settings and only repairs depth when opted in", async () => {
+    mkdirSync(join(testHome, ".claude")); mkdirSync(join(testHome, ".codex"));
+    const claudePath = join(testHome, ".claude", "settings.json");
+    const codexPath = join(testHome, ".codex", "config.toml");
+    const env = { CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "2", CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "2", CLAUDE_CODE_SUBAGENT_MODEL: "haiku", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "4" };
+    writeFileSync(claudePath, JSON.stringify({ autoCompactWindow: 400000, env }));
+    writeFileSync(codexPath, 'model_auto_compact_token_limit = 300000\n[agents]\nmax_concurrent_threads_per_session = 2\ndefault_subagent_reasoning_effort = "low"\nmax_depth = 4\n');
+    const app = compose({ HOME: testHome }, { noCache: true });
+    expect(await main(["fix-config"], app)).toBe(0);
+    expect(JSON.parse(readFileSync(claudePath, "utf8")).env).toEqual(env);
+    expect(await main(["fix-config", "--include-depth"], app)).toBe(0);
+    expect(JSON.parse(readFileSync(claudePath, "utf8")).env).toEqual({ ...env, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" });
+    expect(parseToml(readFileSync(codexPath, "utf8")).agents).toEqual({ max_concurrent_threads_per_session: 2, default_subagent_reasoning_effort: "low", max_depth: 1 });
+  });
+
+  it("rejects malformed configuration before updating either file", async () => {
+    mkdirSync(join(testHome, ".claude")); mkdirSync(join(testHome, ".codex"));
+    const claudePath = join(testHome, ".claude", "settings.json");
+    const codexPath = join(testHome, ".codex", "config.toml");
+    writeFileSync(claudePath, '{}'); writeFileSync(codexPath, 'broken = "');
+    const app = compose({ HOME: testHome }, { noCache: true });
+    expect(await main(["fix-config"], app)).toBe(1);
+    expect(readFileSync(claudePath, "utf8")).toBe('{}');
+    expect(readdirSync(join(testHome, ".claude"))).toHaveLength(1);
+    for (const invalid of ['[]', '{"env":null}', '{']) {
+      writeFileSync(claudePath, invalid); writeFileSync(codexPath, '');
+      expect(await main(["fix-config"], app)).toBe(1);
+      expect(readFileSync(claudePath, "utf8")).toBe(invalid);
+      expect(readFileSync(codexPath, "utf8")).toBe('');
+    }
+  });
 });

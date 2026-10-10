@@ -7,7 +7,7 @@ SPEND BY CONTEXT SIZE OF THE TURN   <- the main lever
   200-300k        2.9%       10 turns
   300-500k       76.5%      300 turns
   500-1000k      11.4%       20 turns
-  --> 88% of spend is on turns carrying more than 300k of context
+  --> 88% of spend is on turns carrying more than their provider context target (Claude 400k / Codex 300k)
 
 ALWAYS-RESIDENT PREAMBLE (instructions, memory, skill catalog, tool schemas)
   p50=400k  p90=900k per session  ->  99% of every token read
@@ -29,14 +29,14 @@ TOOL CALLS
 
 LEAK CHECKS (top sessions of the last 24 h; each flag names its fix)
    86.4%  claude aaaaaaaa  fix the bug
-          - late compaction: peak 400k. Set autoCompactWindow to about 200000.
+          - late compaction: peak 400k. Use a 400000 claude compaction window.
           - caller reads: 300 file/log reads. Send them to a cheap read-only agent.
           - wakeups: 60 (teammate 0, task 60, peer 0). Ask for one report at the end.
           - loop: 300 turns for 1 human prompts. Give the loop a stop condition and a budget.
           - long-lived: 12h. Start one fresh session per task.
 
 CONFIG CHECKS
-  - autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": 200000.
+  - autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": 400000.
   - CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS is unset: set it to at most 3.
   - CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH is unset: set it to at most 1.
   - CLAUDE_CODE_SUBAGENT_MODEL is unset: subagents inherit the main model; pin a cheap worker (e.g. CLAUDE_CODE_SUBAGENT_MODEL=sonnet).
@@ -44,12 +44,12 @@ CONFIG CHECKS
   - agents.max_concurrent_threads_per_session is 5 (from config.toml): too high. Use 3.
   - agents.max_depth is 2 (from config.toml): too high. Use 1.
   - agents.default_subagent_reasoning_effort is unset: set it to low or medium so workers don't inherit a costly effort.
-  - model_auto_compact_token_limit is unset: set about 160000 for a >=200K window.
+  - model_auto_compact_token_limit is unset: set 300000.
   - <root>/projects/demo/memory/MEMORY.md has 250 lines: lines after 200 are not loaded, so those memories are invisible. Shorten it.
 
 BASELINE (last 24 h, 7-day value, recommended)
-  critical Spend on turns over 300k     94%                13883200% under 10%
-  critical Median context per turn      400k               400k     under 150k
+  critical Spend on turns over 400k     94%                95%      under 10%
+  warn     Median context per turn      400k               400k     at most 400k
   critical Turns per human prompt       160                113      under 50
   critical Caller reads per tool call   100%               100%     under 20%
   warn     Wakeups per session          30                 20       under 20
@@ -58,14 +58,14 @@ BASELINE (last 24 h, 7-day value, recommended)
   ok       Cache rebuilds               0%                 0%       under 10%
   critical Preamble per session (p50)   400k               400k     under 40k
   ok       Spend on turns over 300k     0%                 0%       under 10%
-  ok       Median context per turn      50k                50k      under 150k
+  ok       Median context per turn      50k                50k      at most 300k
   ok       Turns per human prompt       40                 40       under 50
-  ok       Caller reads per tool call   0%                 0%       under 20%
+  critical Caller reads per tool call   100%               100%     under 20%
   ok       Wakeups per session          0                  0        under 20
   ok       Longest top session          1h                 1h       under 12h
   info     Spend on the top model       100%               100%     under 60%
   warn     Preamble per session (p50)   50k                50k      under 40k
-  warn     autoCompactWindow            unset (model max)           about 200k
+  warn     autoCompactWindow            unset (model max)           400k
   warn     Max concurrent subagents     unset                       at most 3
   warn     Subagent spawn depth         unset                       at most 1
   warn     Subagent model               unset                       pinned
@@ -73,4 +73,4 @@ BASELINE (last 24 h, 7-day value, recommended)
   warn     Max concurrent subagents     5                           at most 3
   warn     Agent nesting depth          2                           at most 1
   warn     Subagent reasoning effort    unset                       low or medium
-  warn     Auto-compact token limit     unset                       about 160k
+  warn     Auto-compact token limit     unset                       300k

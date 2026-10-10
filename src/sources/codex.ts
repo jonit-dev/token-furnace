@@ -53,7 +53,7 @@ export class CodexSource implements AgentSource {
    * Codex logs usage in event_msg/token_count and tool calls in separate records.
    *
    * input_tokens already includes the cached portion, unlike Claude Code, so base input is
-   * the difference. Reasoning tokens bill as output.
+   * the difference. output_tokens already includes reasoning tokens.
    */
   parse(path: string): ParsedFile {
     let project = "?";
@@ -62,6 +62,10 @@ export class CodexSource implements AgentSource {
     let pendingTools: string[] = [];
     let pendingReads = 0;
     let wakes: Wake[] = [];
+    let messageWakes: [string, Wake][] = [];
+    const eventMessages = new Map<string, number>();
+    const seenCalls = new Set<string>();
+    let lastTotal: number | null = null;
     const turns: Turn[] = [];
     let bad = 0;
 
@@ -83,14 +87,42 @@ export class CodexSource implements AgentSource {
         model = String(payload.model || model);
         continue;
       }
-      if (payload.type === "function_call") {
+      if (payload.type === "function_call" || payload.type === "custom_tool_call") {
+        if (typeof payload.call_id === "string") seenCalls.add(payload.call_id);
         pendingTools.push(String(payload.name ?? ""));
-        pendingReads += isRead(null, payload.arguments) ? 1 : 0;
+        const raw = payload.arguments ?? payload.input;
+        const args = typeof raw === "string" ? jsonParse(raw) : null;
+        const command = args?.cmd ?? args?.command ?? raw;
+        pendingReads += (Array.isArray(command) ? command.some((c) => isRead(null, c)) : isRead(null, command)) ? 1 : 0;
+        continue;
+      }
+      if (payload.type === "item_completed" && payload.item?.type === "CommandExecution") {
+        const item = payload.item;
+        if (typeof item.id === "string") {
+          if (seenCalls.has(item.id)) continue;
+          seenCalls.add(item.id);
+        }
+        // Code-mode wrappers log the commands they actually executed separately.
+        pendingTools.push("exec_command");
+        const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
+        const shellCommand = Array.isArray(item.command) && item.command.some((arg: unknown) => arg === "-lc" || arg === "-c")
+          ? item.command.at(-1) : command;
+        pendingReads += isRead(null, shellCommand) ? 1 : 0;
+        continue;
+      }
+      if (kind === "response_item" && payload.type === "message" && payload.role === "user") {
+        const text = Array.isArray(payload.content)
+          ? payload.content.map((c: any) => typeof c.text === "string" ? c.text : "").join("\n")
+          : "";
+        const wake = classifyPrompt(text);
+        if (wake) messageWakes.push([text.trim(), wake]);
         continue;
       }
       if (payload.type === "user_message") {
-        const wake = classifyPrompt(String(payload.message || ""));
+        const text = String(payload.message || "").trim();
+        const wake = classifyPrompt(text);
         if (wake) wakes.push(wake);
+        eventMessages.set(text, (eventMessages.get(text) ?? 0) + 1);
         continue;
       }
       if (payload.type !== "token_count") continue;
@@ -99,11 +131,21 @@ export class CodexSource implements AgentSource {
       if (!usage || Object.keys(usage).length === 0) continue;
       const when = parseTime(record.timestamp);
       if (when === null) continue;
+      const total = payload.info?.total_token_usage?.total_tokens;
+      if (typeof total === "number" && Number.isFinite(total)) {
+        if (total === lastTotal) continue; // Quota updates can repeat the previous turn's usage.
+        lastTotal = total;
+      }
       const cached = num(usage.cached_input_tokens);
       const tools = pendingTools;
       const reads = pendingReads;
       pendingTools = [];
       pendingReads = 0;
+      for (const [text, wake] of messageWakes) {
+        const matching = eventMessages.get(text) ?? 0;
+        if (matching) eventMessages.set(text, matching - 1);
+        else wakes.push(wake);
+      }
       turns.push({
         source: "codex",
         project,
@@ -113,12 +155,14 @@ export class CodexSource implements AgentSource {
         baseIn: Math.max(num(usage.input_tokens) - cached, 0),
         cacheRead: cached,
         cacheWrite: 0,
-        output: num(usage.output_tokens) + num(usage.reasoning_output_tokens),
+        output: num(usage.output_tokens),
         tools,
         reads,
         wakes,
       });
       wakes = [];
+      messageWakes = [];
+      eventMessages.clear();
     }
     return { turns, title: null, badLines: bad };
   }

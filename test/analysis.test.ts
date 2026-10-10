@@ -64,9 +64,9 @@ describe("check_last_24h", () => {
     expect(report.issues.some((i) => i.title.includes("compact too late"))).toBe(false);
 
     const by = Object.fromEntries(report.baseline.map((row) => [row.name, row]));
-    expect(by["Spend on turns over 300k"].ok).toBe(true);
-    expect(by["Spend on turns over 300k"].now_24h).toBe("0%");
-    expect(by["Spend on turns over 300k"].value_7d).not.toBe("0%");
+    expect(by["Spend on turns over 400k"].ok).toBe(true);
+    expect(by["Spend on turns over 400k"].now_24h).toBe("0%");
+    expect(by["Spend on turns over 400k"].value_7d).not.toBe("0%");
     expect(by["Cache rebuilds"].level).toBe("warn"); // ~14% against 10%
     const top = by["Spend on the top model"]; // advisory: opus only, so never worse than info
     expect([top.advisory, top.level, top.ok]).toEqual([true, "info", false]);
@@ -97,6 +97,16 @@ describe("check_config_notes", () => {
     };
   });
 
+  it("checks exact context targets and handles quoted Codex keys with comments", () => {
+    for (const size of [0, 200000, 300000, 400000, 800000]) {
+      config.settings = JSON.stringify({ autoCompactWindow: size });
+      config.codexConfig = `"model_auto_compact_token_limit" = ${size} # context\n`;
+      const notes = configNotes(["claude", "codex"], config);
+      expect(notes.find((note) => note.name === "autoCompactWindow")?.ok).toBe(size === 400000);
+      expect(notes.find((note) => note.name === "Auto-compact token limit")?.ok).toBe(size === 300000);
+    }
+  });
+
   it("reads the subagent cap from settings.json .env, then the process env", () => {
     put("{}");
     expect(claudeSubagentCap(config)).toEqual([null, null]);
@@ -120,9 +130,8 @@ describe("check_config_notes", () => {
       expect(codexSubagentCap(config)[0]).toBe(want);
     }
     const text =
-      "[agents]\nmax_concurrent_threads_per_session = 3\nmax_depth = 1\n" +
-      'default_subagent_reasoning_effort = "low"\n' +
-      "model_auto_compact_token_limit = 160000";
+      "model_auto_compact_token_limit = 300000\n[agents]\nmax_concurrent_threads_per_session = 3\nmax_depth = 1\n" +
+      'default_subagent_reasoning_effort = "low"\n';
     writeFileSync(join(root, "config.toml"), text);
     config = { ...config, codexConfig: text };
     const codex = Object.fromEntries(configNotes(["codex"], config).map((n) => [n.name, n]));
@@ -201,14 +210,14 @@ describe("main", () => {
     for (let i = 0; i < 300; i++) {
       const when = new Date(now.getTime() - 13 * HOUR + i * 150_000);
       if (i % 5 === 0) lines.push(user(when, "<task-notification>done</task-notification>"));
-      lines.push(assistant(when, 400_000, [["Bash", "cd /x && sed -n 1,9p f"]]));
+      lines.push(assistant(when, 450_000, [["Bash", "cd /x && sed -n 1,9p f"]]));
     }
     write(join(root, "projects", "demo", "aaaaaaaa-leak.jsonl"), lines);
 
     const data = report();
     const text = [...data.config, ...data.topSessions.flatMap((s) => s.flags)].join("\n");
     for (const expected of [
-      "late compaction: peak 400k",
+      "late compaction: peak 450k",
       "caller reads: 300",
       "wakeups: 60 (teammate 0, task 60",
       "loop: 300 turns for 1 human",
@@ -245,15 +254,15 @@ describe("main", () => {
 
   it("reports a pinned compaction window from settings, and one from the env", () => {
     expect(report().config).toContain(
-      'autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": 200000.',
+      'autoCompactWindow is unset: compaction waits for the model window (about 1M on 1M models). Set "autoCompactWindow": 400000.',
     );
-    writeFileSync(join(root, "settings.json"), JSON.stringify({ autoCompactWindow: 200000 }));
-    expect(report().config).toContain("autoCompactWindow is 200k (from settings): ok.");
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ autoCompactWindow: 400000 }));
+    expect(report().config).toContain("autoCompactWindow is 400k (from settings): ok.");
 
     const over = env();
     over.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "800k";
     expect(configChecks(["claude"], readConfig(over))).toContain(
-      "autoCompactWindow is 800k (from env): too high. Use about 200k.",
+      "autoCompactWindow is 800k (from env): use 400k.",
     );
   });
 });

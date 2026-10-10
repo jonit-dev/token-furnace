@@ -210,7 +210,8 @@ Applied by default — none of these reduce reasoning quality:
 | Claude | `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `3` | Default is 20. Caps simultaneous fan-out; does not cap total work. |
 | Claude | `ENABLE_TOOL_SEARCH` | `true` | Defers MCP tool schemas instead of loading every definition up front. Pure win with several MCP servers. |
 | Claude | `MAX_MCP_OUTPUT_TOKENS` | `12000` | Default 25K. Bounds a pathological MCP dump. |
-| Claude | `autoCompactWindow` | `200000` | Manual for now: `token-furnace setup` does not set it. On a 1M model the default compacts near 1M, so every turn carries up to 1M of context. |
+| Claude | `autoCompactWindow` | `400000` | Set with `token-furnace fix-config` (backup first). On a 1M model the default compacts near 1M, so every turn carries up to 1M of context. |
+| Codex | `model_auto_compact_token_limit` | `300000` | Set with `token-furnace fix-config` (backup first). |
 | Codex | `model_verbosity` | `low` | Shortens visible prose only. Reasoning is a separate setting and is untouched. |
 | Codex | `tool_output_token_limit` | `10000` | Bounds giant build and test logs. |
 | Codex | `agents.max_concurrent_threads_per_session` | `3` | Same reasoning as the Claude cap. |
@@ -255,7 +256,7 @@ npx token-furnace serve              # live report on http://127.0.0.1:8765
 Read the output in this order:
 
 1. **Spend by context size.** Cost per turn scales with the context carried into it, so a
-   few very long turns can dominate a week. A large share above 300k means sessions are
+   few very long turns can dominate a week. A large share above the provider target means sessions are
    never compacting: use a smaller context window, or start fresh sessions between
    unrelated tasks. Compression cannot fix this.
 2. **Always-resident preamble.** Instructions, memory, skill catalog and tool schemas are
@@ -266,14 +267,14 @@ Read the output in this order:
 4. **Tool calls.** If duplicate reads or repeated identical commands are rare, output
    compression has nothing to eat and is not your lever.
 5. **Leak checks.** Each top session gets one line per leak it shows, with the fix:
-   - *late compaction*: peak context above 300k. Set `autoCompactWindow` to about 200000.
+   - *late compaction*: peak context above the provider target (Claude 400k, Codex 300k). Values come from `src/core/context.ts`.
    - *caller reads*: 100+ file or log reads (`Read`, `sed -n`, `grep`, `rg`, `cat`, `python3 -`)
      run in the caller's own context. Send them to a cheap read-only agent.
    - *wakeups*: 50+ teammate, task-notification or cross-session messages. Each one is a
      full-context turn. Ask for one report at the end.
    - *loop*: 200+ turns per human prompt. Give the autonomous loop a stop condition and a budget.
    - *long-lived*: open 12+ hours. Start one fresh session per task.
-6. **Config checks.** `autoCompactWindow` unset or above 300k (the env var
+6. **Config checks.** `autoCompactWindow` unset or different from 400k; Codex `model_auto_compact_token_limit` unset or different from 300k (the env var
    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` overrides the setting), and any `MEMORY.md` index over
    200 lines (Claude Code does not load the rest).
 

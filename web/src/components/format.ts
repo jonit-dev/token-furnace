@@ -1,3 +1,5 @@
+import { PROVIDERS } from "../../../src/core/providers";
+
 // Formatting helpers, ported from web/legacy/dashboard.html. Each one accepts missing values.
 
 export function fmt(n: number | null | undefined): string {
@@ -40,12 +42,13 @@ export function stamp(iso: string | null | undefined): string {
 }
 
 export function sourceLabel(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  return PROVIDERS[s as keyof typeof PROVIDERS]?.label ?? s;
 }
 
 export const SHORT: Record<string, string> = {
-  "Median context per turn": "Median ctx",
-  "Turns over 300k context": "Turns >300k",
+  "Claude Code median context per turn": "Claude median ctx",
+  "Codex median context per turn": "Codex median ctx",
+  "Turns over provider context target": "Turns >target",
   "Caller reads per tool call": "Caller reads",
 };
 
@@ -77,9 +80,8 @@ export const LEVEL_ORDER = ["critical", "warn", "ok", "info"];
 
 // Which agent a check or leak belongs to.
 export const SOURCE_LABEL: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  all: "Both",
+  ...Object.fromEntries(Object.entries(PROVIDERS).map(([id, provider]) => [id, provider.label])),
+  all: "All providers",
 };
 
 // Shared table header style.

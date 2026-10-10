@@ -40,10 +40,12 @@ export function useReport(): Report | null {
 
     void load();
     const timer = setInterval(load, REFRESH_MS);
+    window.addEventListener("config-fixed", load);
     return () => {
       // A late response after unmount must not touch state.
       active = false;
       clearInterval(timer);
+      window.removeEventListener("config-fixed", load);
     };
   }, [setOnline]);
 

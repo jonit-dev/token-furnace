@@ -32,7 +32,7 @@ const ROOTS = ["response_item", "event_msg", "compacted"];
 /** Root types the parser reads first, whatever the payload. */
 const CONTEXT_ROOTS = ["session_meta", "turn_context"];
 /** Payload types the parser reads. */
-const HANDLED = ["function_call", "user_message", "token_count"];
+const HANDLED = ["function_call", "custom_tool_call", "item_completed", "user_message", "token_count"];
 
 /** A valid ignored root line padded to exactly `totalBytes`. */
 function targetLine(totalBytes: number): string {
@@ -46,7 +46,7 @@ function routingIgnores(record: any): boolean {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
   if (record.type === "session_meta" || record.type === "turn_context") return false;
   const payload = record.payload || {};
-  return !HANDLED.includes(payload.type);
+  return !HANDLED.includes(payload.type) && !(payload.type === "message" && payload.role === "user");
 }
 function jsTarget(line: string): boolean {
   try {
@@ -62,6 +62,16 @@ function safe(text: string | Buffer): boolean {
 }
 
 describe("ignored-output routing", () => {
+  it("preserves user response messages with reordered and duplicate role fields", () => {
+    for (const fields of [
+      '"role":"user","type":"message"',
+      '"type":"message","role":"assistant","role":"user"',
+    ]) {
+      expect(skipLine(`{"type":"response_item","payload":{${fields},"content":"${PAD}"}}`)).toBe(false);
+    }
+    expect(skipLine(`{"type":"response_item","payload":{"type":"message","role":"user","role":"assistant","content":"${PAD}"}}`)).toBe(true);
+  });
+
   it("skips event_msg agent_message and compacted records", () => {
     const rows = [
       JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: PAD } }),
@@ -202,7 +212,7 @@ describe("CodexSource integration", () => {
     expect(parsed.turns[0].reads).toBe(1);
     expect(parsed.turns[0].wakes).toEqual(["human"]);
     expect(parsed.turns[0].baseIn).toBe(600);
-    expect(parsed.turns[0].output).toBe(300);
+    expect(parsed.turns[0].output).toBe(200);
   });
 
   it("keeps turns and badLines unchanged when large ignored lines are present", () => {
@@ -228,7 +238,7 @@ describe("CodexSource integration", () => {
     expect(parsed.turns[0].session).toBe("0a1b2c3d");
     expect(parsed.turns[0].model).toBe("gpt-5.5");
     expect(parsed.turns[0].baseIn).toBe(600);
-    expect(parsed.turns[0].output).toBe(300);
+    expect(parsed.turns[0].output).toBe(200);
   });
 });
 

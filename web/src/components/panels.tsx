@@ -1,7 +1,8 @@
+import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/context";
 import type { ReactNode } from "react";
 import type { Burn, Report, Source } from "../../../src/core/model";
 import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
-import { Bar, Card, CopyButton, SourceToggle, Spark, Tile, WeekBar } from "./ui";
+import { Bar, Card, CopyButton, SourceBadge, SourceToggle, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
 import { Icon } from "./icons";
 
@@ -20,7 +21,7 @@ export function ActNow({ r }: { r: Partial<Report> }) {
         </li>
       ))}
       {urgent.map((i) => (
-        <li key={i.title} className="flex items-center gap-2 py-2" title={i.fix}>
+        <li key={i.source + "|" + i.title} className="flex items-center gap-2 py-2" title={i.fix}>
           <Icon name="TriangleAlert" size={16} className="text-hot shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium truncate">{i.title}</div>
@@ -38,18 +39,13 @@ export function ActNow({ r }: { r: Partial<Report> }) {
 
 export function ActiveSessions({
   sessions,
-  source,
-  limit,
+  burns,
 }: {
   sessions: Report["active"];
-  source?: Source | null;
-  limit?: number | null;
+  burns?: Report["burns"];
 }) {
-  // With the source toggle on, show only that source's sessions.
-  const rows = source ? sessions.filter((s) => s.source === source) : sessions;
-  if (!rows.length) {
-    const who = source ? sourceLabel(source) + " " : "";
-    return <p className="text-sm text-muted">No {who}session had a turn in the last 30 minutes.</p>;
+  if (!sessions.length) {
+    return <p className="text-sm text-muted">No session had a turn in the last 30 minutes.</p>;
   }
   return (
     <div className="overflow-x-auto -mx-1">
@@ -67,9 +63,10 @@ export function ActiveSessions({
           </tr>
         </thead>
         <tbody>
-          {rows.map((s, i) => {
+          {sessions.map((s, i) => {
             const share = Number(s.rateShare) || 0;
             const hot = share >= 50;
+            const limit = burns?.[s.source]?.limit;
             return (
               <tr key={i} className="border-t border-line align-middle">
                 <td className="px-1 py-1 max-w-[16rem] min-w-[10rem]">
@@ -77,7 +74,7 @@ export function ActiveSessions({
                     {s.title || "(untitled)"}
                   </div>
                   <div className="text-[11px] text-muted truncate">
-                    {s.project ?? "?"} · {s.id}
+                    <SourceBadge source={s.source} /> {s.project ?? "?"} · {s.id}
                   </div>
                 </td>
                 <td className="px-1 py-1 text-muted whitespace-nowrap">
@@ -86,7 +83,7 @@ export function ActiveSessions({
                 <td className="px-1 py-1 text-right whitespace-nowrap" title={limit ? fmt(s.rate) + "/h" : undefined}>
                   {limit ? quota((100 * s.rate) / limit) : fmt(s.rate) + "/h"}
                 </td>
-                <td className="px-1 py-1 whitespace-nowrap">
+                <td className="px-1 py-1 whitespace-nowrap" title={`Share of ${sourceLabel(s.source)} burn in the last hour`}>
                   <span className={hot ? "text-accent" : ""}>{sharePct(share)}</span>
                   <div className="mt-0.5 h-1 w-14 rounded bg-line overflow-hidden">
                     <div
@@ -125,11 +122,9 @@ export function ActiveSessions({
 export function KpiStrip({
   r,
   burn,
-  source,
 }: {
   r: Partial<Report>;
   burn?: Burn;
-  source?: Source | null;
 }) {
   const rate = Number(burn?.rate) || 0;
   const goal = Number(burn?.goal) || 0;
@@ -220,21 +215,21 @@ export function KpiStrip({
       <Tile key="week" label="Weekly limit" icon="CalendarDays" value="—" line="no subscription reading yet" state={null} />,
     );
   }
-  const over = Number(r.over300k) || 0;
+  const over = Number(r.overTarget) || 0;
   const overHourly = (r.timeline ?? [])
     .slice(-24)
     .map((t) => (100 * (t[2] ?? 0)) / (((t[1] ?? 0) + (t[2] ?? 0)) || 1));
   tiles.push(
     <Tile
       key="over"
-      label={"Spend >300k · " + (r.days ?? 0) + " d"}
+      label={"Spend >target · " + (r.days ?? 0) + " d"}
       icon="TrendingUp"
       value={Math.round(over) + "%"}
       line={fmt(r.total) + " · " + (r.days ?? 0) + " d"}
-      tip={"Spend over 300k context · " + fmt(r.total) + " tokens in " + (r.days ?? 0) + " d"}
-      state={over >= 50 ? "over" : "ok"}
+      tip={"Spend over provider context target (" + CONTEXT_TARGET_LABEL + ") · " + fmt(r.total) + " tokens in " + (r.days ?? 0) + " d"}
+      state={over > MAX_OVER_TARGET_SHARE * 100 ? "over" : "ok"}
     >
-      <Spark values={overHourly} target={50} over={over >= 50} />
+      <Spark values={overHourly} target={MAX_OVER_TARGET_SHARE * 100} over={over > MAX_OVER_TARGET_SHARE * 100} />
     </Tile>,
   );
   for (const k of r.kpis ?? []) {
@@ -255,8 +250,9 @@ export function KpiStrip({
       </Tile>,
     );
   }
-  const active = (r.active ?? []).filter((s) => !source || s.source === source);
+  const active = r.active ?? [];
   const top = active[0];
+  const topBurn = top ? r.burns?.[top.source] : undefined;
   tiles.push(
     <Tile
       key="active"
@@ -265,7 +261,7 @@ export function KpiStrip({
       value={active.length}
       line={top ? `top ${Math.round(top.rateShare)}%` : "none in 30 min"}
       tip={top ? "Top burner: " + (top.title || top.id) : "No session had a turn in the last 30 minutes"}
-      state={top && top.rateShare >= 50 && overBurn ? "over" : null}
+      state={top && top.rateShare >= 50 && topBurn?.goal && topBurn.rate > topBurn.goal ? "over" : null}
     >
       {top ? (
         <div className="text-[11px] truncate" title={top.title || top.id}>
@@ -294,7 +290,8 @@ export function Dashboard({
     sources.length > 1 && source ? (
       <SourceToggle sources={sources} value={source} onChange={onSource} />
     ) : null;
-  const weekly = burn?.weekBurndown?.length ?? 0;
+  const weeklyBurns = r.burns ?? (r.burn ? { claude: r.burn } : {});
+  const weekly = Object.values(weeklyBurns).some(b => (b?.weekBurndown?.length ?? 0) > 1);
   return (
     <div className="space-y-4">
       <div className="grid gap-4 lg:grid-cols-3">
@@ -303,9 +300,9 @@ export function Dashboard({
             <Gauge burn={burn} />
           </div>
         </Card>
-        {weekly > 1 && burn ? (
-          <Card title="Weekly quota" sub="Total token burn this week" icon="ChartLine" className="lg:col-span-2">
-            <WeeklyQuota burn={burn} benchWindow={r.benchWindow} />
+        {weekly ? (
+          <Card title="Weekly quota" sub="Each provider’s weekly quota · shared calendar and percentage scale" icon="ChartLine" className="lg:col-span-2">
+            <WeeklyQuota burns={weeklyBurns} />
           </Card>
         ) : (
           <Card
@@ -314,11 +311,11 @@ export function Dashboard({
             right={<span className="text-xs text-muted">no quota reading</span>}
             className="lg:col-span-2"
           >
-            <Burndown rows={r.burndown ?? []} budget={r.budget} benchWindow={r.benchWindow} />
+            <Burndown rows={r.burndown ?? []} budget={r.budget}  />
           </Card>
         )}
       </div>
-      <KpiStrip r={r} burn={burn} source={sources.length > 1 ? source ?? null : null} />
+      <KpiStrip r={r} burn={burn} />
       <Card title="Hourly spend by context" sub="Tokens burned per hour, split by context window" icon="ChartColumn">
         <Hourly rows={r.timeline ?? []} goal={burn?.goal} />
       </Card>
@@ -329,8 +326,7 @@ export function Dashboard({
         <Card title="Active sessions" sub="Sessions currently feeding the furnace" icon="Users" className="lg:col-span-3">
           <ActiveSessions
             sessions={r.active ?? []}
-            source={sources.length > 1 ? source ?? null : null}
-            limit={burn?.limit}
+            burns={r.burns}
           />
         </Card>
       </div>

@@ -2,8 +2,8 @@
 //!
 //! `validate` returns 1 only for a complete JSON object whose top-level `type`
 //! is `"response_item"`, `"event_msg"` or `"compacted"` and whose `payload` is an
-//! object with a string `type` that is none of `"function_call"`,
-//! `"user_message"` or `"token_count"`. `CodexSource.parse` reads none of those
+//! object with a string `type` that is not a tool call, command completion,
+//! user message or token count. `CodexSource.parse` reads none of those
 //! shapes, so accepting one only lets the caller drop a line it would have
 //! parsed and discarded anyway.
 //!
@@ -21,7 +21,7 @@ use std::fmt;
 /// The payload types `CodexSource.parse` actually reads. A record whose
 /// `payload.type` is none of these is dropped by the parser, wherever it sits.
 fn is_handled_payload_type(value: &str) -> bool {
-    matches!(value, "function_call" | "user_message" | "token_count")
+    matches!(value, "function_call" | "custom_tool_call" | "item_completed" | "user_message" | "token_count")
 }
 
 /// The root record types the parser never reads as context. `session_meta` and
@@ -99,15 +99,21 @@ impl<'de> Visitor<'de> for PayloadVisitor {
         A: MapAccess<'de>,
     {
         let mut target = false;
+        let mut message = false;
+        let mut user = false;
         while let Some(key) = map.next_key::<&str>()? {
             if key == "type" {
                 let v: &str = map.next_value()?;
                 target = !is_handled_payload_type(v);
+                message = v == "message";
+            } else if key == "role" {
+                let v: &str = map.next_value()?;
+                user = v == "user";
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        Ok(PayloadCheck(target))
+        Ok(PayloadCheck(target && !(message && user)))
     }
 }
 

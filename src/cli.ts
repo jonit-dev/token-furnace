@@ -8,6 +8,7 @@ import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { CONTEXT_TARGET_LABEL } from "./core/context";
 import { compose, type App } from "./compose";
 import { topIssues } from "./core/analyze/issues";
 import { reportView } from "./core/analyze/view";
@@ -17,11 +18,12 @@ import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { planWeek } from "./services/usage-client";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
-import { runSetup } from "./setup/agents";
+import { runFixConfig, runSetup } from "./setup/agents";
 
 const USAGE = `Usage: token-furnace [days] [options]
        token-furnace serve [--port 8765]
        token-furnace setup [--apply] [--rollback] [--aggressive] [--verify]
+       token-furnace fix-config
        token-furnace hook churn
 
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
@@ -36,6 +38,7 @@ Where the token budget actually went. Reads local Claude Code and Codex transcri
   --no-plan-usage      never call api.anthropic.com for the subscription window (a saved reading is still used)
   --no-cache           parse every file, write no cache
   serve [--port 8765]  live report on http://127.0.0.1:<port>, refreshed in the background
+  fix-config          repair context and worker settings (backs up first; --include-depth optional)
   -h, --help           this text
 `;
 
@@ -54,6 +57,13 @@ interface Options {
 export async function main(argv: string[] = process.argv.slice(2), app?: App): Promise<number> {
   if (argv[0] === "hook" && argv[1] === "churn") {
     return runChurnHook(readStdin(), (app?.env ?? process.env), process.stdout);
+  }
+  if (argv[0] === "fix-config") {
+    if (argv.length > 2 || (argv[1] !== undefined && argv[1] !== "--include-depth")) {
+      process.stderr.write("Usage: token-furnace fix-config [--include-depth]\n");
+      return 2;
+    }
+    return runFixConfig(app?.env ?? process.env, process.stdout, { includeDepth: argv[1] === "--include-depth" });
   }
   if (argv[0] === "setup") {
     const setupArgs = parseArgs({
@@ -124,8 +134,8 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
     return 2;
   }
   const source = (parsed.values.source ?? "all") as Source | "all";
-  if (source !== "all" && source !== "claude" && source !== "codex") {
-    process.stderr.write(`token-furnace: --source must be all, claude or codex\n`);
+  if (source !== "all" && !app.sources.some((agent) => agent.name === source)) {
+    process.stderr.write(`token-furnace: --source must be all, ${app.sources.map((agent) => agent.name).join(" or ")}\n`);
     return 2;
   }
   const weeklyBudget = weeklyBudgetOf(app.env, parsed.values["weekly-budget"]);

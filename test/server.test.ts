@@ -3,7 +3,7 @@
 import { request } from "node:http";
 import { connect } from "node:net";
 import { networkInterfaces } from "node:os";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -234,3 +234,38 @@ function sevenDay(utilization: number, now: Date): Response {
   const resets = now.getTime() / 1000 + 3 * 86_400;
   return new Response(JSON.stringify({ seven_day: { utilization, resets_at: resets } }), { status: 200 });
 }
+describe("configuration repair endpoint", () => {
+  it("rejects unconfirmed or cross-origin writes and applies the shared CLI repair after confirmation", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tf-server-fix-"));
+    const app = compose({ HOME: home }, { noCache: true });
+    const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    const post = (headers: Record<string, string>) => new Promise<{ status: number; body: string }>((done, reject) => {
+      const req = request(`${server.url}/api/fix-config`, { method: "POST", headers }, (res) => {
+        let body = "";
+        res.on("data", (data) => { body += data; });
+        res.on("end", () => done({ status: res.statusCode!, body }));
+      });
+      req.on("error", reject); req.end();
+    });
+    try {
+      expect((await post({})).status).toBe(403);
+      expect((await post({ "X-Token-Furnace-Confirm": "true", Origin: "https://evil.example" })).status).toBe(403);
+      expect(existsSync(join(home, ".claude", "settings.json"))).toBe(false);
+      expect((await post({ "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Repairs": "unknown" })).status).toBe(400);
+      expect((await post({ "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Repairs": "codex-context" })).status).toBe(200);
+      expect(existsSync(join(home, ".claude", "settings.json"))).toBe(false);
+      expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).not.toContain("[agents]");
+      const result = await post({ "X-Token-Furnace-Confirm": "true", Origin: server.url });
+      expect(result.status).toBe(200);
+      expect(JSON.parse(result.body).ok).toBe(true);
+      expect(JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+      expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain("model_auto_compact_token_limit = 300000");
+      expect((await post({ "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Include-Depth": "true" })).status).toBe(200);
+      expect(JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")).env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe("1");
+      expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain("max_depth = 1");
+    } finally {
+      await server.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

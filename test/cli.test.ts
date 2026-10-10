@@ -32,7 +32,7 @@ function buildClean(root: string, at: Date): void {
   }
   write(join(root, "projects", "demo", "s-clean.jsonl"), lines);
   writeJson(join(root, "settings.json"), {
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 400_000,
     env: {
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "3",
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",

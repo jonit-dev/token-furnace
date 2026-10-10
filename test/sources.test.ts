@@ -53,7 +53,7 @@ const CODEX_TURNS = [
     baseIn: 600,
     cacheRead: 400,
     cacheWrite: 0,
-    output: 300,
+    output: 200,
     tools: ["shell", "apply_patch"],
     reads: 1,
     wakes: ["human"],

@@ -3,8 +3,8 @@
 A small Rust `cdylib` compiled to `wasm32-unknown-unknown`. It answers one
 question for the Codex parser: is this complete JSONL line an ignorable root
 record (`response_item`, `event_msg` or `compacted`) whose `payload.type` is
-none of the shapes the parser reads (`function_call`, `user_message`,
-`token_count`)?
+none of the shapes the parser reads (`function_call`, `custom_tool_call`,
+`item_completed`, `user_message`, `token_count`, or `message` with role `user`)?
 
 `CodexSource.parse` reads none of those records, so it can drop a large one
 before it decodes the line to UTF-8 and runs `JSON.parse`. The validator

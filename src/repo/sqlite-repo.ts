@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { SessionInput, Source, SourceFile, Turn, Wake } from "../core/model";
 import type { SessionRepository } from "./session-repo";
+import { PROVIDERS } from "../core/providers";
 
 const SCHEMA_VERSION = 1;
 
@@ -45,6 +46,7 @@ interface FileRow {
   size: number;
   title: string | null;
   bad_lines: number;
+  parser_version: number;
 }
 
 interface TurnRow {
@@ -80,14 +82,18 @@ export class SqliteSessionRepository implements SessionRepository {
 
   private prepareStatements(): void {
     if (!this.db) return;
+    const columns = this.db.prepare("PRAGMA table_info(files);").all() as { name: string }[];
+    if (!columns.some((column) => column.name === "parser_version")) {
+      this.db.exec("ALTER TABLE files ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 0;");
+    }
     this.stmtDeleteFile = this.db.prepare("DELETE FROM files WHERE path = ?;");
     this.stmtInsertFile = this.db.prepare(
-      "INSERT INTO files (path, source, mtime_ns, size, title, bad_lines) VALUES (?, ?, ?, ?, ?, 0);",
+      "INSERT INTO files (path, source, mtime_ns, size, title, bad_lines, parser_version) VALUES (?, ?, ?, ?, ?, 0, ?);",
     );
     this.stmtInsertTurn = this.db.prepare(
       "INSERT INTO turns (path, seq, project, session, model, at, base_in, cache_read, cache_write, output, tools, reads, wakes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
     );
-    this.stmtAllFiles = this.db.prepare("SELECT path, source, mtime_ns, size, title, bad_lines FROM files;");
+    this.stmtAllFiles = this.db.prepare("SELECT path, source, mtime_ns, size, title, bad_lines, parser_version FROM files;");
     this.stmtAllTurns = this.db.prepare(
       "SELECT path, seq, project, session, model, at, base_in, cache_read, cache_write, output, tools, reads, wakes FROM turns ORDER BY path, seq;",
     );
@@ -175,7 +181,8 @@ export class SqliteSessionRepository implements SessionRepository {
     for (const file of files) {
       seen.add(file.path);
       const held = cachedFiles.get(file.path);
-      if (held && held.mtime_ns === file.mtimeMs && held.size === file.size) continue;
+      if (held && held.mtime_ns === file.mtimeMs && held.size === file.size &&
+          held.parser_version === PROVIDERS[held.source as Source]?.parserVersion) continue;
       out.push(file);
     }
 
@@ -242,7 +249,7 @@ export class SqliteSessionRepository implements SessionRepository {
     this.db.exec("BEGIN IMMEDIATE;");
     try {
       this.stmtDeleteFile.run(session.path);
-      this.stmtInsertFile.run(session.path, session.source, session.mtimeMs, size, session.title ?? null);
+      this.stmtInsertFile.run(session.path, session.source, session.mtimeMs, size, session.title ?? null, PROVIDERS[session.source].parserVersion);
 
       for (let seq = 0; seq < session.turns.length; seq++) {
         const t = session.turns[seq];

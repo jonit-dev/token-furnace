@@ -12,8 +12,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
+import { CONFIG_REPAIRS, type ConfigRepairId } from "../core/config-repairs";
+import { CONTEXT_TARGET } from "../core/context";
+import { SUBAGENT_CAP, SUBAGENT_DEPTH, TOOL_CONCURRENCY, SUBAGENT_ENV, CODEX_SUBAGENT_KEY } from "../core/analyze/flags";
 import type { Env } from "../sources/agent-source";
 
 export interface SetupOptions {
@@ -691,4 +695,117 @@ export function runSetup(
   }
 
   return 0;
+}
+
+/** Repair actionable settings; back up every changed file before writing either config. */
+export function runFixConfig(env: Env, out: { write(text: string): unknown }, options: { includeDepth?: boolean; repairs?: readonly ConfigRepairId[] } = {}): number {
+  try {
+    const repairs = options.repairs ?? CONFIG_REPAIRS.filter((repair) => options.includeDepth || !repair.id.endsWith("-depth")).map((repair) => repair.id);
+    if (!Array.isArray(repairs) || repairs.some((id) => !CONFIG_REPAIRS.some((repair) => repair.id === id))) {
+      throw new Error("Unknown configuration repair selection");
+    }
+    if (!repairs.length) { out.write("No repairs selected. No files changed.\n"); return 0; }
+    const selected = (id: ConfigRepairId) => repairs.includes(id);
+    if (!env.HOME) throw new Error("HOME must be set");
+    const claudePath = join(env.CLAUDE_CONFIG_DIR || join(env.HOME, ".claude"), "settings.json");
+    const codexPath = join(env.CODEX_HOME || join(env.HOME, ".codex"), "config.toml");
+    const changes: { path: string; before: string | null; after: string }[] = [];
+    const withinCap = (value: unknown, cap: number) => {
+      const n = typeof value === "number" || typeof value === "string" && value.trim() ? Number(value) : NaN;
+      return Number.isInteger(n) && n >= 0 && n <= cap;
+    };
+    if (repairs.some((id) => id.startsWith("claude-"))) {
+      const beforeClaude = existsSync(claudePath) ? readFileSync(claudePath, "utf8") : null;
+      const claude = JSON.parse(beforeClaude ?? "{}");
+      if (!isPlainObject(claude) || (claude.env !== undefined && !isPlainObject(claude.env))) {
+        throw new Error(`${claudePath}: expected an object with an optional env object`);
+      }
+      const originalClaude = JSON.stringify(claude);
+      const hadEnv = claude.env !== undefined;
+      const claudeEnv = (claude.env ??= {}) as Record<string, unknown>;
+      if (selected("claude-context")) claude.autoCompactWindow = CONTEXT_TARGET.claude;
+      if (selected("claude-context") && claudeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) {
+        claudeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CONTEXT_TARGET.claude);
+      }
+      for (const [id, key, cap] of [
+        ["claude-workers", SUBAGENT_ENV, SUBAGENT_CAP],
+        ["claude-tools", "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", TOOL_CONCURRENCY],
+        ["claude-depth", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", SUBAGENT_DEPTH],
+      ] as const) {
+        if (selected(id) && !withinCap(claudeEnv[key], cap)) claudeEnv[key] = String(cap);
+      }
+      if (selected("claude-model") && (typeof claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL !== "string" || !claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL.trim())) {
+        claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = "sonnet";
+      }
+      if (!hadEnv && !Object.keys(claudeEnv).length) delete claude.env;
+      if (JSON.stringify(claude) !== originalClaude) {
+        changes.push({ path: claudePath, before: beforeClaude, after: JSON.stringify(claude, null, 2) + "\n" });
+      }
+    }
+
+    if (repairs.some((id) => id.startsWith("codex-"))) {
+      const beforeCodex = existsSync(codexPath) ? readFileSync(codexPath, "utf8") : null;
+      const codex = parseToml(beforeCodex ?? "");
+      if (codex.agents !== undefined && !isPlainObject(codex.agents)) {
+        throw new Error(`${codexPath}: expected an agents table`);
+      }
+      const agents = (codex.agents ?? {}) as Record<string, unknown>;
+      let afterCodex = beforeCodex ?? "";
+      const updateCodex = (table: string, key: string, value: string | number) => {
+        const object = table ? agents : codex;
+        if (object[key] === value) return;
+        const old = object[key];
+        const encoded = JSON.stringify(value);
+        if (old === undefined) {
+          afterCodex = setTomlValue(afterCodex, table, key, encoded);
+        } else {
+          let scope = "";
+          const quoted = (name: string) => `(?:${name}|"${name}"|'${name}')`;
+          afterCodex = afterCodex.split("\n").map((line) => {
+            if (line.trimStart().startsWith("[")) scope = tableHeaderName(line) ?? "other";
+            const local = scope === table && new RegExp(`^\\s*${quoted(key)}\\s*=`).test(line);
+            const dotted = table && scope === "" && new RegExp(`^\\s*${quoted(table)}\\s*\\.\\s*${quoted(key)}\\s*=`).test(line);
+            return local || dotted ? `${dotted ? table + "." : ""}${key} = ${encoded}` : line;
+          }).join("\n");
+        }
+        object[key] = value;
+        if (table) codex.agents = agents;
+      };
+      if (selected("codex-context")) updateCodex("", "model_auto_compact_token_limit", CONTEXT_TARGET.codex);
+      if (selected("codex-workers") && !withinCap(agents[CODEX_SUBAGENT_KEY], SUBAGENT_CAP)) updateCodex("agents", CODEX_SUBAGENT_KEY, SUBAGENT_CAP);
+      if (selected("codex-effort") && !["low", "medium", "minimal", "none"].includes(String(agents.default_subagent_reasoning_effort))) {
+        updateCodex("agents", "default_subagent_reasoning_effort", "medium");
+      }
+      if (selected("codex-depth") && !withinCap(agents.max_depth, SUBAGENT_DEPTH)) updateCodex("agents", "max_depth", SUBAGENT_DEPTH);
+      // Reject unsupported layouts before backups or writes rather than risking unrelated data.
+      if (!isDeepStrictEqual(JSON.parse(JSON.stringify(parseToml(afterCodex))), JSON.parse(JSON.stringify(codex)))) {
+        throw new Error(`${codexPath}: unsupported setting layout; left unchanged`);
+      }
+      if (afterCodex !== (beforeCodex ?? "")) changes.push({ path: codexPath, before: beforeCodex, after: afterCodex });
+    }
+
+    const backups: string[] = [];
+    for (const change of changes) {
+      if (change.before === null) continue;
+      let backup = `${change.path}.token-furnace-backup`;
+      for (let i = 1; existsSync(backup); i++) backup = `${change.path}.token-furnace-backup.${i}`;
+      writeFileSync(backup, change.before, { flag: "wx", mode: 0o600 });
+      backups.push(backup);
+    }
+    for (const backup of backups) out.write(`Backup: ${backup}\n`);
+    for (const change of changes) {
+      mkdirSync(dirname(change.path), { recursive: true });
+      writeFileSync(change.path, change.after, { mode: 0o600 });
+      out.write(`Updated: ${change.path}\n`);
+    }
+    if (!changes.length) out.write("Configuration already current. No files changed.\n");
+    out.write(`Selected repairs: ${repairs.join(", ")}. Restart agents to load changes.\n`);
+    if (selected("claude-context") && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) {
+      out.write("Unset CLAUDE_CODE_AUTO_COMPACT_WINDOW in your shell so it cannot override the saved target.\n");
+    }
+    return 0;
+  } catch (error) {
+    out.write(`fix-config: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }

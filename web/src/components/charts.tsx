@@ -1,5 +1,6 @@
-import type { Burn, Report } from "../../../src/core/model";
-import { clock, dayLabel, fmt, quota, toDate } from "./format";
+import { CONTEXT_TARGET, CONTEXT_TARGET_LABEL } from "../../../src/core/context";
+import type { Burn, Report, Source } from "../../../src/core/model";
+import { clock, dayLabel, fmt, quota, sourceLabel, toDate } from "./format";
 import { useSize } from "./ui";
 
 const WEEK_MS = 7 * 24 * 3600e3;
@@ -89,16 +90,14 @@ export function Gauge({ burn }: { burn?: Burn }) {
   );
 }
 
-// Cumulative burn over time. Dashed: the same turns with context capped at benchWindow.
+// Cumulative burn over time. Dashed: the same turns with context capped at each provider target.
 // Dotted: a straight line that spends the weekly budget at a steady pace.
 export function Burndown({
   rows,
   budget,
-  benchWindow,
 }: {
   rows: Report["burndown"];
   budget?: number | null;
-  benchWindow?: number;
 }) {
   const [ref, { w, h }] = useSize();
   if (!rows.length) return <p className="text-sm text-muted">No burndown data.</p>;
@@ -177,7 +176,7 @@ export function Burndown({
         </span>
         <span>
           <span className="inline-block w-4 border-t-2 border-dashed border-muted align-middle" /> benchmark{" "}
-          {fmt(last[2])} (context capped at {fmt(benchWindow)})
+          {fmt(last[2])} (context capped at {CONTEXT_TARGET_LABEL})
         </span>
         {budget ? (
           <span>
@@ -189,145 +188,86 @@ export function Burndown({
   );
 }
 
-// Weekly quota used, 0 to 100 %, across the whole week. The future stays empty.
-// Solid: used so far. Thin: an even pace to the reset. Dashed: the last-24 h pace from now. Dotted: the same turns with context capped.
-export function WeeklyQuota({ burn, benchWindow }: { burn: Burn; benchWindow?: number }) {
+// Both providers use their own quota percentage, plotted against the same calendar time.
+export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> }) {
   const [ref, { w, h }] = useSize();
-  const weekRows = burn.weekBurndown;
-  if (!weekRows || weekRows.length < 2) return null;
-  const pts = weekRows.map((d) => [toDate(d[0]).getTime(), d[1] ?? 0, d[2] ?? 0] as [number, number, number]);
-  const t0 = toDate(burn.start).getTime();
-  const t1 = toDate(burn.resets).getTime();
-  const span = Math.max(t1 - t0, 1);
-  const [now, used] = pts[pts.length - 1];
-  const rate = burn.projection?.ratePct ?? 0;
-  const runsOut = burn.projection?.runsOut ? toDate(burn.projection.runsOut).getTime() : null;
-  const hit = runsOut !== null && runsOut < t1;
-  const end = rate > 0 ? (hit ? runsOut : Math.min(t1, now + ((100 - used) / rate) * 3600000)) : now;
-  const endV = rate > 0 ? Math.min(100, used + (rate * (end - now)) / 3600000) : used;
-  const l = 34;
-  const rt = 10;
-  const tp = 12;
-  const b = 20;
-  const x = (t: number) => l + ((t - t0) / span) * (w - l - rt);
-  const y = (v: number) => h - b - (v / 100) * (h - b - tp);
-  const path = (k: 1 | 2) => pts.map((d, i) => `${i ? "L" : "M"}${x(d[0]).toFixed(1)},${y(d[k]).toFixed(1)}`).join(" ");
-  const days = Array.from({ length: 7 }, (_, i) => new Date(t0 + (i * span) / 7));
+  const series = (Object.entries(burns) as [Source, Burn][]).flatMap(([source, burn]) => {
+    if (!burn.weekBurndown || burn.weekBurndown.length < 2) return [];
+    const start = toDate(burn.start).getTime();
+    const reset = toDate(burn.resets).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(reset) || reset <= start) return [];
+    const pts = burn.weekBurndown.map(([t, used, capped]) => [toDate(t).getTime(), used, capped] as const);
+    const [now, used] = pts[pts.length - 1];
+    const rate = burn.projection?.ratePct ?? 0;
+    const end = rate > 0 && used < 100 ? Math.max(now, Math.min(reset, now + (100 - used) / rate * 3600000)) : now;
+    const endV = used + rate * (end - now) / 3600000;
+    return [{ source, start, reset, pts, now, used, rate, end, endV,
+      color: source === "claude" ? "#f97316" : "#4a9eff" }];
+  });
+  if (!series.length) return null;
+  const t0 = Math.min(...series.map(s => s.start));
+  const t1 = Math.max(...series.map(s => s.reset));
+  const maxPct = Math.ceil(Math.max(100, ...series.flatMap(s => s.pts.flatMap(p => [p[1], p[2]]))) / 25) * 25;
+  const l = 38, rt = 12, tp = 12, b = 24;
+  const x = (t: number) => l + (t - t0) / (t1 - t0) * (w - l - rt);
+  const y = (v: number) => h - b - v / maxPct * (h - b - tp);
+  const ticks = Array.from({ length: 5 }, (_, i) => t0 + i * (t1 - t0) / 4);
   const when = (t: number) => new Date(t).toLocaleDateString(undefined, { weekday: "short" }) + " " + clock(new Date(t));
-  const nowRight = x(now) > w * 0.8;
-  const outAt = runsOut ?? 0;
   return (
     <div className="flex-1 flex flex-col">
-      <div ref={ref} className="relative flex-1 min-h-[8rem]">
+      <div ref={ref} className="relative flex-1 min-h-[10rem]">
         {w > 0 ? (
-          <svg
-            viewBox={`0 0 ${w} ${h}`}
-            preserveAspectRatio="none"
-            className="absolute inset-0 w-full h-full"
-            role="img"
-            aria-label="Weekly quota used"
-          >
-            {[25, 50, 75, 100].map((v) => (
+          <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none"
+            className="absolute inset-0 w-full h-full" role="img" aria-label="Weekly quota used">
+            {Array.from({ length: maxPct / 25 + 1 }, (_, i) => i * 25).map(v => (
               <g key={v}>
                 <line x1={l} x2={w - rt} y1={y(v)} y2={y(v)} className="stroke-line" />
-                <text x={l - 6} y={y(v) + 4} textAnchor="end" fontSize="10" className="fill-muted">
-                  {v}%
-                </text>
+                <text x={l - 6} y={y(v) + 4} textAnchor="end" fontSize="10" className="fill-muted">{v}%</text>
               </g>
             ))}
-            <line x1={l} y1={h - b} x2={w - rt} y2={h - b} className="stroke-muted" />
-            <text x={l - 6} y={h - b + 4} textAnchor="end" fontSize="10" className="fill-muted">
-              0
-            </text>
-            {days.map((d, i) => (
-              <text
-                key={i}
-                x={i === 0 ? l : x(d.getTime())}
-                y={h - 6}
-                textAnchor={i === 0 ? "start" : "middle"}
-                fontSize="10"
-                className="fill-muted"
-              >
-                {d.toLocaleDateString(undefined, { weekday: "short" })}
-              </text>
+            {ticks.map((t, i) => (
+              <text key={t} x={x(t)} y={h - 6} textAnchor={i === 0 ? "start" : i === 4 ? "end" : "middle"}
+                fontSize="10" className="fill-muted">{dayLabel(new Date(t))}</text>
             ))}
-            <line x1={x(t0)} y1={y(0)} x2={x(t1)} y2={y(100)} className="stroke-muted" strokeWidth="1" opacity="0.6" />
-            <path d={path(2)} fill="none" className="stroke-muted" strokeWidth="1.5" strokeDasharray="1 3" />
-            {rate > 0 ? (
-              <line
-                x1={x(now)}
-                y1={y(used)}
-                x2={x(end)}
-                y2={y(endV)}
-                className="stroke-accent"
-                strokeWidth="1.5"
-                strokeDasharray="4 3"
-              />
-            ) : null}
-            {hit ? (
-              <g>
-                <line
-                  x1={x(outAt)}
-                  x2={x(outAt)}
-                  y1={y(100) - 4}
-                  y2={y(100) + 4}
-                  className="stroke-hot"
-                  strokeWidth="2"
-                />
-                <text
-                  x={x(outAt) + (x(outAt) > w * 0.7 ? -6 : 6)}
-                  y={y(100) + 14}
-                  textAnchor={x(outAt) > w * 0.7 ? "end" : "start"}
-                  fontSize="10"
-                  className="fill-hot"
-                >
-                  runs out {when(outAt)}
-                </text>
-              </g>
-            ) : null}
-            <path d={path(1)} fill="none" className="stroke-accent" strokeWidth="2" />
-            <line
-              x1={x(now)}
-              x2={x(now)}
-              y1={y(100)}
-              y2={h - b}
-              className="stroke-muted"
-              strokeWidth="1"
-              strokeDasharray="2 2"
-            />
-            <circle cx={x(now)} cy={y(used)} r="3.5" className="fill-accent" />
-            <text
-              x={x(now) + (nowRight ? -6 : 6)}
-              y={Math.max(y(used) - 8, 10)}
-              textAnchor={nowRight ? "end" : "start"}
-              fontSize="11"
-              className="fill-ink"
-            >
-              now {used.toFixed(0)}%
-            </text>
+            {series.map(s => {
+              const path = (k: 1 | 2) => s.pts.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[k]).toFixed(1)}`).join(" ");
+              return (
+                <g key={s.source} data-provider={s.source}>
+                  <line x1={x(s.start)} y1={y(0)} x2={x(s.reset)} y2={y(100)} stroke={s.color} strokeWidth="1" opacity="0.3" />
+                  <path d={path(2)} fill="none" stroke={s.color} strokeWidth="1.5" strokeDasharray="1 3" opacity="0.6" />
+                  {s.end > s.now ? <line data-series="projection" x1={x(s.now)} y1={y(s.used)} x2={x(s.end)} y2={y(s.endV)}
+                    stroke={s.color} strokeWidth="1.5" strokeDasharray="4 3" /> : null}
+                  <path data-series="used" d={path(1)} fill="none" stroke={s.color} strokeWidth="2">
+                    <title>{sourceLabel(s.source)}: {s.used.toFixed(0)}% used</title>
+                  </path>
+                  <line x1={x(s.reset)} x2={x(s.reset)} y1={y(100) - 4} y2={y(100) + 4} stroke={s.color} />
+                  <circle cx={x(s.now)} cy={y(s.used)} r="3.5" fill={s.color} />
+                </g>
+              );
+            })}
           </svg>
         ) : null}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted mt-1">
-        <span>
-          <span className="inline-block w-4 border-t-2 border-accent align-middle" /> used
-        </span>
-        <span>
-          <span className="inline-block w-4 border-t border-muted align-middle" /> even pace
-        </span>
-        <span>
-          <span className="inline-block w-4 border-t-2 border-dashed border-accent align-middle" /> projection
-        </span>
-        <span>
-          <span className="inline-block w-4 border-t-2 border-dotted border-muted align-middle" /> if capped at{" "}
-          {fmt(benchWindow)}
-        </span>
+        {series.map(s => (
+          <span key={s.source}>
+            <span className="inline-block w-4 border-t-2 align-middle" style={{ borderColor: s.color }} />{" "}
+            <span className="text-ink">{sourceLabel(s.source)} {s.used.toFixed(0)}%</span>
+            {" · cap "}{fmt(CONTEXT_TARGET[s.source])}
+            {s.end > s.now && s.end < s.reset ? ` · runs out ${when(s.end)}` : ` · resets ${when(s.reset)}`}
+          </span>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted mt-1">
+        <span><span className="inline-block w-4 border-t border-muted align-middle opacity-50" /> even pace</span>
+        <span><span className="inline-block w-4 border-t-2 border-dashed border-muted align-middle" /> projection</span>
+        <span><span className="inline-block w-4 border-t-2 border-dotted border-muted align-middle" /> if context capped</span>
       </div>
     </div>
   );
 }
 
-// Hourly spend. Under 300k context at the bottom, over 300k on top.
+// Hourly spend. Within provider target at the bottom, above target on top.
 export function Hourly({ rows, goal }: { rows: Report["timeline"]; goal?: number | null }) {
   if (!rows.length) return <p className="text-sm text-muted">No timeline data.</p>;
   const step = 7;
@@ -421,10 +361,10 @@ export function Hourly({ rows, goal }: { rows: Report["timeline"]; goal?: number
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted mt-1">
         <span className="flex items-center gap-1">
-          <span className="w-2.5 h-2.5 rounded-sm bg-bar" />under 300k context
+          <span className="w-2.5 h-2.5 rounded-sm bg-bar" />within provider target
         </span>
         <span className="flex items-center gap-1">
-          <span className="w-2.5 h-2.5 rounded-sm bg-accent opacity-85" />over 300k context
+          <span className="w-2.5 h-2.5 rounded-sm bg-accent opacity-85" />above provider target
         </span>
         {goal ? (
           <span className="flex items-center gap-1">

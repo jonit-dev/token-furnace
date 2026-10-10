@@ -5,12 +5,11 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 import type { ParsedFile } from "./core/model";
-import { ClaudeSource } from "./sources/claude";
-import { CodexSource } from "./sources/codex";
-import type { AgentSource, Env } from "./sources/agent-source";
+import { createSources } from "./sources";
+import type { Env } from "./sources/agent-source";
 
 const env = (workerData as { env: Env }).env;
-const sources: Record<string, AgentSource> = { claude: new ClaudeSource(env), codex: new CodexSource(env) };
+const sources = new Map(createSources(env).map((source) => [source.name, source]));
 
 export type ParseRequest = { id: number; source: string; path: string };
 export type ParseReply = { id: number; parsed: ParsedFile } | { id: number; error: string };
@@ -18,7 +17,9 @@ export type ParseReply = { id: number; parsed: ParsedFile } | { id: number; erro
 parentPort?.on("message", (request: ParseRequest) => {
   let reply: ParseReply;
   try {
-    reply = { id: request.id, parsed: sources[request.source].parse(request.path) };
+    const source = sources.get(request.source as import("./core/model").Source);
+    if (!source) throw new Error(`Unknown source: ${request.source}`);
+    reply = { id: request.id, parsed: source.parse(request.path) };
   } catch (error) {
     reply = { id: request.id, error: error instanceof Error ? error.message : String(error) };
   }

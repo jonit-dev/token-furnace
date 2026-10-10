@@ -1,6 +1,7 @@
 import { fixed, int0 } from "./format";
 import {
   CHECK_HOURS,
+  CONTEXT_TARGET,
   CODEX_SUBAGENT_KEY,
   LEVELS,
   MEMORY_INDEX_LINES,
@@ -10,20 +11,21 @@ import {
   TOOL_CONCURRENCY,
 } from "./flags";
 import type { Priority, RawIssue, RawReport, SessionRow, Source } from "../model";
+import { PROVIDERS } from "../providers";
 
 /** Per leak flag prefix: short fix, title, why it costs tokens, and the prompt for an agent. burn.py:1201 */
 export const ISSUES: Record<string, [fix: string, title: string, why: string, action: string]> = {
   "late compaction": [
-    "Set autoCompactWindow to about 200000, then /compact or restart old sessions.",
+    `Set autoCompactWindow to ${CONTEXT_TARGET.claude}, then /compact or restart old sessions.`,
     "Sessions compact too late",
     "Every tool call re-reads the whole context. A turn at 500k costs about 5 times a turn at 100k, and auto-compact on a 1M model waits until about 1M.",
-    'Set "autoCompactWindow": 200000 in ~/.claude/settings.json and check that CLAUDE_CODE_AUTO_COMPACT_WINDOW is unset or not higher. Then ask me to /compact or restart each listed session that is still open.',
+    `Set "autoCompactWindow": ${CONTEXT_TARGET.claude} in ~/.claude/settings.json and check that CLAUDE_CODE_AUTO_COMPACT_WINDOW is unset or not higher. Then ask me to /compact or restart each listed session that is still open.`,
   ],
   "caller reads": [
     "Send multi-range reads, greps and log parsing to a cheap read-only subagent.",
     "The caller reads files and logs itself",
     "Each read in the main session is paid at its full context size. A cheap read-only subagent pays it at a small context and returns a short answer.",
-    "Read the listed transcripts (JSONL, tool_use blocks named Bash/Read/Grep) and find the most repeated read commands. Then add a rule to my global agent instructions: after the brief, any read that is more than one bounded range goes to a cheap read-only subagent. Propose a helper script for any read pattern that repeats more than 20 times.",
+    "Read the listed transcripts and find the most repeated file/log read commands. Then add a rule to my global agent instructions: after the brief, any read that is more than one bounded range goes to a cheap read-only subagent. Propose a helper script for any read pattern that repeats more than 20 times.",
   ],
   wakeups: [
     "Ask subagents and teammates for one report at the end; wait with one blocking command.",
@@ -35,7 +37,7 @@ export const ISSUES: Record<string, [fix: string, title: string, why: string, ac
     "Give each /goal or autonomous loop a stop condition and a turn or time budget.",
     "Autonomous loops run without a budget",
     "Hundreds of turns per human prompt means a /goal or autonomous loop kept going with no stop condition.",
-    "Read the listed transcripts and name what kept each loop running. Then add a stop condition and a turn or time budget to the loop instructions I use (goal prompts, skills or CLAUDE.md).",
+    "Read the listed transcripts and name what kept each loop running. Then add a stop condition and a turn or time budget to my goal prompts, skills or global agent instructions.",
   ],
   "long-lived": [
     "Commit, end the session, and start one fresh session per task.",
@@ -48,9 +50,9 @@ export const ISSUES: Record<string, [fix: string, title: string, why: string, ac
 /** Extra context appended to a fix prompt, drawn from Token Furnace's community research. burn.py:1246 */
 export const ISSUE_EXTRA: Record<string, string[]> = {
   "late compaction": [
-    "Anthropic supports earlier compaction: `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80`, or `/autocompact 200k` in a running session.",
+    `Claude: set autoCompactWindow to ${CONTEXT_TARGET.claude}.`,
     "To drop 1M context entirely: `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`.",
-    "Codex: `model_auto_compact_token_limit = 160000` for a >=200K window.",
+    `Codex: model_auto_compact_token_limit = ${CONTEXT_TARGET.codex}.`,
     "Do not compact blindly: compact or hand off between meaningful phases, not every N tokens.",
   ],
   "subagent fan-out cap": [
@@ -72,7 +74,7 @@ export const ISSUE_EXTRA: Record<string, string[]> = {
     "Children mostly scan and summarize; keep them at low/medium and let the parent keep its own effort.",
   ],
   "auto-compact token limit": [
-    "Codex: `model_auto_compact_token_limit = 160000` for a >=200K window.",
+    `Codex: model_auto_compact_token_limit = ${CONTEXT_TARGET.codex}.`,
     "Compact or hand off between meaningful phases, not blindly every N tokens.",
   ],
   "tool-call concurrency": [
@@ -117,18 +119,21 @@ export function topIssues(report: RawReport): RawIssue[] {
   for (const s of report.recent_sessions) {
     for (const flag of s.flags) {
       const kind = flag.split(":")[0];
-      const hits = groups.get(kind);
+      const key = `${s.source}:${kind}`;
+      const hits = groups.get(key);
       if (hits) hits.push([s, flag]);
-      else groups.set(kind, [[s, flag]]);
+      else groups.set(key, [[s, flag]]);
     }
   }
   const issues: RawIssue[] = [];
-  for (const [kind, hits] of groups) {
-    const [fix, title, why, action] = ISSUES[kind];
-    const spies = new Map<Source, number>();
-    for (const [s] of hits) spies.set(s.source, (spies.get(s.source) ?? 0) + 1);
-    let source: Source | "all" = "all";
-    if (spies.size === 1) source = [...spies.keys()][0];
+  for (const hits of groups.values()) {
+    const kind = hits[0][1].split(":")[0];
+    let [fix, title, why, action] = ISSUES[kind];
+    const source = hits[0][0].source;
+    if (kind === "late compaction") {
+      fix = `Set ${PROVIDERS[source].compaction}, then /compact or restart old sessions.`;
+      action = `Set ${PROVIDERS[source].compaction}. Then ask me to /compact or restart each listed session that is still open.`;
+    }
     issues.push({
       title,
       why,
@@ -143,11 +148,11 @@ export function topIssues(report: RawReport): RawIssue[] {
   }
   issues.sort((a, b) => -(a.share ?? 0) - -(b.share ?? 0));
 
-  const fixedLines = report.config.filter(
-    (line) => line.includes("autoCompactWindow") && line.endsWith("ok."),
-  );
   for (const issue of issues) {
-    if (issue.title === ISSUES["late compaction"][1] && fixedLines.length) {
+    const fixedLines = report.config.filter((line) =>
+      (line.includes("autoCompactWindow") || line.includes("auto_compact_token_limit")) &&
+      line.endsWith("ok.") && configSource(line) === issue.source);
+    if (issue.kind === "late compaction" && fixedLines.length) {
       issue.fix = "Setting already ok. Restart or /compact the old sessions.";
       issue.action = `The setting is already fixed (${fixedLines[0]}). Restart or /compact the listed sessions that are still open; new sessions are covered.`;
     }
@@ -176,7 +181,7 @@ export function topIssues(report: RawReport): RawIssue[] {
       fix = "Set the subagent reasoning effort to low or medium.";
     } else if (line.includes("auto_compact_token_limit")) {
       title = "auto-compact token limit";
-      fix = "Set model_auto_compact_token_limit to about 160000.";
+      fix = `Set model_auto_compact_token_limit to ${CONTEXT_TARGET.codex}.`;
     } else if (line.includes("TOOL_USE_CONCURRENCY")) {
       title = "tool-call concurrency";
       fix = `Cap parallel tool calls at ${TOOL_CONCURRENCY}.`;
@@ -209,16 +214,11 @@ export function issuePriority(issue: RawIssue): Priority {
 
 /** The copy-to-Claude prompt for one issue. burn.py:1390 */
 export function issuePrompt(issue: RawIssue): string {
-  const agents: Record<string, string> = {
-    claude: "Claude Code",
-    codex: "Codex",
-    all: "Claude Code and Codex",
-  };
-  const agent = (issue.source && agents[issue.source]) || "the agent";
+  const agent = issue.source && issue.source !== "all" ? PROVIDERS[issue.source].label : "the affected agents";
   const lines = [`Token leak to fix: ${issue.title}.`, `Applies to: ${agent}.`];
   if (issue.share !== null) {
     lines.push(
-      `It affects ${issue.hits.length} of my top sessions, ${fixed(issue.share)}% of ${agent} spend in the last ${CHECK_HOURS} h (burn.py, base-input-equivalent tokens).`,
+      `It affects ${issue.hits.length} of my top sessions, ${fixed(issue.share)}% of total spend in the last ${CHECK_HOURS} h (base-input-equivalent tokens).`,
     );
   }
   lines.push("", `Why it costs tokens: ${issue.why}`);
@@ -231,7 +231,9 @@ export function issuePrompt(issue: RawIssue): string {
       if (s.path) lines.push(`  transcript: ${s.path}`);
     }
   }
-  const extra = ISSUE_EXTRA[issue.kind];
+  const extra = issue.kind === "late compaction" && issue.source && issue.source !== "all"
+    ? [`${PROVIDERS[issue.source].label}: ${PROVIDERS[issue.source].compaction}.`, "Compact or hand off between meaningful phases, not every N tokens."]
+    : ISSUE_EXTRA[issue.kind];
   if (extra) lines.push("", "Additional info:", ...extra.map((e) => `- ${e}`));
   lines.push("", `What to do: ${issue.action}`, "", "Report what you changed and how to check that it worked.");
   return lines.join("\n");

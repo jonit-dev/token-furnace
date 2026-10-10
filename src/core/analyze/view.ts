@@ -1,6 +1,8 @@
+import { MAX_OVER_TARGET_SHARE } from "../context";
+import { PROVIDERS } from "../providers";
 import { burnGoal } from "./burn";
 import { fixed, int0 } from "./format";
-import { BENCH_WINDOW, CHECK_HOURS, LATE_COMPACT_PEAK, LEVELS, LONG_LIVED_HOURS } from "./flags";
+import { CONTEXT_TARGET, CHECK_HOURS, LEVELS, LONG_LIVED_HOURS } from "./flags";
 import { issuePrompt, topIssues } from "./issues";
 import type { Burn, RawBurn, RawReport, Report, Source } from "../model";
 
@@ -28,23 +30,30 @@ export function reportView(report: RawReport, now: Date): Report {
     burndown.push([iso(new Date(when.getTime() + 3_600_000)), runA, runB]);
   }
 
-  const blocks = new Map<number, { ctx: number[]; reads: number; calls: number }>();
+  const blocks = new Map<number, { ctx: number[]; ctxBySource: Partial<Record<Source, number[]>>; aboveTurns: number; reads: number; calls: number }>();
   for (const [when, slot] of report.hourly) {
     const key = when.getTime() - (when.getUTCHours() % 3) * 3_600_000;
-    const block = blocks.get(key) ?? { ctx: [], reads: 0, calls: 0 };
+    const block = blocks.get(key) ?? { ctx: [], ctxBySource: {}, aboveTurns: 0, reads: 0, calls: 0 };
     if (!blocks.has(key)) blocks.set(key, block);
     block.ctx.push(...slot.ctx);
+    block.aboveTurns += slot.aboveTurns;
+    for (const [source, values] of Object.entries(slot.ctxBySource)) {
+      (block.ctxBySource[source as Source] ??= []).push(...values);
+    }
     block.reads += slot.reads;
     block.calls += slot.calls;
   }
   const blockList = [...blocks.values()];
   const kpis: Report["kpis"] = [
-    { name: "Median context per turn", unit: "k", target: 150_000, values: blockList.map((b) => median(b.ctx)) },
+    ...report.sources.map(([source]) => ({
+      name: `${PROVIDERS[source].label} median context per turn`, unit: "k" as const,
+      target: CONTEXT_TARGET[source], values: blockList.map((b) => median(b.ctxBySource[source] ?? [])),
+    })),
     {
-      name: "Turns over 300k context",
+      name: "Turns over provider context target",
       unit: "%",
-      target: 0.1,
-      values: blockList.map((b) => b.ctx.filter((c) => c >= 300_000).length / Math.max(b.ctx.length, 1)),
+      target: MAX_OVER_TARGET_SHARE,
+      values: blockList.map((b) => b.aboveTurns / Math.max(b.ctx.length, 1)),
     },
     {
       name: "Caller reads per tool call",
@@ -58,7 +67,7 @@ export function reportView(report: RawReport, now: Date): Report {
   const actions: string[] = [];
   for (const s of report.active) {
     const name = s.title || s.id;
-    if (s.context >= LATE_COMPACT_PEAK) {
+    if (s.context > CONTEXT_TARGET[s.source]) {
       actions.push(`Run /compact in “${name}”: its context is ${int0(s.context / 1000)}k.`);
     } else if (s.hours >= LONG_LIVED_HOURS) {
       actions.push(`Finish “${name}” and start a fresh session: it is ${fixed(s.hours)}h old.`);
@@ -98,7 +107,7 @@ export function reportView(report: RawReport, now: Date): Report {
     total: report.total,
     sessions: report.session_count,
     turns: report.turns,
-    over300k: report.over_300k,
+    overTarget: report.over_target,
     burns,
     burn: burns.claude ?? Object.values(burns)[0] ?? null,
     actions,
@@ -114,16 +123,16 @@ export function reportView(report: RawReport, now: Date): Report {
     })),
     active: report.active,
     burndown,
-    benchWindow: BENCH_WINDOW,
+    contextTargets: CONTEXT_TARGET,
     budget: report.budget,
     kpis,
     timeline: report.timeline.map(([t, [cool, hot]]) => [iso(t), cool, hot]),
     checkHours: CHECK_HOURS,
     baseline: report.baseline,
     topSessions: report.sessions,
-    buckets: report.buckets.map(([label, low, share, turns]) => ({
+    buckets: report.buckets.map(([label, , share, turns, aboveTargetShare]) => ({
       label,
-      hot: low >= 300,
+      aboveTargetShare,
       share,
       turns,
     })),

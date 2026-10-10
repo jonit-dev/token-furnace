@@ -6,12 +6,14 @@
 import type { Server } from "node:http";
 import "reflect-metadata";
 import express, { type Request, type Response } from "express";
-import { Controller, Get, Middleware, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
+import { Controller, Get, Post, Middleware, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
 import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
+import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
+import { runFixConfig } from "./setup/agents";
 import { planWeek } from "./services/usage-client";
 
 export interface ServeOptions {
@@ -115,6 +117,26 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   @Controller()
   class ReportController {
+    @Post("/api/fix-config")
+    fixConfig(@Req() req: Request, @Res() res: Response) {
+      const origin = req.headers.origin;
+      if (req.headers["x-token-furnace-confirm"] !== "true" ||
+          (origin && origin !== `http://${req.headers.host}`)) {
+        return res.status(403).json({ error: "Confirm configuration changes from this dashboard." });
+      }
+      const selection = req.headers["x-token-furnace-repairs"];
+      const repairs = typeof selection === "string" ? (selection ? selection.split(",") : []) : undefined;
+      if (selection !== undefined && (typeof selection !== "string" || repairs?.some((id) => !CONFIG_REPAIRS.some((repair) => repair.id === id)))) {
+        return res.status(400).json({ error: "Unknown configuration repair selection." });
+      }
+      let output = "";
+      const code = runFixConfig(app.env, { write: (text) => { output += text; } }, {
+        includeDepth: req.headers["x-token-furnace-include-depth"] === "true",
+        repairs: repairs as ConfigRepairId[] | undefined,
+      });
+      return res.status(code === 0 ? 200 : 500).json({ ok: code === 0, output });
+    }
+
     @Get("/api/status")
     status(@Res() res: Response) {
       if (!app.reports.hasScanned) warm(app);
