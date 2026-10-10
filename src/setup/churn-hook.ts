@@ -45,6 +45,12 @@ interface HookEvent {
 
 /** The stdin payload: one JSON object, or several newline-separated for a piped batch. */
 function eventsOf(stdin: string): HookEvent[] {
+  try {
+    const event: unknown = JSON.parse(stdin);
+    return event && typeof event === "object" && !Array.isArray(event) ? [event as HookEvent] : [];
+  } catch {
+    // A batch is newline-delimited; one hook payload may itself span several lines.
+  }
   const out: HookEvent[] = [];
   for (const line of stdin.split("\n")) {
     if (!line.trim()) continue;

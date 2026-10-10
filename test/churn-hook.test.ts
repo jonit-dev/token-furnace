@@ -38,3 +38,10 @@ it("ignores malformed input and non-string paths without writing state", () => {
   expect(output).toEqual([]);
   expect(readdirSync(root)).toEqual([]);
 });
+
+it("accepts one pretty-printed hook payload per invocation", () => {
+  const input = JSON.stringify({ tool_name: "Edit", tool_input: { file_path: "/project/pretty.ts" }, session_id: "pretty" }, null, 2);
+  const output: string[] = [];
+  for (let i = 0; i < 10; i++) expect(runChurnHook(input, {}, { write: (text) => output.push(text) })).toBe(0);
+  expect(output.map((text) => Number(JSON.parse(text).hookSpecificOutput.additionalContext.match(/(\d+) times/)?.[1]))).toEqual([4, 7, 10]);
+});

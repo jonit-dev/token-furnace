@@ -47,3 +47,5 @@
 **Verification:** `npx vitest run test/churn-hook.test.ts` — AC-4. `git ls-files scripts` — AC-5.
 
 Integration verification (2026-10-09, Node 24.16.0): typecheck, build and all 71 tests pass. Setup/hook dispatch runs before SQLite composition; built setup dry-run creates no cache or config files. Installer checks cover safe shell quoting, legacy hook replacement, instruction boundaries and malformed configuration preservation.
+
+Hook input regression: both one multiline JSON payload per invocation and newline-delimited batch payloads emit only at edits 4/7/10. All three focused hook tests pass.
