@@ -4,7 +4,7 @@
 **Priority:** P2 — AC-1 and AC-2 prove the `npx` install path that the epic exists to deliver.
 **Complexity:** 2 (LOW)
 **Owner:** João
-**Depends on:** PRD-006, PRD-008
+**Depends on:** PRD-005, PRD-006, PRD-008
 
 ## Context
 

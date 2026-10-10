@@ -53,7 +53,7 @@ Each requirement names the PRD that delivers it. "Same as Python" means the beha
 | FR-22 | `setup` is a dry run unless `--apply`. It is idempotent, makes a backup, and `--rollback` restores it. | 006 |
 | FR-23 | `hook churn` escalates on the 4th, 7th, and 10th edit of one file in one session, and never blocks. | 006 |
 | FR-24 | `npx token-furnace` runs on Node 22.13 or later with no Python and no `jq`. | 007 |
-| FR-25 | A scan never blocks the server. `/api/status` reports files done and total, and the dashboard shows a spinner, a progress bar, and "Please wait" until the report is ready. | 008 |
+| FR-25 | A scan never blocks the server. `/api/status` reports files done and total, and a loading page shows a spinner, a progress bar, and "Please wait" until the report is ready. | 008 |
 | FR-26 | The CLI shows scan progress on stderr when it is a TTY, and keeps `--json` stdout to the Report alone. | 008 |
 
 ## Non-functional
