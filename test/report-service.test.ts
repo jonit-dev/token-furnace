@@ -73,6 +73,33 @@ describe("getReport", () => {
     );
   });
 
+  it("the days cutoff the service hands the repository reads the same report as every turn", async () => {
+    const app = fixtureApp();
+    await app.reports.refresh();
+    const root = String(app.env.CLAUDE_CONFIG_DIR);
+    saveUsageReading(root, now); // the plan week starts before a 1-day window: the quirky baseline
+    const opts = { weeklyBudget: null, planWeek: planWeek(root, now), now };
+    const realAll = app.repo.all.bind(app.repo);
+    let sawCutoff: Date | undefined;
+    for (const [days, source] of [
+      [7, "all"],
+      [1, "all"],
+      [30, "all"],
+      [7, "claude"],
+      [7, "codex"],
+    ] as const) {
+      app.repo.all = () => realAll(); // ignore the cutoff: buildReport sees every turn
+      const baseline = app.reports.getRaw(days, source, opts);
+      app.repo.all = (cutoff?: Date) => {
+        sawCutoff = cutoff;
+        return realAll(cutoff);
+      };
+      expect(app.reports.getRaw(days, source, opts)).toEqual(baseline);
+    }
+    expect(sawCutoff).toBeInstanceOf(Date);
+    app.repo.all = realAll;
+  });
+
   it("has no report when no agent is installed, and the plan week is opt-in", async () => {
     const root = mkdtempSync(join(tmpdir(), "tf-service-empty-"));
     const app = compose({ ...harnessEnv(root, now), CLAUDE_CONFIG_DIR: join(root, "none") });

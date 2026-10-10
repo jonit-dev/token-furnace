@@ -10,8 +10,11 @@ export interface SessionRepository {
    * gone from disk are dropped. The repository keeps the rest as they are.
    */
   changed(files: SourceFile[]): SourceFile[];
-  /** Every session held, in scan order: the order the analysis ranks ties by. */
-  all(): SessionInput[];
+  /**
+   * Every session held, in scan order: the order the analysis ranks ties by. With a cutoff, each
+   * session keeps only the turns at or after it, so the report reads no turn the analysis skips.
+   */
+  all(cutoff?: Date): SessionInput[];
   /** Store one parsed file, with its size: the two fields that say when to reparse it. */
   save(session: SessionInput, size: number): void;
 }

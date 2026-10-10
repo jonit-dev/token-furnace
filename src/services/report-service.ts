@@ -134,13 +134,14 @@ export class ReportService {
     const now = opts.now ?? new Date();
     const live = this.live(source);
     if (!live.length) return null;
+    const cutoff = new Date(now.getTime() - days * 86_400_000);
     return buildReport({
       now,
       days,
       weeklyBudget: opts.weeklyBudget,
       live,
       sessions: this.repo
-        .all()
+        .all(cutoff)
         .sort((a, b) => (this.order.get(a.path) ?? Infinity) - (this.order.get(b.path) ?? Infinity)),
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,

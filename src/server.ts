@@ -11,7 +11,7 @@ import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
-import type { Source } from "./core/model";
+import type { Source, Week } from "./core/model";
 import { planWeek } from "./services/usage-client";
 
 export interface ServeOptions {
@@ -77,6 +77,42 @@ class LoopbackHostOnly implements ExpressMiddlewareInterface {
 
 /** The routes, closed over the app they serve. The catch-all page is declared last. */
 function reportController(app: App, options: ServeOptions, page: string) {
+  // The last quota reading this server saw. It lives in memory, so a no-cache server still shows
+  // real utilization without a disk write, and it expires when its week resets.
+  let quota: Week | null = null;
+  let fetching: Promise<void> | null = null;
+
+  /** The reading for this request: the snapshot while its week runs, else the saved file. No network. */
+  const plan = (now: Date): Promise<Week | null> =>
+    quota && quota.resets > now ? Promise.resolve(quota) : planWeek(app.env, now, false);
+
+  /** Refresh after the response. One call at a time; the client's own gate stops a second call. */
+  const refresh = (): void => {
+    fetching ??= planWeek(app.env, app.now(), true)
+      .then((week) => {
+        if (week && week.resets > app.now()) quota = week;
+      })
+      .catch(() => {}) // a failed call keeps the reading
+      .finally(() => {
+        fetching = null;
+      });
+  };
+
+  /** One report per request, from the transcripts as they are now. The network refresh runs after. */
+  async function build(query: Record<string, unknown>) {
+    const now = app.now();
+    const days = positiveInt(query.days, options.days);
+    const source = query.source === "claude" || query.source === "codex" ? query.source : options.source;
+    rescan(app); // the answer is the report we have now; the next poll sees the new scan
+    const report = app.reports.getRaw(days, source, {
+      weeklyBudget: options.weeklyBudget,
+      planWeek: await plan(now),
+      now,
+    });
+    if (options.planUsage) setImmediate(refresh); // after this response: the keychain read must not block it
+    return report;
+  }
+
   @Controller()
   class ReportController {
     @Get("/api/status")
@@ -91,7 +127,7 @@ function reportController(app: App, options: ServeOptions, page: string) {
         warm(app);
         return res.status(202).json({ status: "scanning", progress: app.reports.progress });
       }
-      const report = await build(app, options, req.query);
+      const report = await build(req.query);
       return res.type("application/json").send(JSON.stringify(report ? reportView(report, app.now()) : null));
     }
 
@@ -106,7 +142,7 @@ function reportController(app: App, options: ServeOptions, page: string) {
         warm(app);
         return res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
       }
-      const report = await build(app, options, req.query);
+      const report = await build(req.query);
       return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
     }
   }
@@ -121,19 +157,6 @@ function warm(app: App): void {
 /** Rescan in the background when the last scan is over 5 s old. A request never waits for it. */
 function rescan(app: App): void {
   if (Date.now() - app.reports.progress.updatedAt > 5_000) warm(app);
-}
-
-/** One report per request, from the transcripts as they are now. */
-async function build(app: App, options: ServeOptions, query: Record<string, unknown>) {
-  const now = app.now();
-  const days = positiveInt(query.days, options.days);
-  const source = query.source === "claude" || query.source === "codex" ? query.source : options.source;
-  rescan(app); // the answer is the report we have now; the next poll sees the new scan
-  return app.reports.getRaw(days, source, {
-    weeklyBudget: options.weeklyBudget,
-    planWeek: await planWeek(app.env, now, options.planUsage),
-    now,
-  });
 }
 
 function positiveInt(value: unknown, fallback: number): number {

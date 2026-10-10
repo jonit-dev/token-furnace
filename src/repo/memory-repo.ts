@@ -21,8 +21,12 @@ export class MemorySessionRepository implements SessionRepository {
     return out;
   }
 
-  all(): SessionInput[] {
-    return [...this.sessions.values()].map((held) => held.session);
+  all(cutoff?: Date): SessionInput[] {
+    const ms = cutoff?.getTime();
+    const filtered = ms !== undefined && !Number.isNaN(ms);
+    return [...this.sessions.values()].map((held) =>
+      filtered ? { ...held.session, turns: held.session.turns.filter((turn) => turn.when.getTime() >= ms) } : held.session,
+    );
   }
 
   save(session: SessionInput, size: number): void {

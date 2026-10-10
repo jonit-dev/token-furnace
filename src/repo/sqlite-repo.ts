@@ -71,6 +71,7 @@ export class SqliteSessionRepository implements SessionRepository {
   private stmtInsertTurn: StatementSync | null = null;
   private stmtAllFiles: StatementSync | null = null;
   private stmtAllTurns: StatementSync | null = null;
+  private stmtAllTurnsSince: StatementSync | null = null;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -89,6 +90,9 @@ export class SqliteSessionRepository implements SessionRepository {
     this.stmtAllFiles = this.db.prepare("SELECT path, source, mtime_ns, size, title, bad_lines FROM files;");
     this.stmtAllTurns = this.db.prepare(
       "SELECT path, seq, project, session, model, at, base_in, cache_read, cache_write, output, tools, reads, wakes FROM turns ORDER BY path, seq;",
+    );
+    this.stmtAllTurnsSince = this.db.prepare(
+      "SELECT path, seq, project, session, model, at, base_in, cache_read, cache_write, output, tools, reads, wakes FROM turns WHERE at >= ? ORDER BY path, seq;",
     );
   }
 
@@ -184,12 +188,16 @@ export class SqliteSessionRepository implements SessionRepository {
     return out;
   }
 
-  all(): SessionInput[] {
+  all(cutoff?: Date): SessionInput[] {
     this.ensureDb();
     if (!this.db || !this.stmtAllFiles || !this.stmtAllTurns) return [];
 
+    const ms = cutoff?.getTime();
+    const filtered = ms !== undefined && !Number.isNaN(ms);
     const fileRows = this.stmtAllFiles.all() as unknown as FileRow[];
-    const turnRows = this.stmtAllTurns.iterate() as unknown as Iterable<TurnRow>;
+    const turnRows = (filtered && this.stmtAllTurnsSince
+      ? this.stmtAllTurnsSince.iterate(ms)
+      : this.stmtAllTurns.iterate()) as unknown as Iterable<TurnRow>;
 
     const turnsByPath = new Map<string, Turn[]>();
     for (const r of turnRows) {

@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { compose, type App } from "../src/compose";
+import type { Turn } from "../src/core/model";
 import { MemorySessionRepository } from "../src/repo/memory-repo";
+import type { SessionRepository } from "../src/repo/session-repo";
 import { SqliteSessionRepository } from "../src/repo/sqlite-repo";
 import { buildFull } from "./fixtures/build";
 import { fixedNow, harnessEnv, planWeek, tsReport } from "./harness";
@@ -175,6 +177,52 @@ describe("SqliteSessionRepository", () => {
     expect(existsSync(dbPath)).toBe(true);
     const content = readFileSync(dbPath);
     expect(content.includes(Buffer.from(SECRET))).toBe(false);
+  });
+
+  it("AC-7: all(cutoff) keeps only turns at or after the cutoff, leaving files and the default read intact", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac7-cache-"));
+    const repos: SessionRepository[] = [
+      new MemorySessionRepository(),
+      new SqliteSessionRepository(join(cacheDir, "cache.sqlite")),
+    ];
+    const turn = (ms: number): Turn => ({
+      source: "claude",
+      project: "p",
+      session: "s",
+      model: "m",
+      when: new Date(ms),
+      baseIn: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      output: 1,
+      tools: [],
+      reads: 0,
+      wakes: [],
+    });
+
+    for (const repo of repos) {
+      repo.save(
+        { source: "claude", path: "/a.jsonl", mtimeMs: 5, title: "A", turns: [turn(999), turn(1000), turn(5000)] },
+        1,
+      );
+      repo.save({ source: "codex", path: "/b.jsonl", mtimeMs: 6, title: null, turns: [turn(1000)] }, 1);
+
+      const full = repo.all();
+      expect(full.map((s) => s.path)).toEqual(["/a.jsonl", "/b.jsonl"]); // file rows and order kept
+      expect(full[0].turns.map((t) => t.when.getTime())).toEqual([999, 1000, 5000]);
+
+      const filtered = repo.all(new Date(1000));
+      expect(filtered.map((s) => s.path)).toEqual(["/a.jsonl", "/b.jsonl"]);
+      expect(filtered[0].turns.map((t) => t.when.getTime())).toEqual([1000, 5000]); // old dropped, boundary and future kept
+      expect(filtered[0]).toMatchObject({ source: "claude", path: "/a.jsonl", mtimeMs: 5, title: "A" });
+      expect(filtered[1]).toMatchObject({ source: "codex", path: "/b.jsonl", mtimeMs: 6, title: null });
+
+      // An unusable cutoff falls back to the unfiltered read, and the stored session is untouched.
+      expect(repo.all(new Date("nonsense")).map((s) => s.turns.length)).toEqual([3, 1]);
+      expect(repo.all()[0].turns.map((t) => t.when.getTime())).toEqual([999, 1000, 5000]);
+      expect(filtered[0].turns).not.toBe(repo.all()[0].turns);
+    }
+    for (const repo of repos) if (repo instanceof SqliteSessionRepository) repo.close();
   });
 
   it("AC-6: reopened connection uses WAL/NORMAL pragmas and preserves rows", () => {
