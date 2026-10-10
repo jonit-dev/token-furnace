@@ -189,7 +189,7 @@ export class SqliteSessionRepository implements SessionRepository {
     if (!this.db || !this.stmtAllFiles || !this.stmtAllTurns) return [];
 
     const fileRows = this.stmtAllFiles.all() as unknown as FileRow[];
-    const turnRows = this.stmtAllTurns.all() as unknown as TurnRow[];
+    const turnRows = this.stmtAllTurns.iterate() as unknown as Iterable<TurnRow>;
 
     const turnsByPath = new Map<string, Turn[]>();
     for (const r of turnRows) {
