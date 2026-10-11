@@ -21,6 +21,7 @@ import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
 import { controlTargetProof, MANAGED_ENDPOINT_PREFIX, type ControlOutcome, type NativeTarget } from "./services/agent-control";
 import type { ActualUsageUnit } from "./services/budget-service";
+import { refreshHookMeters } from "./services/budget-meters";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
 import { claudeUpstreamProvider, runManagedNative } from "./services/native-host";
@@ -70,7 +71,11 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
     const ownsApp = !app;
     const budgetApp = app ?? compose(process.env, { noCache: true });
     const source = argv[2] === "--source" && (argv[3] === "claude" || argv[3] === "codex" || argv[3] === "opencode") ? argv[3] : undefined;
-    try { return runBudgetHook(readStdin(), budgetApp, source); } finally { if (ownsApp) budgetApp.close(); }
+    try {
+      const stdin = readStdin();
+      await refreshHookMeters(budgetApp, stdin, source); // a stale quota meter is refreshed once, throttled, before the decision
+      return runBudgetHook(stdin, budgetApp, source);
+    } finally { if (ownsApp) budgetApp.close(); }
   }
   if (argv[0] === "hook" && argv[1] === "churn") {
     return runChurnHook(readStdin(), (app?.env ?? process.env), process.stdout);
@@ -496,7 +501,8 @@ function registerHookTarget(app: App, event: Record<string, unknown>, identity: 
     executable: observed.executable,
     sessionId,
     native: native ? { ...native, sessionId: native.sessionId ?? sessionId ?? undefined } : undefined,
-    exclusive: event.exclusive === true && observed.pid === pid,
+    // A hook payload can never grant exclusive process ownership; only a managed host owns its process.
+    exclusive: false,
   });
 }
 

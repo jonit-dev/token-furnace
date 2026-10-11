@@ -1,12 +1,13 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentControl, parsePsProcesses, type ControlTarget, type ProcessIdentity } from "../src/services/agent-control";
+import { BudgetService } from "../src/services/budget-service";
 
 const testStoreRoot = mkdtempSync(join(tmpdir(), "tf-control-tests-"));
 const TEST_EXECUTABLE = "/usr/bin/token-furnace-test-agent";
@@ -741,9 +742,13 @@ describe("AgentControl", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-control-hooks-"));
     const storePath = join(root, "state", "token-furnace", "control.sqlite");
     const cliPath = join(process.cwd(), "dist", "cli.js");
+    // A real runtime executable named claude: argument strings alone never classify a process.
+    const claudeExecutable = join(root, process.platform === "win32" ? "claude.exe" : "claude");
+    copyFileSync(process.execPath, claudeExecutable);
+    chmodSync(claudeExecutable, 0o755);
     const nativeWorkers = [
-      spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "claude"], { stdio: "ignore" }),
-      spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "claude"], { stdio: "ignore" }),
+      spawn(claudeExecutable, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }),
+      spawn(claudeExecutable, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }),
     ];
     const currentUid = typeof process.getuid === "function" ? process.getuid() : null;
     const control = makeControl({
@@ -778,9 +783,16 @@ describe("AgentControl", () => {
           exclusive: true,
         }));
       });
+      // Registration happens only while enforcement is active: an unrelated latch turns it on.
+      const budgets = new BudgetService({ HOME: root, TOKEN_FURNACE_STATE_HOME: join(root, "state"), TOKEN_FURNACE_CONFIG_HOME: join(root, "config") });
+      const latch = budgets.previewStop({ kind: "provider", provider: "unrelated-provider" }, []);
+      budgets.commitStop(latch.id, latch.fingerprint, []);
+      budgets.close();
       const results = await Promise.all(pids.map((pid, index) => runHook(pid!, `real-hook-${index}`)));
       expect(results.every((result) => result.code === 0 && /"allow":true/.test(result.output))).toBe(true);
-      expect(control.discover({ kind: "source", source: "claude" }).map((item) => item.id)).toEqual(["real-hook-0", "real-hook-1"]);
+      const discovered = control.discover({ kind: "source", source: "claude" });
+      expect(discovered.map((item) => item.id)).toEqual(["real-hook-0", "real-hook-1"]);
+      expect(discovered.every((item) => item.exclusive === false)).toBe(true);
     } finally {
       control.close();
       for (const worker of nativeWorkers) if (worker.exitCode === null) worker.kill("SIGKILL");

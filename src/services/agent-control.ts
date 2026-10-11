@@ -244,7 +244,7 @@ export class AgentControl {
       seen.add(current.pid);
       const executable = current.executable ?? "";
       const expected = expectedExecutable && sameExecutable(expectedExecutable, executable);
-      if (sourceForIdentity(current) === source && (!expectedExecutable || expected || sourceForExecutable(executable) === source)) return current;
+      if (sourceForRuntimeIdentity(current) === source && (!expectedExecutable || expected || sourceForExecutable(executable) === source)) return current;
       currentResult = current.parentPid ? this.inspectSafely(current.parentPid) : { identity: null, available: true };
       if (!currentResult.available) return null;
       current = currentResult.identity;
@@ -1345,10 +1345,6 @@ function sourceForExecutable(executable: string | null | undefined): Source | nu
   return null;
 }
 
-function sourceForIdentity(identity: ProcessIdentity): Source | null {
-  return sourceForExecutable(identity.executable) ?? sourceForCommandLine(identity.commandLine);
-}
-
 function sourceForRuntimeIdentity(identity: ProcessIdentity): Source | null {
   return sourceForExecutable(identity.executable) ?? sourceForRuntimeCommandLine(identity.commandLine);
 }
@@ -1363,14 +1359,6 @@ function sourceForRuntimeCommandLine(commandLine: string | null | undefined): So
   if (commandIndex < 0 || !tokens[commandIndex + 1]) return null;
   const command = tokens[commandIndex + 1].match(/^\s*(?:env\s+)?(?:[A-Z_][A-Z0-9_]*=[^\s]+\s+)*(?:exec\s+)?([^\s]+)/)?.[1];
   return sourceForExecutable(command);
-}
-
-function sourceForCommandLine(commandLine: string | null | undefined): Source | null {
-  const value = commandLine ?? "";
-  for (const source of ["claude", "codex", "opencode"] as const) {
-    if (new RegExp(`(?:^|[\\\\/\\s"'])${source}(?:\\.exe)?(?:[\\s\\-/'"]|$)`, "i").test(value)) return source;
-  }
-  return null;
 }
 
 function isShellExecutable(executable: string): boolean {
