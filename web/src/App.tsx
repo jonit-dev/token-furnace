@@ -8,12 +8,16 @@ import { Updated } from "./components/ui";
 import { Dashboard } from "./components/panels";
 import { Checks, Leaks, Sessions } from "./components/tables";
 import { Tips } from "./components/tips";
+import { Resets } from "./components/resets";
+import { Notifications } from "./components/notifications";
 
 const TABS: [Tab, string][] = [
   ["dashboard", "Dashboard"],
   ["checkup", "Checkup"],
   ["sessions", "Sessions"],
   ["tips", "Tips"],
+  ["resets", "Resets"],
+  ["notifications", "Notifications"],
 ];
 
 // Old hashes keep working.
@@ -56,6 +60,8 @@ export function App() {
     ),
     sessions: <Sessions r={r} />,
     tips: <Tips />,
+    resets: <Resets />,
+    notifications: <Notifications />,
   };
   const filePage = location.protocol !== "http:" && location.protocol !== "https:";
   const linkClass = filePage
@@ -71,7 +77,7 @@ export function App() {
           <Icon name="Flame" size={20} className="text-accent glow" />
           <h1 className="font-heading text-lg font-bold tracking-tight">Token Furnace</h1>
         </a>
-        <nav className="flex order-last w-full sm:order-none sm:w-auto">
+        <nav className="flex flex-wrap order-last w-full sm:order-none sm:w-auto">
           {TABS.map(([id, name]) => (
             <a
               key={id}

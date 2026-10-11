@@ -15,6 +15,11 @@ import type { Source, Week } from "./core/model";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { runFixConfig } from "./setup/agents";
 import { openCodeWeek, planWeek } from "./services/usage-client";
+import { resetsSnapshot } from "./services/resets-client";
+import {
+  deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
+  type DeliveryResult,
+} from "./services/notifications";
 
 export interface ServeOptions {
   days: number;
@@ -31,6 +36,9 @@ export interface LiveServer {
   close: () => Promise<void>;
 }
 
+/** The refresh that runs on its own, without a browser tab asking for it. */
+const TICK_MS = 60_000;
+
 /** Serve until the process is stopped. Ctrl-C ends it. */
 export async function serve(app: App, options: ServeOptions): Promise<void> {
   const live = await startServer(app, options);
@@ -43,6 +51,7 @@ export async function serve(app: App, options: ServeOptions): Promise<void> {
 export async function startServer(app: App, options: ServeOptions): Promise<LiveServer> {
   const web = express();
   web.disable("x-powered-by");
+  web.use(express.json({ limit: "16kb" }));
   useExpressServer(web, {
     controllers: [reportController(app, options, loadPage())],
     middlewares: [LoopbackHostOnly],
@@ -57,7 +66,47 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   // Scan after the port is bound. The scan yields, so requests are answered while it runs.
   warm(app);
   const port = (http.address() as { port: number }).port;
-  return { url: `http://127.0.0.1:${port}`, port, close: () => new Promise((done) => http.close(() => done())) };
+  // The notification loop runs in the server, not in a tab: it stops with the server and one run at a time.
+  const ticker = { running: false };
+  const timer = setInterval(() => {
+    if (ticker.running) return; // a slow run is never joined by a second one
+    ticker.running = true;
+    notifyTick(app, options.planUsage).catch(() => {}).finally(() => { ticker.running = false; });
+  }, TICK_MS);
+  timer.unref();
+  return {
+    url: `http://127.0.0.1:${port}`,
+    port,
+    close: () => new Promise((done) => {
+      clearInterval(timer);
+      http.close(() => done());
+    }),
+  };
+}
+
+/**
+ * One pass of the notification loop: refresh the shared reset feed, then send what the conditions
+ * earned. Off means no polling at all. Utilization is the same week.used percent the report shows
+ * (reportView burns.used copies it); the tick reads the weeks directly so a quiet transcript
+ * window cannot zero it, with the network call gated by each client's own cache.
+ * planUsage false (--no-plan-usage) never fetches quota: only the saved reading is used.
+ */
+export async function notifyTick(app: App, planUsage = true): Promise<{ alerts: unknown; delivered: DeliveryResult[] }> {
+  const now = app.now();
+  const settings = loadSettings(app.env);
+  if (!settings.enabled) return { alerts: [], delivered: [] };
+  const snapshot = await resetsSnapshot(now);
+  const [plan, open] = await Promise.all([
+    planWeek(app.env, now, planUsage),
+    openCodeWeek(app.env, now, planUsage),
+  ]);
+  const codex = app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
+  const usage: Record<string, number | null> = {
+    claude: plan?.used ?? null,
+    codex: codex?.used ?? null,
+    opencode: open?.used ?? null,
+  };
+  return runAlerts(app.env, { now, feed: snapshot.feed, fresh: !snapshot.stale, usage, settings });
 }
 
 /**
@@ -75,6 +124,16 @@ class LoopbackHostOnly implements ExpressMiddlewareInterface {
     }
     next();
   }
+}
+
+/**
+ * A write has to come from this dashboard. A browser sends Origin on every POST and Sec-Fetch-Site
+ * with every fetch; a cross-site page cannot fake either into this loopback origin.
+ */
+function sameOrigin(req: Request): boolean {
+  if (req.headers["sec-fetch-site"] === "cross-site") return false;
+  const origin = req.headers.origin;
+  return !origin || origin === `http://${req.headers.host}`;
 }
 
 /** The routes, closed over the app they serve. The catch-all page is declared last. */
@@ -152,6 +211,44 @@ function reportController(app: App, options: ServeOptions, page: string) {
       }
       const report = await build(req.query);
       return res.type("application/json").send(JSON.stringify(report ? reportView(report, app.now()) : null));
+    }
+
+    @Get("/api/resets")
+    async resets(@Res() res: Response) {
+      // The shared cache answers; a cold one fetches once and every later request reads that.
+      const snapshot = await resetsSnapshot(app.now());
+      return res.set("Cache-Control", "no-store").json(snapshot);
+    }
+
+    @Get("/api/notifications")
+    notifications(@Res() res: Response) {
+      return res.set("Cache-Control", "no-store").json(publicSettings(loadSettings(app.env)));
+    }
+
+    @Post("/api/notifications")
+    saveNotifications(@Req() req: Request, @Res() res: Response) {
+      if (!sameOrigin(req)) return res.status(403).json({ error: "Save from this dashboard." });
+      const { settings, error } = mergeSettings(app.env, req.body);
+      if (error) return res.status(400).json({ error });
+      saveSettings(app.env, settings);
+      return res.json(publicSettings(settings));
+    }
+
+    @Post("/api/notifications/test")
+    async testNotifications(@Req() req: Request, @Res() res: Response) {
+      if (!sameOrigin(req)) return res.status(403).json({ error: "Send from this dashboard." });
+      const settings = loadSettings(app.env);
+      const results = await deliver(app.env, settings, "Token Furnace",
+        "Test notification from Token Furnace. Alerts are working.");
+      const ok = results.length > 0 && results.every((result) => result.ok);
+      // Empty means no channel is on: neither a delivery nor a suppression.
+      const skipped = results.length > 0 && results.every((result) => result.skipped);
+      return res.status(ok || skipped || results.length === 0 ? 200 : 502).json({
+        ok,
+        skipped,
+        // Status only: an error string never carries the destination URL or the token.
+        results: results.map((result) => ({ channel: result.channel, ok: result.ok, error: result.error })),
+      });
     }
 
     @Get("/dashboard.html")

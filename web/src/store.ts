@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { Source } from "../../src/core/model";
 
-export type Tab = "dashboard" | "checkup" | "sessions" | "tips";
+export type Tab = "dashboard" | "checkup" | "sessions" | "tips" | "resets" | "notifications";
 
 interface UiState {
   /** Active tab id. */

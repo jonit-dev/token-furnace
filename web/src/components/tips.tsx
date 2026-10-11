@@ -65,12 +65,12 @@ export function Tips() {
     },
     {
       id: "opencode-go",
-      title: "Add an OpenCode Go plan",
+      title: "Add an OpenCode Go plan on top of Codex/Claude Code",
       body: (
         <>
           For about $10/month, the OpenCode Go plan opens the free Zen models and adds a weekly quota to
           absorb routine workload. Route the easy work to a free Zen model and keep your paid plan for the
-          hard turns. The save-tokens plan below picks the best free model for coding.
+          hard turns. The save-tokens skill below picks the best free model for coding.
         </>
       ),
       action: (
@@ -86,7 +86,7 @@ export function Tips() {
     },
     {
       id: "save-tokens-creator",
-      title: "Create a save-tokens plan",
+      title: "Create a save-tokens skill",
       body: (
         <>
           The <code className="mx-1 px-1 rounded bg-chip">save-tokens-creator</code> skill reads the

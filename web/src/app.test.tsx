@@ -283,7 +283,7 @@ describe("tips", () => {
   it("lists the setup tips and hides each one when marked done", () => {
     render(<App />);
     act(() => useUi.getState().setTab("tips"));
-    for (const title of ["Run the auto fix", "Add an OpenCode Go plan", "Create a save-tokens plan"]) {
+    for (const title of ["Run the auto fix", "Add an OpenCode Go plan on top of Codex/Claude Code", "Create a save-tokens skill"]) {
       hasText(title);
     }
     // deepseek-v4.1-flash is a paid Go model, never presented as free.
