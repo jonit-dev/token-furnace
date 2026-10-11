@@ -297,27 +297,60 @@ describe("AgentControl", () => {
     expect(signal).not.toHaveBeenCalled();
   });
 
-  it("rejects a parent PID reused by a newer process generation", async () => {
-    const graph: ProcessIdentity[] = [
-      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000, executable: TEST_EXECUTABLE },
-      { pid: 8000, processStartTime: 20, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
-      { pid: 7000, processStartTime: 30, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
+  it("stops after a conclusively replaced ancestor without relaxing identity checks", async () => {
+    for (const metadata of [true, ...(process.platform === "win32" ? [] : [false])]) {
+      const graph: ProcessIdentity[] = [
+        { pid: 9000, processStartTime: 10, ownerUid: 7, ownerSid: TEST_OWNER_SID, parentPid: 8000, executable: TEST_EXECUTABLE },
+        { pid: 8000, processStartTime: 20, ownerUid: 7, ownerSid: TEST_OWNER_SID, parentPid: 1, executable: TEST_EXECUTABLE },
+        { pid: 7000, processStartTime: 30, ownerUid: 7, ownerSid: TEST_OWNER_SID, parentPid: 1, executable: TEST_EXECUTABLE },
+      ];
+      const byPid = new Map(graph.map((item) => [item.pid, item]));
+      const signal = vi.fn((pid: number) => byPid.delete(pid));
+      const control = metadata
+        ? makeControl({
+          currentPid: 9000,
+          currentUid: 7,
+          inspect: (pid) => byPid.get(pid) ?? null,
+          listProcesses: () => [...byPid.values()],
+          signal,
+          graceMs: 0,
+          storePath: testStore(),
+        })
+        : new AgentControl({
+          currentPid: 9000,
+          currentUid: 7,
+          inspect: (pid) => byPid.get(pid) ?? null,
+          signal,
+          graceMs: 0,
+          storePath: testStore(),
+        });
+      if (!metadata) controls.push(control);
+      const outcome = await control.cancel(target({ id: `replaced-child-${metadata ? "graph" : "inspect"}`, pid: 7000, processStartTime: 30, exclusive: true }), true);
+      expect(outcome.status).toBe("terminated");
+      expect(signal).toHaveBeenCalledWith(7000, "SIGKILL");
+
+      const stale = await control.cancel(target({ id: `stale-parent-${metadata ? "graph" : "inspect"}`, pid: 8000, processStartTime: 10, exclusive: true }), true);
+      expect(stale.status).toBe("unresolved");
+      expect(signal.mock.calls.map(([pid]) => pid)).toEqual([7000]);
+      control.close();
+    }
+
+    const genuineAncestors: ProcessIdentity[] = [
+      { pid: 9100, processStartTime: 30, ownerUid: 7, ownerSid: TEST_OWNER_SID, parentPid: 8100, executable: TEST_EXECUTABLE },
+      { pid: 8100, processStartTime: 20, ownerUid: 7, ownerSid: TEST_OWNER_SID, parentPid: 1, executable: TEST_EXECUTABLE },
     ];
-    const signal = vi.fn();
-    const byPid = new Map(graph.map((item) => [item.pid, item]));
-    const control = makeControl({
-      currentPid: 9000,
+    const protectedSignal = vi.fn();
+    const protectedControl = makeControl({
+      currentPid: 9100,
       currentUid: 7,
-      inspect: (pid) => byPid.get(pid) ?? null,
-      listProcesses: () => graph,
-      signal,
-      graceMs: 0,
+      inspect: (pid) => genuineAncestors.find((item) => item.pid === pid) ?? null,
+      listProcesses: () => genuineAncestors,
+      signal: protectedSignal,
       storePath: testStore(),
     });
-    const outcome = await control.cancel(target({ id: "reused-parent", pid: 7000, processStartTime: 30, exclusive: true }), true);
-    expect(outcome.status).toBe("unresolved");
-    expect(outcome.detail).toMatch(/generation|ancestor/i);
-    expect(signal).not.toHaveBeenCalled();
+    const ancestor = await protectedControl.cancel(target({ id: "genuine-ancestor", pid: 8100, processStartTime: 20, exclusive: true }), true);
+    expect(ancestor.status).toBe("unresolved");
+    expect(protectedSignal).not.toHaveBeenCalled();
   });
 
   it("uses one metadata graph for ancestry instead of owner queries per parent", async () => {

@@ -477,7 +477,9 @@ export class AgentControl {
       const inspected = this.inspectSafely(parentPid);
       if (!inspected.available) return { protected: false, available: false, detail: this.ancestorLookupDetail(parentPid, child, inspected.detail) };
       if (!inspected.identity) return { protected: false, available: true };
-      if (!this.validGeneration(child, inspected.identity)) return { protected: false, available: false, detail: this.generationDetail(inspected.identity, parentPid, "parent start is newer than child") };
+      const generation = this.generationStatus(child, inspected.identity);
+      if (generation === "invalid") return { protected: false, available: false, detail: this.generationDetail(inspected.identity, parentPid, "process start identity is invalid") };
+      if (generation === "replaced") return { protected: false, available: true };
       if (parentPid === pid) return { protected: true, available: true };
       child = inspected.identity;
     }
@@ -501,15 +503,18 @@ export class AgentControl {
       const inspected = this.graphInspection(graph, parentPid);
       if (!inspected.available) return { protected: false, available: false, detail: this.ancestorLookupDetail(parentPid, child, inspected.detail) };
       if (!inspected.identity) return { protected: false, available: true };
-      if (!this.validGeneration(child, inspected.identity)) return { protected: false, available: false, detail: this.generationDetail(inspected.identity, parentPid, "parent start is newer than child") };
+      const generation = this.generationStatus(child, inspected.identity);
+      if (generation === "invalid") return { protected: false, available: false, detail: this.generationDetail(inspected.identity, parentPid, "process start identity is invalid") };
+      if (generation === "replaced") return { protected: false, available: true };
       if (parentPid === pid) return { protected: true, available: true };
       child = inspected.identity;
     }
     return { protected: false, available: true };
   }
 
-  private validGeneration(child: ProcessIdentity, parent: ProcessIdentity): boolean {
-    return parent.processStartTime <= child.processStartTime;
+  private generationStatus(child: ProcessIdentity, parent: ProcessIdentity): "valid" | "replaced" | "invalid" {
+    if (!Number.isFinite(child.processStartTime) || child.processStartTime <= 0 || !Number.isFinite(parent.processStartTime) || parent.processStartTime <= 0) return "invalid";
+    return parent.processStartTime > child.processStartTime ? "replaced" : "valid";
   }
 
   private ancestorLookupDetail(parentPid: number, child: ProcessIdentity, detail?: string): string {
