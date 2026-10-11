@@ -330,12 +330,12 @@ describe("context configuration repair", () => {
     Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
   });
 
-  it("shows the repair button on Dashboard even when Checkup has no rows", () => {
+  it("shows the repair button on Dashboard even when Checkup has no rows", async () => {
     window.__REPORT__ = { ...fixtureReport, baseline: [] };
     render(<App />);
     expect(screen.getByRole("button", { name: "Auto Fixes" }).classList.contains("bg-accent")).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
-    expect(screen.getByRole("dialog").textContent).toContain("400,000 tokens");
+    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("400,000 tokens"));
   });
 
   it("explains changes, cancels without writing, and applies only after confirmation", async () => {
@@ -347,7 +347,7 @@ describe("context configuration repair", () => {
     render(<App />);
     act(() => useUi.getState().setTab("checkup"));
     fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
-    expect(screen.getByRole("dialog").textContent).toContain("400,000 tokens");
+    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("400,000 tokens"));
     expect(screen.getByRole("dialog").textContent).toContain("300,000 tokens");
     expect(screen.getByRole("dialog").textContent).toContain("Sonnet");
     expect(screen.getAllByRole("checkbox")).toHaveLength(9);
@@ -358,11 +358,55 @@ describe("context configuration repair", () => {
     expect(useUi.getState().modal).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(false));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Back up and apply" })); });
     expect(fetcher).toHaveBeenCalledWith("/api/fix-config", { method: "POST", headers: { "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Repairs": "claude-context,claude-workers,claude-tools,claude-model,claude-depth,codex-context,codex-workers,codex-effort,codex-depth" } });
     expect(screen.getByRole("status").textContent).toContain("Backup: saved");
     expect(screen.getByRole("button", { name: "Close" })).toBeDefined();
     expect(fetcher.mock.calls.filter(([url]) => url === "/api/report").length).toBeGreaterThan(1);
+  });
+
+  it("hides stale repairs while checking on every open and ignores cancelled checks", async () => {
+    const checks: Array<(data: { pending: string[] }) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => ({ ok: true, json: () =>
+      url === "/api/fix-config" ? new Promise((resolve) => checks.push(resolve)) : Promise.resolve(fixtureReport) })));
+    render(<App />);
+    const open = () => fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    const loading = () => {
+      expect(screen.getByRole("status").textContent).toContain("Checking configuration");
+      expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+      expect(screen.getByRole("dialog").textContent).not.toContain("Nothing to repair");
+      expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(true);
+    };
+    open();
+    loading();
+    await waitFor(() => expect(checks).toHaveLength(1));
+    await act(async () => checks[0]({ pending: ["claude-model"] }));
+    expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    open();
+    loading();
+    await waitFor(() => expect(checks).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    open();
+    await waitFor(() => expect(checks).toHaveLength(3));
+    await act(async () => checks[1]({ pending: ["codex-effort"] }));
+    loading();
+    await act(async () => checks[2]({ pending: [] }));
+    expect(screen.getByRole("status").textContent).toContain("Nothing to repair");
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+  });
+
+  it("releases loading when the configuration check fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url === "/api/fix-config") throw new Error("Offline");
+      return { ok: true, json: async () => fixtureReport };
+    }));
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    await waitFor(() => expect(screen.getAllByRole("checkbox")).toHaveLength(9));
+    expect(screen.queryByText("Checking configuration…")).toBeNull();
+    expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("lists only pending repairs and shows an all-set state when none remain", async () => {
@@ -376,7 +420,7 @@ describe("context configuration repair", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close modal" }));
     pending = [];
     fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
-    await waitFor(() => expect(screen.queryAllByRole("checkbox")).toHaveLength(0));
+    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("Nothing to repair"));
     expect(screen.getByRole("dialog").textContent).toContain("Nothing to repair");
     expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(true);
   });
@@ -386,9 +430,11 @@ describe("context configuration repair", () => {
     vi.stubGlobal("fetch", fetcher);
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    await waitFor(() => expect(screen.getAllByRole("checkbox")).toHaveLength(9));
     for (const checkbox of screen.getAllByRole("checkbox")) fireEvent.click(checkbox);
     expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(true);
     fireEvent.click(screen.getAllByRole("checkbox")[5]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(false));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Back up and apply" })); });
     expect(fetcher).toHaveBeenCalledWith("/api/fix-config", { method: "POST", headers: { "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Repairs": "codex-context" } });
   });
@@ -399,6 +445,7 @@ describe("context configuration repair", () => {
     render(<App />);
     act(() => useUi.getState().setTab("checkup"));
     fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(false));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Back up and apply" })); });
     expect(screen.getByRole("alert").textContent).toContain("Invalid TOML");
     expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(false);

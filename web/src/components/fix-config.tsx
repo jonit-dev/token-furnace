@@ -9,11 +9,13 @@ export function FixConfig() {
   const [pending, setPending] = useState<ConfigRepairId[]>(() => CONFIG_REPAIRS.map((repair) => repair.id));
   const [selected, setSelected] = useState<ConfigRepairId[]>(pending);
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(true);
   const [result, setResult] = useState("");
   const [done, setDone] = useState(false);
   const live = location.protocol === "http:" || location.protocol === "https:";
 
   useEffect(() => {
+    setChecking(live);
     if (!open) return;
     const all = CONFIG_REPAIRS.map((repair) => repair.id);
     setDone(false);
@@ -28,12 +30,14 @@ export function FixConfig() {
       const next = all.filter((id) => data.pending.includes(id));
       setPending(next);
       setSelected(next);
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => {
+      if (!stale) setChecking(false);
+    });
     return () => { stale = true; };
   }, [open, live]);
 
   async function apply() {
-    if (!selected.length) return;
+    if (checking || !selected.length) return;
     setBusy(true);
     setResult("");
     try {
@@ -68,10 +72,11 @@ export function FixConfig() {
       footer={<div className="flex justify-end gap-2">
         <button type="button" autoFocus disabled={busy} onClick={() => setModal(null)}
           className="px-3 py-2 text-sm bg-chip border border-line rounded-lg disabled:opacity-50">{done ? "Close" : "Cancel"}</button>
-        {!done && <button type="button" disabled={busy || !selected.length} onClick={apply}
+        {!done && <button type="button" disabled={checking || busy || !selected.length} onClick={apply}
           className="px-3 py-2 text-sm bg-accent text-bg font-semibold rounded-lg disabled:opacity-50">{busy ? "Saving backups…" : "Back up and apply"}</button>}
       </div>}>
-      {!done && <div className="space-y-4">
+      {checking && <p className="text-sm text-muted" role="status">Checking configuration…</p>}
+      {!checking && !done && <div className="space-y-4">
         {!pending.length && <p className="text-sm" role="status">Everything is already set. Nothing to repair.</p>}
         {(["claude", "codex"] as const).filter((provider) => CONFIG_REPAIRS.some((repair) => repair.provider === provider && pending.includes(repair.id))).map((provider) => <fieldset key={provider} disabled={busy} className="space-y-2">
           <legend className="mb-2 font-heading font-semibold">{provider === "claude" ? "Claude Code" : "Codex"}</legend>
