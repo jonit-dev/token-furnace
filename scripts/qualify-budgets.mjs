@@ -25,6 +25,7 @@ const targets = new Map();
 const temporary = [];
 const servers = [];
 const nativeWorkers = [];
+const QUALIFY_ADMISSION_FLOOR = 100_000;
 let runtimeBinDir;
 let sharedConfigHome;
 let sharedStateHome;
@@ -39,6 +40,10 @@ if (process.argv.includes("--self-test")) {
   const codexArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", { resumeSessionId: "thread" });
   const codexFreshArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", {});
   const openCodeArgs = nativeArgs({ source: "opencode" }, "/tmp", "prompt", { resumeSessionId: "session" });
+  const catalog = nativeModelTokens("openrouter/nvidia/nemotron-3.5-lightning:free\n");
+  const opencodeHome = "/tmp/qualify-opencode";
+  const opencodeEnvironment = isolatedEnv("opencode", opencodeHome);
+  const admissionLimit = admissionLimitForLedger({ used: 120, reserved: 30, recent: 8 });
   const ids = extractNativeSessionIds('{"type":"system","session_id":"native-session"}', "claude");
   const codexIds = extractNativeSessionIds('{"type":"thread.started","thread_id":"thread"}', "codex");
   const openCodeIds = extractNativeSessionIds('{"sessionID":"session"}', "opencode");
@@ -47,7 +52,7 @@ if (process.argv.includes("--self-test")) {
   const gated = delayedPrompt(first.matching, "MATCHING", first.barrier);
   const emptyControls = { querySelector: () => null };
   const completeControls = { querySelector: () => ({}) };
-  if (!timedOut.timedOut || !taskUnavailable(timedOut) || taskUnavailable(successfulAuthNarrative) || nativeAttemptPasses(timedOut) || budgetControlsReady(emptyControls) || !budgetControlsReady(completeControls) || claudeArgs.includes("--no-session-persistence") || !claudeArgs.includes("--output-format") || !resumeArgs.includes("--resume") || !codexArgs.includes("resume") || codexArgs.includes("-C") || !codexFreshArgs.includes("-C") || !codexArgs.includes("--json") || !openCodeArgs.includes("--session") || !openCodeArgs.includes("--format") || !ids.includes("native-session") || !codexIds.includes("thread") || !openCodeIds.includes("session") || first.matching === second.matching || !gated.includes(first.barrier) || !gated.toLowerCase().includes("only after")) {
+  if (!timedOut.timedOut || !taskUnavailable(timedOut) || taskUnavailable(successfulAuthNarrative) || nativeAttemptPasses(timedOut) || budgetControlsReady(emptyControls) || !budgetControlsReady(completeControls) || claudeArgs.includes("--no-session-persistence") || !claudeArgs.includes("--output-format") || !resumeArgs.includes("--resume") || !codexArgs.includes("resume") || codexArgs.includes("-C") || !codexFreshArgs.includes("-C") || !codexArgs.includes("--json") || !openCodeArgs.includes("--session") || !openCodeArgs.includes("--format") || !ids.includes("native-session") || !codexIds.includes("thread") || !openCodeIds.includes("session") || first.matching === second.matching || !gated.includes(first.barrier) || !gated.toLowerCase().includes("only after") || opencodeEnvironment.OPENCODE_DATA_DIR !== join(opencodeHome, ".local", "share", "opencode") || catalog[0] !== "openrouter/nvidia/nemotron-3.5-lightning:free" || admissionLimit <= 150) {
     console.error("qualification contract failed: native timeout, persistence, resume, identity, or barrier contract regressed");
     process.exitCode = 1;
   } else {
@@ -146,7 +151,7 @@ async function qualify() {
     ...isolatedEnv(requested[0], targets.get(requested[0]).home, workspace),
     CLAUDE_CONFIG_DIR: targets.get("claude")?.home,
     CODEX_HOME: targets.get("codex")?.home,
-    OPENCODE_DATA_DIR: targets.get("opencode")?.home,
+    OPENCODE_DATA_DIR: targets.get("opencode") ? opencodeDataDir(targets.get("opencode").home) : undefined,
   };
   for (const path of [sharedConfigHome, sharedStateHome, sharedCacheHome]) mkdirSync(path, { recursive: true });
   const warmups = new Map();
@@ -187,7 +192,13 @@ async function qualify() {
   }
   results.push(modeResult);
   for (const source of requested) {
-    results.push(await scenarioAdmission(source, workspace, server.url, warmups.get(source)));
+    const admission = await scenarioAdmission(source, workspace, server.url, warmups.get(source));
+    const restored = await setSourcePolicy(server.url, source, sourceAdmissionLimit(source));
+    if (!restored.ok) {
+      admission.status = "FAIL";
+      admission.detail = `${admission.detail} Could not restore a generous eligible Manual policy before stop scenarios.`;
+    }
+    results.push(admission);
   }
   for (const source of requested) {
     results.push(await scenarioProviderStop(source, server.url, workspace, browser));
@@ -298,12 +309,16 @@ async function discoverNativeModels(target, workspace) {
   if (target.source !== "opencode") return [];
   const result = await run(target.command, ["models"], { cwd: workspace, env: isolatedEnv(target.source, target.home, workspace), timeout: 30_000 });
   if (result.status !== 0 || result.timedOut) return [];
-  const models = new Set();
-  for (const match of String(result.output || "").matchAll(/\b([A-Za-z0-9._-]+)\/([A-Za-z0-9._:@-]+)\b/g)) models.add(`${match[1]}/${match[2]}`);
-  return [...models].map((displayModel) => {
+  return nativeModelTokens(result.output).map((displayModel) => {
     const slash = displayModel.indexOf("/");
     return { source: target.source, provider: displayModel.slice(0, slash), model: displayModel.slice(slash + 1), displayModel };
   });
+}
+
+function nativeModelTokens(output) {
+  const models = new Set();
+  for (const match of String(output || "").matchAll(/\b([A-Za-z0-9._-]+)\/([A-Za-z0-9._:@/-]+)\b/g)) models.add(`${match[1]}/${match[2]}`);
+  return [...models];
 }
 
 async function stopPreview(url, token, scope) {
@@ -318,6 +333,8 @@ async function scenarioAdmission(source, workspace, url, warmup) {
   if (!warmup?.ok) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `Native warmup did not complete; no admission result was fabricated. ${warmup?.detail ?? "adapter setup did not run"}` };
   const target = targets.get(source);
   if (!target?.capabilities?.resume) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `${source} did not advertise a supported native resume route; no synthetic resume result was accepted.` };
+  const prepared = await setSourcePolicy(url, source, sourceAdmissionLimit(source));
+  if (!prepared.ok) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "Could not establish positive durable Manual headroom through the real budget API." };
   const artifacts = scenarioArtifacts(workspace, source, "budget-admission", ["child", "background", "resume", "blocked-child", "blocked-resume", "blocked-background"]);
   const prompt = delegationPrompt(source, artifacts.child, artifacts.background, artifacts.resume, "BUDGET_ELIGIBLE");
   const task = await runNative(target, workspace, prompt, 120_000, null);
@@ -329,7 +346,8 @@ async function scenarioAdmission(source, workspace, url, warmup) {
   const childSideEffect = existsSync(artifacts.child);
   const backgroundSideEffect = existsSync(artifacts.background);
   if (!allowed || !taskRegistered || !childSessions || !childSideEffect || !backgroundSideEffect) {
-    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Eligible request evidence failed: ${nativeDiagnostic(source, task, taskRegistered, childSideEffect && backgroundSideEffect)} allowDecision=${Boolean(allowed)} childSessions=${childSessions} backgroundSideEffect=${backgroundSideEffect}` };
+    const decisionReason = allowed?.reason ?? decisionEvidence(source, task.requestId, task.startedAt, false)?.reason ?? "no correlated admission decision";
+    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Eligible request evidence failed: ${nativeDiagnostic(source, task, taskRegistered, childSideEffect && backgroundSideEffect)} allowDecision=${Boolean(allowed)} decisionReason=${safeTail(decisionReason)} childSessions=${childSessions} backgroundSideEffect=${backgroundSideEffect}` };
   }
   const resumed = await resumeNative(target, workspace, task.nativeSessionId, resumePrompt(source, artifacts.resume, "BUDGET_RESUMED"), 120_000, null);
   if (taskUnavailable(resumed)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The native session could not be resumed: ${safeTail(resumed.output)}` };
@@ -387,6 +405,27 @@ function hasMeasuredUsage(source, startedAt) {
   } catch {
     return false;
   }
+}
+
+function sourceAdmissionLimit(source) {
+  let db;
+  try {
+    db = new DatabaseSync(join(sharedStateHome, "token-furnace", "budgets.sqlite"));
+    const usage = db.prepare("SELECT COALESCE(SUM(amount), 0) AS used, COALESCE(MAX(amount), 0) AS recent FROM usage_events WHERE scope_key = ? AND unit = 'tokens-total'").get(`source:${source}`);
+    const reserved = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM reservations WHERE scope_key = ? AND unit = 'tokens-total' AND status = 'reserved'").get(`source:${source}`);
+    return admissionLimitForLedger({ used: Number(usage?.used), reserved: Number(reserved?.total), recent: Number(usage?.recent) });
+  } catch {
+    return QUALIFY_ADMISSION_FLOOR;
+  } finally {
+    db?.close();
+  }
+}
+
+function admissionLimitForLedger(ledger) {
+  const used = Number.isFinite(ledger.used) && ledger.used > 0 ? ledger.used : 0;
+  const reserved = Number.isFinite(ledger.reserved) && ledger.reserved > 0 ? ledger.reserved : 0;
+  const recent = Number.isFinite(ledger.recent) && ledger.recent > 0 ? ledger.recent : 0;
+  return Math.max(QUALIFY_ADMISSION_FLOOR, Math.ceil(used + reserved + Math.max(1_000, recent * 100)));
 }
 
 function nativeCapabilities(source, help) {
@@ -1012,7 +1051,7 @@ function isolatedEnv(source, home, workspace = undefined, identity = null) {
     HOME: home,
     CLAUDE_CONFIG_DIR: source === "claude" ? home : undefined,
     CODEX_HOME: source === "codex" ? home : undefined,
-    OPENCODE_DATA_DIR: source === "opencode" ? home : undefined,
+    OPENCODE_DATA_DIR: source === "opencode" ? opencodeDataDir(home) : undefined,
     XDG_CONFIG_HOME: join(home, ".config"),
     XDG_DATA_HOME: join(home, ".local", "share"),
     XDG_STATE_HOME: join(home, ".local", "state"),
@@ -1026,6 +1065,10 @@ function isolatedEnv(source, home, workspace = undefined, identity = null) {
     TOKEN_FURNACE_QUALIFY_WORKSPACE: workspace,
     PATH: qualifyPath(),
   };
+}
+
+function opencodeDataDir(home) {
+  return join(home, ".local", "share", "opencode");
 }
 
 function qualifyPath() {
