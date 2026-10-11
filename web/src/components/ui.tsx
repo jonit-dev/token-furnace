@@ -204,21 +204,21 @@ export function Tile({
   help: ReactNode;
 }) {
   return (
-    <div className="card px-3 py-2.5 flex flex-col min-w-0" title={tip || String(label)}>
-      <div className="relative flex items-center gap-1.5 min-w-0 pr-5">
-        {icon ? <Icon name={icon} size={13} className="text-accent shrink-0" /> : null}
-        {state ? <span className={`size-1.5 shrink-0 rounded-full ${DOT[state]}`} /> : null}
-        <span className="text-[11px] uppercase tracking-wide text-muted truncate" title={String(label)}>
+    <div className="card px-3 py-3 flex flex-col gap-1 min-w-0 h-full" title={tip || String(label)}>
+      <div className="relative flex items-start gap-1.5 min-w-0 min-h-10 pr-5">
+        {icon ? <Icon name={icon} size={13} className="text-accent shrink-0 mt-0.5" /> : null}
+        {state ? <span className={`size-1.5 shrink-0 rounded-full mt-1 ${DOT[state]}`} /> : null}
+        <span className="text-xs leading-4 font-medium text-ink/80" title={String(label)}>
           {label}
         </span>
         <div className="absolute -right-1 -top-1"><MetricInfo label={label}>{help}</MetricInfo></div>
       </div>
-      <div className="flex items-baseline justify-between gap-2 min-w-0">
+      <div className="flex flex-col min-w-0">
         <span className={`text-lg leading-6 font-semibold shrink-0 ${state === "crit" ? "text-hot" : ""}`}>
           {value}
         </span>
         {line ? (
-          <span className="text-[11px] text-muted truncate" title={String(line)}>
+          <span className="text-[11px] leading-4 text-muted" title={String(line)}>
             {line}
           </span>
         ) : null}
