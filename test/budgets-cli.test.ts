@@ -310,7 +310,7 @@ describe("budget CLI", () => {
     }
   });
 
-  it("charges one native message once across several PostToolUse hooks and skips discovery while Off", () => {
+  it("charges one native message once across several PostToolUse hooks and skips the abandon ownership scan while Off", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-budget-native-once-"));
     roots.push(root);
     const transcript = join(root, ".claude", "projects", "p", "session.jsonl");
@@ -324,9 +324,13 @@ describe("budget CLI", () => {
     let db: DatabaseSync | undefined;
     const hook = (event: Record<string, unknown>) => expect(runBudgetHook(JSON.stringify({ transcript_path: transcript, session_id: "s1", ...event }), app, "claude")).toBe(0);
     try {
+      // Off still registers the session (emergency stops must reach it) but never scans on Stop.
+      const preview = vi.mocked(app.control.preview);
       hook({ hook_event_name: "PreToolUse", tool_use_id: "t0" });
+      expect(owningProcess).toHaveBeenCalledTimes(1);
       hook({ hook_event_name: "Stop" });
-      expect(owningProcess).not.toHaveBeenCalled();
+      expect(owningProcess).toHaveBeenCalledTimes(1);
+      expect(preview).not.toHaveBeenCalled();
       app.budgets.savePolicies([{ scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 1000, deadline: "2099-10-11T12:00:00.000Z" }], 0);
       for (const id of ["t1", "t2"]) hook({ hook_event_name: "PreToolUse", tool_use_id: id, estimatedCost: 20, costUnit: "tokens-total" });
       for (const id of ["t1", "t2"]) hook({ hook_event_name: "PostToolUse", tool_use_id: id });

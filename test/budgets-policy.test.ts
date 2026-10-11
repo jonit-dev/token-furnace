@@ -82,22 +82,24 @@ describe("budget policy arithmetic", () => {
     const initialReset = new Date(clock.current.getTime() + 120 * 3_600_000);
     service.setMeters([meter({ resetAt: initialReset, window: "7d" })]);
     service.savePolicies([{ scope: { kind: "source", source: "claude" }, mode: "auto", unit: "percentage-per-hour", limit: null, deadline: null }], 0);
+    // Quota movement is measured in the meter's window: 28 points over 2800 weighted tokens is 0.01 points per token.
+    service.seedRecentUsage([{ scope: { kind: "source", source: "claude" }, amount: 2800, eventId: "calibration", at: new Date(clock.current.getTime() - 3 * 3_600_000) }]);
 
     const initial = service.snapshot(policySources).sources[0];
     expect(initial.pace).toBeCloseTo(0.6, 8);
     expect(initial.allowance).toBeCloseTo(0.6, 8);
 
-    const consumed = service.admit({ identity, estimatedCost: 0.25, costUnit: "percentage-per-hour", requestId: "auto-consumed", now: clock.current });
+    const consumed = service.admit({ identity, estimatedCost: 25, costUnit: "tokens-per-hour", requestId: "auto-consumed", now: clock.current });
     expect(consumed.allowed).toBe(true);
-    service.reconcile(consumed.reservationId!, 0.25, "auto-consumed-usage", clock.current);
-    const outstanding = service.admit({ identity, estimatedCost: 0.2, costUnit: "percentage-per-hour", requestId: "auto-outstanding", now: clock.current });
+    service.reconcile(consumed.reservationId!, 25, "auto-consumed-usage", clock.current);
+    const outstanding = service.admit({ identity, estimatedCost: 20, costUnit: "tokens-per-hour", requestId: "auto-outstanding", now: clock.current });
     expect(outstanding.allowed).toBe(true);
 
     clock.current = new Date(initialReset.getTime() + 60_000);
     const expired = service.snapshot(policySources).sources[0];
     expect(expired.pace).toBeNull();
     expect(expired.allowance).toBeNull();
-    const withoutFreshReading = service.admit({ identity, estimatedCost: 0.1, costUnit: "percentage-per-hour", requestId: "auto-no-reset-reading", now: clock.current });
+    const withoutFreshReading = service.admit({ identity, estimatedCost: 5, costUnit: "tokens-per-hour", requestId: "auto-no-reset-reading", now: clock.current });
     expect(withoutFreshReading.allowed).toBe(false);
     expect(withoutFreshReading.reason).toMatch(/authoritative|stale|unavailable/i);
 
@@ -111,13 +113,73 @@ describe("budget policy arithmetic", () => {
     expect(refreshed.pace).toBeCloseTo(0.3, 8);
     expect(refreshed.allowance).toBeCloseTo(0.3, 8);
 
-    const chargedByOutstanding = service.admit({ identity, estimatedCost: 0.2, costUnit: "percentage-per-hour", requestId: "auto-post-reset-blocked", now: clock.current });
+    // The new window moved 94 points over 2825 tokens (about 0.033 points per token): 9 tokens fit 0.3 points/hour.
+    const chargedByOutstanding = service.admit({ identity, estimatedCost: 5, costUnit: "tokens-per-hour", requestId: "auto-post-reset-blocked", now: clock.current });
     expect(chargedByOutstanding.allowed).toBe(false);
     service.release(outstanding.reservationId!);
-    const afterRelease = service.admit({ identity, estimatedCost: 0.2, costUnit: "percentage-per-hour", requestId: "auto-post-reset-allowed", now: clock.current });
+    const afterRelease = service.admit({ identity, estimatedCost: 5, costUnit: "tokens-per-hour", requestId: "auto-post-reset-allowed", now: clock.current });
     expect(afterRelease.allowed).toBe(true);
-    service.reconcile(afterRelease.reservationId!, 0.2, "auto-post-reset-usage", clock.current);
-    expect(service.admit({ identity, estimatedCost: 0.11, costUnit: "percentage-per-hour", requestId: "auto-post-reset-excess", now: clock.current }).allowed).toBe(false);
+    service.reconcile(afterRelease.reservationId!, 5, "auto-post-reset-usage", clock.current);
+    expect(service.admit({ identity, estimatedCost: 5, costUnit: "tokens-per-hour", requestId: "auto-post-reset-excess", now: clock.current }).allowed).toBe(false);
+  });
+
+  it("denies Auto without measured quota movement instead of assuming zero cost", () => {
+    const clock = { current: new Date(now) };
+    const service = openService(clock);
+    const identity = { source: "claude" as const, provider: "anthropic", account: "account-1", model: "claude-opus" };
+    service.setMeters([meter()]);
+    service.savePolicies([{ scope: { kind: "source", source: "claude" }, mode: "auto", unit: "percentage-per-hour", limit: null, deadline: null }], 0);
+    const none = service.admit({ identity, estimatedCost: 1, costUnit: "tokens-per-hour", now: clock.current });
+    expect(none.allowed).toBe(false);
+    expect(none.reason).toMatch(/measured quota movement.*no calibration in the current window/i);
+    expect(service.snapshot(policySources).sources[0].calibration?.percentagePointsPerMillionTokens).toBeNull();
+
+    // Tokens recorded but the quota has not moved: the ratio would be zero, which is not a measurement.
+    service.seedRecentUsage([{ scope: { kind: "source", source: "claude" }, amount: 500, eventId: "unmoved", at: new Date(clock.current.getTime() - 2 * 3_600_000) }]);
+    service.setMeters([meter({ usedPercentagePoints: 0 })]);
+    expect(service.admit({ identity, estimatedCost: 1, costUnit: "tokens-per-hour", now: clock.current }).reason).toMatch(/no calibration/i);
+
+    // Usage that predates the meter's window does not calibrate it: this 5h window began 3h ago.
+    service.setMeters([meter({ usedPercentagePoints: 10, resetAt: new Date(clock.current.getTime() + 2 * 3_600_000), window: "5h" })]);
+    service.seedRecentUsage([{ scope: { kind: "source", source: "claude" }, amount: 900, eventId: "too-old", at: new Date(clock.current.getTime() - 4 * 3_600_000) }]);
+    expect(service.snapshot(policySources).sources[0].calibration?.percentagePointsPerMillionTokens).toBe(20_000); // 10 points over the 500 tokens inside the window
+  });
+
+  it("lets the most restrictive of several provider windows decide and denies when any window is stale", () => {
+    const clock = { current: new Date(now) };
+    const service = openService(clock);
+    const identity = { source: "claude" as const, provider: "anthropic", account: "account-1", model: "claude-opus" };
+    // 7d: 28 points with 120h left paces 0.6 points/hour. 5h: 20 points with 1h left paces 80 points/hour.
+    const windows = (fiveHourUsed: number, observedAt = clock.current) => [
+      meter({ id: "anthropic:7d", usedPercentagePoints: 28, resetAt: new Date(clock.current.getTime() + 120 * 3_600_000), window: "7d", observedAt }),
+      meter({ id: "anthropic:5h", usedPercentagePoints: fiveHourUsed, resetAt: new Date(clock.current.getTime() + 3_600_000), window: "5h", observedAt }),
+    ];
+    service.setMeters(windows(20));
+    service.savePolicies([{ scope: { kind: "source", source: "claude" }, mode: "auto", unit: "percentage-per-hour", limit: null, deadline: null }], 0);
+    service.seedRecentUsage([{ scope: { kind: "source", source: "claude" }, amount: 2800, eventId: "calibration", at: new Date(clock.current.getTime() - 4 * 3_600_000) }]);
+    const snapshot = service.snapshot(policySources).sources[0];
+    expect(snapshot.meters.map((entry) => entry.id).sort()).toEqual(["anthropic:5h", "anthropic:7d"]);
+    expect(snapshot.pace).toBeCloseTo(0.6, 8); // the 7-day window is the tighter pace
+    const fits = service.admit({ identity, estimatedCost: 59, costUnit: "tokens-per-hour", now: clock.current });
+    expect(fits.allowed).toBe(true); // 59 tokens x 0.01 = 0.59 points, under the 7-day pace
+    service.release(fits.reservationId!);
+
+    // The 5-hour window is nearly spent: 99.5 points with 1 hour left paces 0.5 points/hour and now bounds admission.
+    service.setMeters(windows(99.5));
+    const tight = service.snapshot(policySources).sources[0];
+    expect(tight.pace).toBeCloseTo(0.5, 8);
+    expect(tight.meter?.id).toBe("anthropic:5h");
+    expect(service.admit({ identity, estimatedCost: 59, costUnit: "tokens-per-hour", now: clock.current }).allowed).toBe(false); // the same request the 7-day window alone admits
+
+    service.setMeters(windows(20).map((entry) => (entry.id === "anthropic:5h" ? { ...entry, observedAt: new Date(clock.current.getTime() - 6 * 60_000) } : entry)));
+    const stale = service.admit({ identity, estimatedCost: 1, costUnit: "tokens-per-hour", now: clock.current });
+    expect(stale.allowed).toBe(false);
+    expect(stale.reason).toMatch(/stale|unavailable/i);
+    expect(service.snapshot(policySources).sources[0].pace).toBeNull();
+
+    // A provider that stops supplying a window loses it, so it cannot linger and go stale.
+    service.setMeters([windows(20)[0]]);
+    expect(service.snapshot(policySources).sources[0].meters.map((entry) => entry.id)).toEqual(["anthropic:7d"]);
   });
 
   it("keeps Manual hourly usage and live reservations across edits and rolling expiry", () => {

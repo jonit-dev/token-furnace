@@ -116,8 +116,13 @@ describe("BudgetService", () => {
     service.savePolicies([{
       scope: { kind: "source", source: "claude" }, mode: "auto", unit: "percentage-per-hour", limit: null, deadline: null,
     }], 0);
-    expect(service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" }, estimatedCost: 0.59, costUnit: "percentage-per-hour", now }).allowed).toBe(true);
-    expect(service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" }, estimatedCost: 0.02, costUnit: "percentage-per-hour", now }).allowed).toBe(false);
+    // 28 points moved while 2800 weighted tokens were recorded in the window: 0.01 points per token, so 0.6 points/hour is 60 tokens.
+    service.seedRecentUsage([{ scope: { kind: "source", source: "claude" }, amount: 2800, eventId: "calibration", at: new Date(now.getTime() - 2 * 3_600_000) }]);
+    const identity = { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" } as const;
+    expect(service.snapshot(sources).sources[0].calibration).toMatchObject({ estimated: true, meterId: "anthropic:weekly", percentagePointsPerMillionTokens: 10_000 });
+    expect(service.admit({ identity, estimatedCost: 59, costUnit: "tokens-per-hour", now }).allowed).toBe(true);
+    expect(service.admit({ identity, estimatedCost: 2, costUnit: "tokens-per-hour", now }).allowed).toBe(false);
+    expect(service.admit({ identity, estimatedCost: 0.5, costUnit: "percentage-per-hour", now }).reason).toMatch(/unit/i);
     service.close();
   });
 
@@ -164,12 +169,17 @@ describe("BudgetService", () => {
       scope: { kind: "source", source: "claude" }, mode: "manual", unit: "percentage-per-hour", limit: 10,
       deadline: "2099-10-11T12:00:00.000Z",
     }], 0);
-    const reservation = percentage.service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1" }, estimatedCost: 1, costUnit: "percentage-per-hour", now });
+    // Quota reservations are weighted tokens, so native token usage reconciles them and a percentage-point reading cannot.
+    percentage.service.seedRecentUsage([{ scope: { kind: "source", source: "claude" }, amount: 1000, eventId: "calibration", at: new Date(now.getTime() - 2 * 3_600_000) }]);
+    const reservation = percentage.service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1" }, estimatedCost: 100, costUnit: "tokens-per-hour", now });
     expect(reservation.allowed).toBe(true);
-    percentage.service.reconcile(reservation.reservationId!, 12, "native-token-message", now, "tokens", "claude");
+    percentage.service.reconcile(reservation.reservationId!, 1, "native-percentage-message", now, "percentage-per-hour", "claude");
     const percentageDb = new DatabaseSync(percentage.service.dbPath);
     expect((percentageDb.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(reservation.reservationId) as { status: string }).status).toBe("reserved");
-    expect((percentageDb.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE event_id LIKE 'native-token-message:%'").get() as { count: number }).count).toBe(0);
+    expect((percentageDb.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE event_id LIKE 'native-percentage-message:%'").get() as { count: number }).count).toBe(0);
+    percentage.service.reconcile(reservation.reservationId!, 120, "native-token-message", now, "tokens", "claude");
+    expect((percentageDb.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(reservation.reservationId) as { status: string }).status).toBe("completed");
+    expect(percentageDb.prepare("SELECT unit FROM usage_events WHERE event_id LIKE 'native-token-message:%'").all()).toEqual([{ unit: "tokens-per-hour" }]);
     percentageDb.close();
     percentage.service.close();
   });

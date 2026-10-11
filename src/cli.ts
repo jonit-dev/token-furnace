@@ -21,7 +21,7 @@ import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
 import { controlTargetProof, MANAGED_ENDPOINT_PREFIX, type ControlOutcome, type NativeTarget } from "./services/agent-control";
 import type { ActualUsageUnit } from "./services/budget-service";
-import { refreshHookMeters } from "./services/budget-meters";
+import { localQuotaAccount, refreshHookMeters } from "./services/budget-meters";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
 import { claudeUpstreamProvider, runManagedNative } from "./services/native-host";
@@ -375,10 +375,11 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   const metadata = source ? resolveNativeMetadata(app, event, source, hookEvent, hintedProvider, hintedModel) : null;
   const provider = metadata?.provider ?? null;
   const model = metadata?.model ?? null;
-  const account = source ? app.budgets.verifiedAccount(source, provider, metadata?.account) : null;
+  const account = source ? app.budgets.verifiedAccount(source, provider, metadata?.account ?? (app.budgets.quotaEnabled(source) ? localQuotaAccount(app.env, source, provider) : null)) : null;
   const identity = source ? { source, provider, model, account } : null;
-  const enforcing = app.budgets.enforcing(); // Off with no latch: skip process discovery entirely
-  if (enforcing && identity && (phase === "start" || provider || model || metadata?.account || nativeFromEvent(event, identity.source))) {
+  const enforcing = app.budgets.enforcing(); // Off with no latch: skip abandonment ownership scans
+  // An installed adapter registers its sessions even while budgets are Off: emergency stops stay available.
+  if (identity && (phase === "start" || nativeFromEvent(event, identity.source))) {
     registerHookTarget(app, event, identity);
   }
   if ((reservationId || reservationIds.length || requestId || sessionId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {

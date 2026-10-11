@@ -1,8 +1,25 @@
 #!/usr/bin/env node
 /**
- * Native qualification. Every side effect is confined to explicitly dedicated homes and a
- * temporary workspace. A missing native capability is BLOCKED; a command that ran and failed is
- * FAIL. Only exercised, observed scenarios can be PASS.
+ * Native qualification for PRD-030 budgets and emergency stops.
+ *
+ * Every side effect stays inside explicitly dedicated agent homes, a temporary workspace and a
+ * temporary Token Furnace state. Real native CLIs run against real authenticated upstreams through
+ * the installed package's hooks/plugins and managed hosts (`token-furnace native run`). A missing
+ * capability or access is BLOCKED; a path that ran and produced the wrong result is FAIL. Only an
+ * exercised and observed scenario is PASS. Nothing here injects decisions or pipes hook payloads.
+ *
+ * Environment (homes must be disposable, never the personal ~/.claude, ~/.codex or OpenCode data):
+ *   TOKEN_FURNACE_QUALIFY_CLAUDE_HOME             Claude config dir with first-party login (.credentials.json)
+ *   TOKEN_FURNACE_QUALIFY_CLAUDE_OPENROUTER_HOME  Claude config dir used with ANTHROPIC_BASE_URL=OpenRouter (shared-provider legs)
+ *   TOKEN_FURNACE_QUALIFY_CODEX_HOME              CODEX_HOME with auth.json (+ an `openrouter` model provider for shared legs)
+ *   TOKEN_FURNACE_QUALIFY_OPENCODE_HOME           HOME root whose .local/share/opencode/auth.json holds the logins
+ *                                                 (legacy name: TOKEN_FURNACE_QUALIFY_OPENCODE_DATA_DIR, same meaning)
+ *   TOKEN_FURNACE_QUALIFY_OPENROUTER_KEY_FILE     file holding the OpenRouter key (read privately, passed only via env)
+ *   TOKEN_FURNACE_QUALIFY_BROWSER                 Chromium executable for the real Budgets tab
+ *   TOKEN_FURNACE_QUALIFY_BIN                     use this built CLI instead of packing/installing the repository
+ * Models (defaults in MODELS below): TOKEN_FURNACE_QUALIFY_SHARED_PROVIDER / _SHARED_MODEL,
+ *   _CLAUDE_MODEL, _CLAUDE_CHILD_MODEL, _CLAUDE_CHILD_ALIAS, _CODEX_PROVIDER, _CODEX_MODEL, _CODEX_ALT_MODEL,
+ *   _OPENCODE_MODEL, _OPENCODE_ALT_MODEL.
  */
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -11,1112 +28,1006 @@ import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 
 const supported = ["claude", "codex", "opencode"];
-const requested = parseSources(process.argv.slice(2));
-const root = resolve(dirname(new URL(import.meta.url).pathname), "..");
-let packageBin = process.env.TOKEN_FURNACE_QUALIFY_BIN || join(root, "dist", "cli.js");
-const packageVersion = readPackageVersion(root);
-const homes = {
-  claude: process.env.TOKEN_FURNACE_QUALIFY_CLAUDE_HOME,
-  codex: process.env.TOKEN_FURNACE_QUALIFY_CODEX_HOME,
-  opencode: process.env.TOKEN_FURNACE_QUALIFY_OPENCODE_DATA_DIR,
+const env = process.env;
+const MODELS = {
+  sharedProvider: env.TOKEN_FURNACE_QUALIFY_SHARED_PROVIDER || "openrouter",
+  sharedModel: env.TOKEN_FURNACE_QUALIFY_SHARED_MODEL || "nvidia/nemotron-3.5-lightning:free",
+  claude: env.TOKEN_FURNACE_QUALIFY_CLAUDE_MODEL || "claude-haiku-5-5",
+  claudeChild: env.TOKEN_FURNACE_QUALIFY_CLAUDE_CHILD_MODEL || "claude-sonnet-5-5",
+  claudeAlias: "haiku",
+  claudeChildAlias: env.TOKEN_FURNACE_QUALIFY_CLAUDE_CHILD_ALIAS || "sonnet",
+  codexProvider: env.TOKEN_FURNACE_QUALIFY_CODEX_PROVIDER || "openai",
+  codex: env.TOKEN_FURNACE_QUALIFY_CODEX_MODEL || "gpt-5.6-luna",
+  codexAlt: env.TOKEN_FURNACE_QUALIFY_CODEX_ALT_MODEL || "gpt-5.6-terra",
+  opencode: env.TOKEN_FURNACE_QUALIFY_OPENCODE_MODEL || "opencode-go/deepseek-v4.1-flash",
+  opencodeAlt: env.TOKEN_FURNACE_QUALIFY_OPENCODE_ALT_MODEL || "opencode-go/glm-5.3-flash",
 };
-const blocked = [];
-const targets = new Map();
+const QUALIFY_ADMISSION_FLOOR = 2_000_000;
+const root = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const temporary = [];
-const servers = [];
-const nativeWorkers = [];
-const QUALIFY_ADMISSION_FLOOR = 100_000;
-let runtimeBinDir;
-let sharedConfigHome;
-let sharedStateHome;
-let sharedCacheHome;
-let activeServerEnv;
+const children = new Set();
+const state = { packageBin: env.TOKEN_FURNACE_QUALIFY_BIN || "", binDir: "", version: readPackageVersion(root), workspace: "", tf: null, server: null, lanes: {}, browser: null, setup: {} };
 
-if (process.argv.includes("--self-test")) {
-  const timedOut = finishNativeResult({ status: 1, signal: "SIGTERM" }, true, "", "contract", 0);
-  const successfulAuthNarrative = { status: 0, timedOut: false, signal: null, output: "authorizing via your claude.ai connector settings did not affect this task" };
-  const claudeArgs = nativeArgs({ source: "claude" }, "/tmp", "prompt", {});
-  const resumeArgs = nativeArgs({ source: "claude" }, "/tmp", "prompt", { resumeSessionId: "native-session" });
-  const codexArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", { resumeSessionId: "thread" });
-  const codexFreshArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", {});
-  const openCodeArgs = nativeArgs({ source: "opencode" }, "/tmp", "prompt", { resumeSessionId: "session" });
-  const catalog = nativeModelTokens("openrouter/nvidia/nemotron-3.5-lightning:free\n");
-  const opencodeHome = "/tmp/qualify-opencode";
-  const opencodeEnvironment = isolatedEnv("opencode", opencodeHome);
-  const admissionLimit = admissionLimitForLedger({ used: 120, reserved: 30, recent: 8 });
-  const ids = extractNativeSessionIds('{"type":"system","session_id":"native-session"}', "claude");
-  const codexIds = extractNativeSessionIds('{"type":"thread.started","thread_id":"thread"}', "codex");
-  const openCodeIds = extractNativeSessionIds('{"sessionID":"session"}', "opencode");
-  const first = scenarioArtifacts("/tmp", "claude", "provider-stop", ["matching"]);
-  const second = scenarioArtifacts("/tmp", "claude", "provider-stop", ["matching"]);
-  const gated = delayedPrompt(first.matching, "MATCHING", first.barrier);
-  const emptyControls = { querySelector: () => null };
-  const completeControls = { querySelector: () => ({}) };
-  if (!timedOut.timedOut || !taskUnavailable(timedOut) || taskUnavailable(successfulAuthNarrative) || nativeAttemptPasses(timedOut) || budgetControlsReady(emptyControls) || !budgetControlsReady(completeControls) || claudeArgs.includes("--no-session-persistence") || !claudeArgs.includes("--output-format") || !resumeArgs.includes("--resume") || !codexArgs.includes("resume") || codexArgs.includes("-C") || !codexFreshArgs.includes("-C") || !codexArgs.includes("--json") || !openCodeArgs.includes("--session") || !openCodeArgs.includes("--format") || !ids.includes("native-session") || !codexIds.includes("thread") || !openCodeIds.includes("session") || first.matching === second.matching || !gated.includes(first.barrier) || !gated.toLowerCase().includes("only after") || opencodeEnvironment.OPENCODE_DATA_DIR !== join(opencodeHome, ".local", "share", "opencode") || catalog[0] !== "openrouter/nvidia/nemotron-3.5-lightning:free" || admissionLimit <= 150) {
-    console.error("qualification contract failed: native timeout, persistence, resume, identity, or barrier contract regressed");
+if (process.argv.includes("--self-test")) selfTest();
+else await main();
+
+async function main() {
+  const requested = parseSources(process.argv.slice(2));
+  try {
+    const problems = await discover(requested);
+    if (problems.length) {
+      console.error("BLOCKED: native authenticated budget qualification did not run.");
+      for (const problem of problems) console.error(`- ${problem}`);
+      console.error(`No provider requests, native hook decisions, process cancellations, or PASS results were fabricated. Package identity: token-furnace@${state.version || "unknown"}.`);
+      process.exitCode = 75;
+      return;
+    }
+    const startedAt = Date.now();
+    const results = await qualify(requested);
+    console.log(`DURATION ${Math.round((Date.now() - startedAt) / 1000)}s`);
+    process.exitCode = results.some((result) => result.status === "FAIL") ? 1 : results.some((result) => result.status === "BLOCKED") ? 75 : 0;
+  } catch (error) {
+    console.error(`qualification error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
     process.exitCode = 1;
-  } else {
-    console.log("qualification contract ok");
+  } finally {
+    for (const child of [...children]) await stopChild(child);
+    for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
   }
-} else {
-try {
-  await discoverPackage();
-  for (const source of requested) {
-    const target = discoverTarget(source);
-    if (target.blocked) blocked.push(target.blocked);
-    else targets.set(source, target);
-  }
-
-  if (blocked.length) {
-    printBlocked(blocked);
-    process.exitCode = 75;
-  } else {
-    const results = await qualify();
-    const failed = results.filter((result) => result.status === "FAIL");
-    const pending = results.filter((result) => result.status === "BLOCKED");
-    for (const result of results) console.log(`${result.status} ${result.scenario}: ${result.detail}`);
-    if (failed.length) process.exitCode = 1;
-    else if (pending.length) process.exitCode = 75;
-    else process.exitCode = 0;
-  }
-} finally {
-  for (const worker of nativeWorkers.splice(0)) await stopChild(worker);
-  for (const server of servers) await stopChild(server.child);
-  for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
-}
 }
 
-async function discoverPackage() {
-  if (!existsSync(packageBin)) throw new Error(`Built package entrypoint is missing: ${packageBin}`);
-  if (!existsSync(join(root, "dist", "dashboard.html"))) throw new Error("Built dashboard asset is missing; run npm run build first.");
-  if (!packageVersion) throw new Error("Package identity could not be read.");
-  if (!process.env.TOKEN_FURNACE_QUALIFY_BIN) {
-    const packageRoot = mkdtempSync(join(tmpdir(), "token-furnace-package-"));
-    const installRoot = mkdtempSync(join(tmpdir(), "token-furnace-install-"));
-    temporary.push(packageRoot, installRoot);
-    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-    const packed = spawnSync(npm, ["pack", "--pack-destination", packageRoot], { cwd: root, encoding: "utf8", env: process.env, timeout: 120_000 });
-    if (packed.error || packed.status !== 0) throw new Error(`npm pack failed: ${safeTail(packed.stderr || packed.stdout)}`);
-    const tarball = readdirSync(packageRoot).find((name) => name.endsWith(".tgz"));
-    if (!tarball) throw new Error("npm pack did not produce an installable tarball.");
-    const installed = spawnSync(npm, ["install", "--ignore-scripts", "--no-package-lock", "--no-save", "--prefix", installRoot, join(packageRoot, tarball)], { cwd: root, encoding: "utf8", env: process.env, timeout: 180_000 });
-    if (installed.error || installed.status !== 0) throw new Error(`Installed package setup failed: ${safeTail(installed.stderr || installed.stdout)}`);
-    packageBin = join(installRoot, "node_modules", "token-furnace", "dist", "cli.js");
-    if (!existsSync(packageBin)) throw new Error(`Installed package entrypoint is missing: ${packageBin}`);
-    runtimeBinDir = join(installRoot, "node_modules", ".bin");
-  }
-  if (!runtimeBinDir) {
-    runtimeBinDir = mkdtempSync(join(tmpdir(), "token-furnace-bin-"));
-    temporary.push(runtimeBinDir);
-    try {
-      symlinkSync(resolve(packageBin), join(runtimeBinDir, "token-furnace"));
-    } catch {
-      writeFileSync(join(runtimeBinDir, "token-furnace"), `#!/usr/bin/env node\nconst mod = await import(${JSON.stringify(pathToFileUrl(resolve(packageBin)))});\nprocess.exitCode = await mod.main();\n`);
-      chmodSync(join(runtimeBinDir, "token-furnace"), 0o700);
+// ------------------------------------------------------------------ discovery
+
+async function discover(requested) {
+  const problems = [];
+  if (!state.version) problems.push("package identity could not be read");
+  if (!state.packageBin) installPackage();
+  if (!existsSync(state.packageBin)) problems.push(`built package entrypoint is missing: ${state.packageBin}`);
+  if (!existsSync(join(dirname(state.packageBin), "dashboard.html"))) problems.push("installed package has no dashboard.html");
+  if (!state.binDir) {
+    state.binDir = tempDir("token-furnace-bin-");
+    try { symlinkSync(resolve(state.packageBin), join(state.binDir, "token-furnace")); }
+    catch {
+      writeFileSync(join(state.binDir, "token-furnace"), `#!/usr/bin/env node\nawait import(${JSON.stringify(`file://${resolve(state.packageBin)}`)});\n`);
+      chmodSync(join(state.binDir, "token-furnace"), 0o700);
     }
   }
-  console.log(`PACKAGE token-furnace@${packageVersion} ${packageBin}`);
-}
-
-function discoverTarget(source) {
-  const home = homes[source];
-  const label = source === "opencode" ? "OPENCODE_DATA_DIR" : `${source.toUpperCase()}_HOME`;
-  if (!home) return { blocked: `${source}: set TOKEN_FURNACE_QUALIFY_${label} to a disposable authenticated home` };
-  if (!isAbsolute(home) || !existsSync(home)) return { blocked: `${source}: qualification target is missing or not absolute` };
-  const resolved = realpathOr(home);
-  if (isPersonalTarget(resolved)) return { blocked: `${source}: qualification target resolves to a personal home` };
-  const credential = join(home, source === "claude" ? ".credentials.json" : "auth.json");
-  if (!existsSync(credential)) return { blocked: `${source}: dedicated credential file is missing` };
-  const command = source === "opencode" ? "opencode" : source;
-  const version = spawnSync(command, ["--version"], { encoding: "utf8", env: isolatedEnv(source, home), timeout: 10_000 });
-  if (version.error || version.status !== 0) return { blocked: `${source}: native executable could not be discovered` };
-  const firstLine = String(version.stdout || version.stderr).trim().split("\n")[0] || "version unavailable";
-  const helpArgs = source === "codex" ? ["exec", "--help"] : source === "opencode" ? ["run", "--help"] : ["--help"];
-  const help = spawnSync(command, helpArgs, { encoding: "utf8", env: isolatedEnv(source, home), timeout: 10_000 });
-  const capabilities = nativeCapabilities(source, `${help.stdout || ""}\n${help.stderr || ""}`);
-  console.log(`DISCOVERED ${source}: ${firstLine}`);
-  return { source, home, command, capabilities };
-}
-
-async function qualify() {
-  const results = [];
-  const browser = findBrowser();
-  const workspace = mkdtempSync(join(tmpdir(), "token-furnace-budget-qualify-"));
-  const shared = mkdtempSync(join(tmpdir(), "token-furnace-budget-state-"));
-  temporary.push(workspace, shared);
-  sharedConfigHome = join(shared, "config");
-  sharedStateHome = join(shared, "state");
-  sharedCacheHome = join(shared, "cache");
-  activeServerEnv = {
-    ...isolatedEnv(requested[0], targets.get(requested[0]).home, workspace),
-    CLAUDE_CONFIG_DIR: targets.get("claude")?.home,
-    CODEX_HOME: targets.get("codex")?.home,
-    OPENCODE_DATA_DIR: targets.get("opencode") ? opencodeDataDir(targets.get("opencode").home) : undefined,
+  console.log(`PACKAGE token-furnace@${state.version} ${state.packageBin}`);
+  const keyFile = env.TOKEN_FURNACE_QUALIFY_OPENROUTER_KEY_FILE;
+  const openRouterKey = keyFile && existsSync(keyFile) ? readFileSync(keyFile, "utf8").trim() : "";
+  const homes = {
+    claude: env.TOKEN_FURNACE_QUALIFY_CLAUDE_HOME,
+    claudeShared: env.TOKEN_FURNACE_QUALIFY_CLAUDE_OPENROUTER_HOME,
+    codex: env.TOKEN_FURNACE_QUALIFY_CODEX_HOME,
+    opencode: env.TOKEN_FURNACE_QUALIFY_OPENCODE_HOME || env.TOKEN_FURNACE_QUALIFY_OPENCODE_DATA_DIR,
   };
-  for (const path of [sharedConfigHome, sharedStateHome, sharedCacheHome]) mkdirSync(path, { recursive: true });
-  const warmups = new Map();
-  for (const source of requested) {
-    const target = targets.get(source);
-    const install = await run(packageBin, ["budgets", "enable", "--confirm"], { cwd: workspace, env: isolatedEnv(source, target.home, workspace), timeout: 20_000 });
-    if (install.status !== 0) {
-      warmups.set(source, { ok: false, detail: `adapter installation failed: ${safeTail(install.output)}` });
-      continue;
-    }
-    const sentinel = join(workspace, `${source}-warmup.sentinel`);
-    const warmup = await runNative(target, workspace, `Create the file ${sentinel} containing exactly BUDGET_WARMUP and then stop.`, 120_000);
-    const warmupSideEffect = existsSync(sentinel);
-    const warmupRegistered = nativeSessionEvidence(source, warmup);
-    warmups.set(source, { ok: nativeAttemptPasses(warmup) && warmupSideEffect && warmupRegistered, detail: `${nativeDiagnostic(source, warmup, warmupRegistered, warmupSideEffect)} output=${safeTail(warmup.output)}` });
-  }
-  let server = await startServer(activeServerEnv);
-  servers.push(server);
-
-  const modeResult = await scenarioModePolicy(server.url, browser, workspace);
-  const oldServer = server;
-  await stopChild(oldServer.child);
-  servers.splice(servers.indexOf(oldServer), 1);
-  server = await startServer(activeServerEnv, true);
-  servers.push(server);
-  const persisted = await scenarioState(server.url);
-  if (modeResult.status === "PASS" && requested.some((source) => !persisted?.policies?.some((policy) => policy.scope?.kind === "source" && policy.scope.source === source && policy.mode === "manual" && policy.limit === 1000))) {
-    modeResult.status = "FAIL";
-    modeResult.detail = "Manual browser policy did not survive the Token Furnace restart.";
-  }
-  if (modeResult.status === "PASS" && requested.some((source) => {
-    const before = modeResult.autoReadings?.find((reading) => reading.source === source)?.meter;
-    const after = persisted?.sources?.find((reading) => reading.source === source)?.meter;
-    return before && (!after || after.account !== before.account || after.window !== before.window || !Number.isFinite(Date.parse(after.observedAt ?? "")));
-  })) {
-    modeResult.status = "FAIL";
-    modeResult.detail = "The no-plan-usage restart did not preserve the authoritative quota snapshot identity and observation time.";
-  }
-  results.push(modeResult);
-  for (const source of requested) {
-    const admission = await scenarioAdmission(source, workspace, server.url, warmups.get(source));
-    const restored = await setSourcePolicy(server.url, source, sourceAdmissionLimit(source));
-    if (!restored.ok) {
-      admission.status = "FAIL";
-      admission.detail = `${admission.detail} Could not restore a generous eligible Manual policy before stop scenarios.`;
-    }
-    results.push(admission);
-  }
-  for (const source of requested) {
-    results.push(await scenarioProviderStop(source, server.url, workspace, browser));
-    results.push(await scenarioModelStop(source, server.url, workspace, browser));
-    results.push(await scenarioForceRecovery(source, server.url, workspace));
-  }
-  if (requested.length >= 2) results.push(await scenarioCrossHarness(workspace, browser));
-  else results.push({ status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "At least two requested native harnesses are required." });
-  return results;
-}
-
-async function scenarioModePolicy(url, browser, workspace) {
-  if (!browser) return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: "No supported Chromium browser was discovered." };
-  const offSource = requested[0];
-  const offSentinel = join(workspace, "mode-off-minimal.sentinel");
-  const offTask = await runNative(targets.get(offSource), workspace, `Create ${offSentinel} containing exactly MODE_OFF and then stop.`, 120_000, null);
-  if (taskUnavailable(offTask)) return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: `Default Off minimal task was unavailable: ${safeTail(offTask.output)}` };
-  if (!nativeSessionEvidence(offSource, offTask) || offTask.status !== 0 || offTask.timedOut || offTask.signal || !existsSync(offSentinel) || !decisionEvidence(offSource, offTask.requestId, offTask.startedAt, true)) {
-    return { status: "FAIL", scenario: "mode-and-policy-wiring", detail: "The real default-Off task did not create its sentinel with a correlated allow decision." };
-  }
-  const result = await driveBudgetsBrowser(browser, `${url}/#budgets`);
-  if (!result.ok) return { status: result.ran ? "FAIL" : "BLOCKED", scenario: "mode-and-policy-wiring", detail: result.detail };
-  const state = await getJson(`${url}/api/budgets`);
-  if (!state.ok || !Array.isArray(state.value?.policies) || state.value.policies.length < requested.length) {
-    return { status: "FAIL", scenario: "mode-and-policy-wiring", detail: "Browser forms did not persist all requested policies." };
-  }
-  if (requested.some((source) => !state.value.policies.some((policy) => policy.scope?.kind === "source" && policy.scope.source === source && policy.mode === "manual" && policy.limit === 1000))) {
-    return { status: "FAIL", scenario: "mode-and-policy-wiring", detail: "Browser Manual policies were not all persisted with the selected limit." };
-  }
-  const autoReadings = result.autoReadings ?? [];
-  const freshAuto = requested.every((source) => {
-    const reading = autoReadings.find((candidate) => candidate.source === source);
-    const observed = Date.parse(reading?.meter?.observedAt ?? "");
-    return reading?.policy?.mode === "auto" && Number.isFinite(reading.allowance) && reading.meter?.authoritative === true && Boolean(reading.meter.account) && Boolean(reading.meter.window) && Number.isFinite(observed) && observed <= Date.now() && Date.now() - observed <= 5 * 60_000;
-  });
-  const autoMath = requested.every((source) => {
-    const reading = autoReadings.find((candidate) => candidate.source === source);
-    const meter = reading?.meter;
-    const observed = Date.parse(meter?.observedAt ?? "");
-    const reset = Date.parse(meter?.resetAt ?? "");
-    const used = Number(meter?.usedPercentagePoints);
-    const expected = Number.isFinite(observed) && Number.isFinite(reset) && reset > Date.now() && Number.isFinite(used)
-      ? Math.max(0, 100 - used) / ((reset - Date.now()) / 3_600_000)
-      : NaN;
-    return Number.isFinite(expected) && Math.abs(Number(reading?.allowance) - expected) < 0.01;
-  });
-  if (!freshAuto || !autoMath) {
-    return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: "Auto policy lacks a fresh authoritative quota/account/window reading or matching reset-derived pace for every requested source; no PASS was substituted." };
-  }
-  return { status: "PASS", scenario: "mode-and-policy-wiring", autoReadings, detail: "Real browser rendered #budgets, saved Off/Auto/Manual, proved reset-derived Auto pacing, preserved Manual and quota snapshot state across a no-plan-usage restart, and proved an Off native task." };
-}
-
-async function scenarioState(url) {
-  const state = await getJson(`${url}/api/budgets`);
-  return state.ok && state.value?.mutationToken ? state.value : null;
-}
-
-async function resetPolicies(url) {
-  const state = await scenarioState(url);
-  if (!state) return { ok: false, value: null };
-  return postJson(`${url}/api/budgets`, state.mutationToken, {
-    expectedRevision: state.revision,
-    policies: [],
-  });
-}
-
-function identityCandidates(state) {
-  const candidates = [];
-  for (const source of state?.sources ?? []) {
-    for (const provider of source.providers ?? []) {
-      const model = (source.models ?? []).find((value) => value.startsWith(`${provider}/`)) ?? null;
-      candidates.push({
-        source: source.source,
-        provider,
-        model: model ? model.slice(provider.length + 1) : null,
-        displayModel: model,
-      });
-    }
-  }
-  return candidates;
-}
-
-function modelCandidates(state) {
-  const candidates = [];
-  for (const source of state?.sources ?? []) {
-    for (const value of source.models ?? []) {
-      const slash = value.indexOf("/");
-      if (slash <= 0 || slash === value.length - 1) continue;
-      candidates.push({ source: source.source, provider: value.slice(0, slash), model: value.slice(slash + 1), displayModel: value });
-    }
-  }
-  return candidates;
-}
-
-function mergeModelCandidates(existing, discovered) {
-  const result = [...existing];
-  const seen = new Set(result.map((candidate) => `${candidate.provider}/${candidate.model}`));
-  for (const candidate of discovered) {
-    const key = `${candidate.provider}/${candidate.model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(candidate);
-  }
-  return result;
-}
-
-async function discoverNativeModels(target, workspace) {
-  if (target.source !== "opencode") return [];
-  const result = await run(target.command, ["models"], { cwd: workspace, env: isolatedEnv(target.source, target.home, workspace), timeout: 30_000 });
-  if (result.status !== 0 || result.timedOut) return [];
-  return nativeModelTokens(result.output).map((displayModel) => {
-    const slash = displayModel.indexOf("/");
-    return { source: target.source, provider: displayModel.slice(0, slash), model: displayModel.slice(slash + 1), displayModel };
-  });
-}
-
-function nativeModelTokens(output) {
-  const models = new Set();
-  for (const match of String(output || "").matchAll(/\b([A-Za-z0-9._-]+)\/([A-Za-z0-9._:@/-]+)\b/g)) models.add(`${match[1]}/${match[2]}`);
-  return [...models];
-}
-
-async function stopPreview(url, token, scope) {
-  return postJson(`${url}/api/budgets/stop-preview`, token, { scope });
-}
-
-async function unlockScope(url, token, scope) {
-  return postJson(`${url}/api/budgets/unlock`, token, { scope });
-}
-
-async function scenarioAdmission(source, workspace, url, warmup) {
-  if (!warmup?.ok) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `Native warmup did not complete; no admission result was fabricated. ${warmup?.detail ?? "adapter setup did not run"}` };
-  const target = targets.get(source);
-  if (!target?.capabilities?.resume) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `${source} did not advertise a supported native resume route; no synthetic resume result was accepted.` };
-  const prepared = await setSourcePolicy(url, source, sourceAdmissionLimit(source));
-  if (!prepared.ok) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "Could not establish positive durable Manual headroom through the real budget API." };
-  const artifacts = scenarioArtifacts(workspace, source, "budget-admission", ["child", "background", "resume", "blocked-child", "blocked-resume", "blocked-background"]);
-  const prompt = delegationPrompt(source, artifacts.child, artifacts.background, artifacts.resume, "BUDGET_ELIGIBLE");
-  const task = await runNative(target, workspace, prompt, 120_000, null);
-  if (taskUnavailable(task)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task was unavailable: ${safeTail(task.output)}` };
-  if (!nativeAttemptPasses(task)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task ran but did not complete: ${safeTail(task.output)}` };
-  const allowed = decisionEvidence(source, task.requestId, task.startedAt, true);
-  const taskRegistered = nativeSessionEvidence(source, task);
-  const childSessions = nativeChildEvidence(source, task);
-  const childSideEffect = existsSync(artifacts.child);
-  const backgroundSideEffect = existsSync(artifacts.background);
-  if (!allowed || !taskRegistered || !childSessions || !childSideEffect || !backgroundSideEffect) {
-    const decisionReason = allowed?.reason ?? decisionEvidence(source, task.requestId, task.startedAt, false)?.reason ?? "no correlated admission decision";
-    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Eligible request evidence failed: ${nativeDiagnostic(source, task, taskRegistered, childSideEffect && backgroundSideEffect)} allowDecision=${Boolean(allowed)} decisionReason=${safeTail(decisionReason)} childSessions=${childSessions} backgroundSideEffect=${backgroundSideEffect}` };
-  }
-  const resumed = await resumeNative(target, workspace, task.nativeSessionId, resumePrompt(source, artifacts.resume, "BUDGET_RESUMED"), 120_000, null);
-  if (taskUnavailable(resumed)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The native session could not be resumed: ${safeTail(resumed.output)}` };
-  const resumedRegistered = nativeSessionEvidence(source, resumed);
-  const resumedSideEffect = existsSync(artifacts.resume);
-  const resumedSameSession = resumed.nativeSessionIds.includes(task.nativeSessionId);
-  if (!nativeAttemptPasses(resumed) || !resumedSameSession || !resumedRegistered || !resumedSideEffect) {
-    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Resume evidence failed: ${nativeDiagnostic(source, resumed, resumedRegistered, resumedSideEffect)} sameSession=${resumedSameSession}` };
-  }
-  if (!hasMeasuredUsage(source, task.startedAt)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: "The eligible native task did not leave attributable measured usage in the shared budget store." };
-  const exhausted = await setSourcePolicy(url, source, 1);
-  if (!exhausted.ok) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "Could not persist the deliberately exhausted Manual policy." };
-  const blockedTask = await runNative(target, workspace, delegationPrompt(source, artifacts.blockedChild, artifacts.blockedBackground, artifacts.blockedResume, "BUDGET_BLOCKED"), 60_000, null);
-  const denied = decisionEvidence(source, blockedTask.requestId, blockedTask.startedAt, false);
-  if (taskUnavailable(blockedTask)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The exhausted native request was unavailable, not a denial: ${safeTail(blockedTask.output)}` };
-  const blockedRegistered = nativeSessionEvidence(source, blockedTask);
-  const blockedChildSideEffect = existsSync(artifacts.blockedChild);
-  const blockedBackgroundSideEffect = existsSync(artifacts.blockedBackground);
-  if (!denied || !blockedRegistered || blockedTask.timedOut || blockedTask.signal || blockedChildSideEffect || blockedBackgroundSideEffect) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Blocked request evidence failed: ${nativeDiagnostic(source, blockedTask, blockedRegistered, blockedChildSideEffect || blockedBackgroundSideEffect)} denyDecision=${Boolean(denied)} childSideEffect=${blockedChildSideEffect} backgroundSideEffect=${blockedBackgroundSideEffect}` };
-  return { status: "PASS", scenario: `budget-admission:${source}`, detail: "Native delegation, nested/background child sessions, same-session resume, measured usage exhaustion, correlated denial, and absent child side effects were observed." };
-}
-
-function delegationPrompt(source, childSentinel, backgroundSentinel, resumeSentinel, marker) {
-  const route = source === "codex"
-    ? "Use the native Codex code-mode or spawn_agent/delegate route, including a namespaced child if the installed client supports it."
-    : source === "claude"
-      ? "Use the native Claude Agent/Task delegation route, not a direct shell write."
-      : "Use the installed OpenCode child/background delegation route; do not write the files directly from the parent.";
-  return `${route} Delegate a tiny native child task that writes exactly ${marker} to ${childSentinel}. Start a background or nested native child that writes exactly ${marker}_BACKGROUND to ${backgroundSentinel}, wait for both children, and stop the parent session without writing ${resumeSentinel}; the harness will resume this same native session. A missing native delegation path is an unavailable qualification result, not permission to write these files directly.`;
-}
-
-function resumePrompt(source, sentinel, marker) {
-  const route = source === "codex" ? "Resume the existing native thread" : source === "claude" ? "Resume the existing Claude session" : "Continue the existing OpenCode session";
-  return `${route} identified by the harness. Do not start a new session or use a direct shell write. Create ${sentinel} containing exactly ${marker}, then stop.`;
-}
-
-function decisionEvidence(source, requestId, startedAt, allowed) {
-  if (!requestId || !sharedStateHome) return null;
-  try {
-    const db = new DatabaseSync(join(sharedStateHome, "token-furnace", "budgets.sqlite"));
-    const rows = db.prepare("SELECT allowed, reason, at, request_id, session_id FROM admission_decisions WHERE source = ? AND correlation_id = ? AND request_id IS NOT NULL AND request_id <> ? AND session_id IS NOT NULL AND at >= ? ORDER BY at DESC").all(source, requestId, requestId, Math.max(0, (startedAt ?? 0) - 2_000));
-    db.close();
-    return rows.find((row) => Boolean(row.allowed) === allowed) ?? null;
-  } catch {
+  const check = (name, home, credential) => {
+    if (!home) return `${name}: set its TOKEN_FURNACE_QUALIFY_* home to a disposable authenticated home`;
+    if (!isAbsolute(home) || !existsSync(home)) return `${name}: home is missing or not absolute`;
+    if (isPersonal(realpathOr(home))) return `${name}: home resolves to a personal agent home`;
+    if (credential && !existsSync(join(home, credential))) return `${name}: dedicated credential ${credential} is missing`;
     return null;
+  };
+  for (const source of requested) {
+    const credential = source === "claude" ? ".credentials.json" : source === "codex" ? "auth.json" : join(".local", "share", "opencode", "auth.json");
+    const problem = check(source, homes[source], credential);
+    if (problem) { problems.push(problem); continue; }
+    // Claude Agent tool models are aliases; explicit alias mappings make the child model resolvable.
+    const extra = source === "claude" ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: MODELS.claude, ANTHROPIC_DEFAULT_SONNET_MODEL: MODELS.claudeChild } : openRouterKey ? { OPENROUTER_API_KEY: openRouterKey } : {};
+    const lane = makeLane(source, homes[source], extra);
+    const version = spawnSync(source, ["--version"], { encoding: "utf8", env: lane.env(), timeout: 15_000 });
+    if (version.error || version.status !== 0) { problems.push(`${source}: native executable could not be discovered`); continue; }
+    lane.version = String(version.stdout || version.stderr).trim().split("\n")[0];
+    console.log(`DISCOVERED ${source}: ${lane.version}`);
+    state.lanes[source] = lane;
   }
-}
-
-function hasMeasuredUsage(source, startedAt) {
-  try {
-    const db = new DatabaseSync(join(sharedStateHome, "token-furnace", "budgets.sqlite"));
-    const row = db.prepare("SELECT amount FROM usage_events WHERE scope_key = ? AND at >= ? AND amount > 0 ORDER BY at DESC LIMIT 1").get(`source:${source}`, Math.max(0, (startedAt ?? 0) - 2_000));
-    db.close();
-    return Boolean(row);
-  } catch {
-    return false;
+  // The shared-provider Claude lane is optional: without it, Claude shared legs are BLOCKED, not skipped.
+  if (requested.includes("claude") && !check("claude-openrouter", homes.claudeShared, null) && openRouterKey) {
+    state.lanes.claudeShared = makeLane("claude", homes.claudeShared, {
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api", ANTHROPIC_AUTH_TOKEN: openRouterKey, ANTHROPIC_API_KEY: "",
+      // OpenRouter non-Anthropic models reject deferred tool references.
+      ENABLE_TOOL_SEARCH: "false",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: MODELS.sharedModel, ANTHROPIC_DEFAULT_HAIKU_MODEL: MODELS.sharedModel, ANTHROPIC_DEFAULT_OPUS_MODEL: MODELS.sharedModel,
+    });
   }
+  state.browser = findBrowser();
+  return problems;
 }
 
-function sourceAdmissionLimit(source) {
-  let db;
-  try {
-    db = new DatabaseSync(join(sharedStateHome, "token-furnace", "budgets.sqlite"));
-    const usage = db.prepare("SELECT COALESCE(SUM(amount), 0) AS used, COALESCE(MAX(amount), 0) AS recent FROM usage_events WHERE scope_key = ? AND unit = 'tokens-total'").get(`source:${source}`);
-    const reserved = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM reservations WHERE scope_key = ? AND unit = 'tokens-total' AND status = 'reserved'").get(`source:${source}`);
-    return admissionLimitForLedger({ used: Number(usage?.used), reserved: Number(reserved?.total), recent: Number(usage?.recent) });
-  } catch {
-    return QUALIFY_ADMISSION_FLOOR;
-  } finally {
-    db?.close();
-  }
+function installPackage() {
+  // Pack first: prepack builds dist, so the installed artifact is checked afterwards (not the worktree dist).
+  const packRoot = tempDir("token-furnace-package-");
+  const installRoot = tempDir("token-furnace-install-");
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const packed = spawnSync(npm, ["pack", "--pack-destination", packRoot], { cwd: root, encoding: "utf8", env, timeout: 300_000 });
+  if (packed.error || packed.status !== 0) throw new Error(`npm pack failed: ${safeTail(packed.stderr || packed.stdout)}`);
+  const tarball = readdirSync(packRoot).find((name) => name.endsWith(".tgz"));
+  if (!tarball) throw new Error("npm pack did not produce a tarball.");
+  const installed = spawnSync(npm, ["install", "--ignore-scripts", "--no-package-lock", "--no-save", "--prefix", installRoot, join(packRoot, tarball)], { cwd: root, encoding: "utf8", env, timeout: 300_000 });
+  if (installed.error || installed.status !== 0) throw new Error(`package install failed: ${safeTail(installed.stderr || installed.stdout)}`);
+  state.packageBin = join(installRoot, "node_modules", "token-furnace", "dist", "cli.js");
+  state.binDir = join(installRoot, "node_modules", ".bin");
 }
 
-function admissionLimitForLedger(ledger) {
-  const used = Number.isFinite(ledger.used) && ledger.used > 0 ? ledger.used : 0;
-  const reserved = Number.isFinite(ledger.reserved) && ledger.reserved > 0 ? ledger.reserved : 0;
-  const recent = Number.isFinite(ledger.recent) && ledger.recent > 0 ? ledger.recent : 0;
-  return Math.max(QUALIFY_ADMISSION_FLOOR, Math.ceil(used + reserved + Math.max(1_000, recent * 100)));
-}
-
-function nativeCapabilities(source, help) {
-  const text = String(help || "");
+function makeLane(source, home, extra) {
   return {
-    resume: source === "claude" ? /--resume\s+<session-id>|--resume\b/.test(text) : source === "codex" ? /\bresume\b/.test(text) : /--session\b/.test(text),
-    sharedModelHost: source === "opencode" && /--attach\b/.test(text) && /--session\b/.test(text),
-  };
-}
-
-function extractNativeSessionIds(output, source) {
-  const ids = new Set();
-  const wanted = source === "claude"
-    ? new Set(["session_id", "sessionId"])
-    : source === "codex"
-      ? new Set(["thread_id", "threadId", "session_id", "sessionId"])
-      : new Set(["sessionID", "sessionId", "session_id"]);
-  const visit = (value, depth = 0) => {
-    if (!value || typeof value !== "object" || depth > 8) return;
-    for (const [key, child] of Object.entries(value)) {
-      if (wanted.has(key) && typeof child === "string" && child.trim()) ids.add(child.trim());
-      visit(child, depth + 1);
-    }
-  };
-  for (const line of String(output || "").split(/\r?\n/)) {
-    try { visit(JSON.parse(line)); } catch { /* diagnostics may surround JSONL events */ }
-  }
-  return [...ids];
-}
-
-function controlNativeRows(source, sessionIds, startedAt) {
-  if (!sharedStateHome || !sessionIds?.length) return [];
-  let db;
-  try {
-    db = new DatabaseSync(join(sharedStateHome, "token-furnace", "control.sqlite"));
-    return db.prepare("SELECT id, session_id, pid, process_start_time, updated_at FROM targets WHERE source = ? AND session_id IS NOT NULL AND updated_at >= ? ORDER BY updated_at DESC").all(source, Math.max(0, (startedAt ?? 0) - 5_000)).filter((row) => sessionIds.includes(row.session_id));
-  } catch {
-    return [];
-  } finally {
-    db?.close();
-  }
-}
-
-function nativeIdentityCandidates() {
-  if (!sharedStateHome) return [];
-  let db;
-  try {
-    db = new DatabaseSync(join(sharedStateHome, "token-furnace", "control.sqlite"));
-    const rows = db.prepare("SELECT source, provider, account, model, session_id FROM targets WHERE session_id IS NOT NULL AND provider IS NOT NULL AND model IS NOT NULL ORDER BY updated_at DESC").all();
-    const seen = new Set();
-    return rows.flatMap((row) => {
-      const key = `${row.source}:${row.provider}/${row.model}`;
-      if (seen.has(key)) return [];
-      seen.add(key);
-      return [{ source: row.source, provider: row.provider, account: row.account ?? null, model: row.model, displayModel: `${row.provider}/${row.model}` }];
-    });
-  } catch {
-    return [];
-  } finally {
-    db?.close();
-  }
-}
-
-function nativeSessionEvidence(source, result) {
-  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
-  return ids.length > 0 && controlNativeRows(source, ids, result?.startedAt).length > 0;
-}
-
-function nativeSessionObserved(source, result) {
-  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
-  return ids.length > 0;
-}
-
-function nativeChildEvidence(source, result) {
-  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
-  const rows = controlNativeRows(source, ids, result?.startedAt);
-  return new Set(rows.map((row) => row.session_id)).size >= 2;
-}
-
-function scenarioArtifacts(workspace, source, scenario, names) {
-  const tag = `${source}-${scenario}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const artifacts = Object.fromEntries(names.map((name) => [name, join(workspace, `${tag}-${name}.sentinel`)]));
-  artifacts.barrier = join(workspace, `${tag}-barrier`);
-  for (const name of names) artifacts[`${name}Barrier`] = join(workspace, `${tag}-${name}-barrier`);
-  return artifacts;
-}
-
-function releaseBarrier(path) {
-  writeFileSync(path, "RELEASED\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
-}
-
-function workerSessionId(worker) {
-  return worker?.sessionIds?.()[0] ?? null;
-}
-
-function workerNativeEvidence(source, worker) {
-  const ids = worker?.sessionIds?.() ?? [];
-  return ids.length > 0 && controlNativeRows(source, ids, worker.startedAt).length > 0;
-}
-
-function previewHasSafetyArrays(value) {
-  return Array.isArray(value?.targets) && Array.isArray(value?.unverified) && Array.isArray(value?.collateral);
-}
-
-function previewMatchesWorker(target, candidate, worker, hostPid = null) {
-  const sessionIds = worker?.sessionIds?.() ?? [];
-  return target.source === candidate.source && target.provider === candidate.provider && (
-    sessionIds.includes(target.id) ||
-    (candidate.source === "opencode" && hostPid !== null && target.pid === hostPid) ||
-    (candidate.source !== "opencode" && target.pid === worker.child.pid)
-  );
-}
-
-async function restartQualificationServer() {
-  if (!activeServerEnv) return null;
-  const current = servers.at(-1);
-  if (current) {
-    await stopChild(current.child);
-    servers.pop();
-  }
-  const next = await startServer(activeServerEnv, true);
-  servers.push(next);
-  return next;
-}
-
-function taskUnavailable(result) {
-  if (result?.timedOut || result?.signal) return true;
-  if (result?.status === 0) return false;
-  return /(?:\b(?:not found|unknown option|unavailable|timed out)\b|\b(?:login|auth(?:entication)?|credential(?:s)?)\b[\s\S]*?\b(?:fail(?:ed|ure)?|error|required|invalid|denied|missing|expired)\b)/i.test(result?.output ?? "");
-}
-
-function nativeDiagnostic(source, result, registered, sideEffect) {
-  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
-  return `${source} status=${result?.status ?? "unknown"} timedOut=${Boolean(result?.timedOut)} signal=${result?.signal ?? "none"} sessionSeen=${ids.length > 0} registered=${registered === undefined ? "unknown" : Boolean(registered)} sideEffect=${sideEffect === undefined ? "unknown" : Boolean(sideEffect)}`;
-}
-
-async function scenarioProviderStop(source, url, workspace, browser) {
-  const state = await scenarioState(url);
-  const scenario = `provider-stop:${source}`;
-  if (!state) return { status: "BLOCKED", scenario, detail: "Budget API was unavailable." };
-  const reset = await resetPolicies(url);
-  if (!reset.ok) return { status: "FAIL", scenario, detail: "Could not clear prior admission policies before the stop scenario." };
-  const candidates = nativeIdentityCandidates();
-  const matching = candidates.find((candidate) => candidate.source === source);
-  const matchingCandidates = matching ? candidates.filter((candidate) => candidate.provider === matching.provider) : [];
-  const unrelated = candidates.find((candidate) => candidate.provider !== matching?.provider);
-  if (!matching || new Set(matchingCandidates.map((candidate) => candidate.source)).size < 2 || !unrelated) return { status: "BLOCKED", scenario, detail: "Two real harnesses with the same observed upstream provider and an unrelated provider control were not available." };
-  const artifacts = scenarioArtifacts(workspace, source, "provider-stop", [...matchingCandidates.map((_, index) => `matching${index}`), "unrelated", "unrelatedPost", "blocked", "recovered"]);
-  const matchingWorkers = matchingCandidates.map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(artifacts[`matching${index}`], `PROVIDER_STOP_MATCHING_${index}`, artifacts[`matching${index}Barrier`]), 30_000, candidate));
-  const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(artifacts.unrelated, "PROVIDER_STOP_UNRELATED", artifacts.unrelatedBarrier), 30_000, unrelated);
-  nativeWorkers.push(...matchingWorkers.map((worker) => worker.child), unrelatedWorker.child);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  const boundaryWorkers = [...matchingWorkers, unrelatedWorker];
-  if (boundaryWorkers.some((worker) => worker.child.exitCode !== null)) {
-    const output = boundaryWorkers.map((worker) => worker.output()).join(" ");
-    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario, detail: `A provider-stop native route was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario, detail: "A provider-stop native task completed before the confirmation boundary." };
-  }
-  if (boundaryWorkers.some((worker, index) => existsSync(index < matchingWorkers.length ? artifacts[`matching${index}`] : artifacts.unrelated))) return { status: "FAIL", scenario, detail: "A stop sentinel existed before confirmation, so the boundary was not attributable." };
-  if (boundaryWorkers.some((worker, index) => !workerNativeEvidence(index < matchingCandidates.length ? matchingCandidates[index].source : unrelated.source, worker))) return { status: "FAIL", scenario, detail: "A live provider-stop worker lacked an observed native session/control registration." };
-  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
-  const preview = await stopPreview(url, state.mutationToken, { kind: "provider", provider: matching.provider });
-  if (!preview.ok) return { status: "FAIL", scenario, detail: `Provider stop preview failed: ${safeTail(preview.value?.error)}` };
-  if (!previewHasSafetyArrays(preview.value)) return { status: "FAIL", scenario, detail: "Provider preview omitted affected, unverified, or collateral entries." };
-  const selected = matchingCandidates.every((candidate, index) => (preview.value?.targets ?? []).some((target) => previewMatchesWorker(target, candidate, matchingWorkers[index])));
-  if (!selected) return { status: "BLOCKED", scenario, detail: "The real matching worker did not appear in the verified provider preview." };
-  const browserStop = await driveStopBrowser(browser, url, `button[aria-label="Stop upstream provider ${matching.provider} in all harnesses"]`, matching.provider);
-  if (!browserStop.ok) return { status: browserStop.ran ? "FAIL" : "BLOCKED", scenario, detail: browserStop.detail };
-  const stopState = await scenarioState(url);
-  const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "provider" && stop.scope.provider === matching.provider)?.operationId;
-  const operation = operationId ? await getJson(`${url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
-  if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario, detail: "The UI confirmation did not produce a completed provider stop operation." };
-  const selectedTargetIds = (preview.value?.targets ?? []).filter((target) => matchingCandidates.some((candidate, index) => previewMatchesWorker(target, candidate, matchingWorkers[index]))).map((target) => target.id);
-  if (!selectedTargetIds.length || !selectedTargetIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario, detail: "The provider stop operation lacked correlated cancelled/terminated outcomes for every preview target." };
-  releaseBarrier(artifacts.unrelatedBarrier);
-  const matchingResults = await Promise.all(matchingWorkers.map((worker) => worker.wait(8_000)));
-  const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  if (matchingResults.some((result, index) => result.timedOut || result.signal || matchingWorkers[index].child.exitCode === null) || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) {
-    return { status: "FAIL", scenario, detail: "The verified matching worker did not exit or the original unrelated provider worker failed to advance after the stop." };
-  }
-  const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${artifacts.unrelatedPost} containing exactly PROVIDER_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
-  if (taskUnavailable(unrelatedPost)) return { status: "BLOCKED", scenario, detail: `The unrelated provider did not have a usable post-stop control: ${safeTail(unrelatedPost.output)}` };
-  if (unrelatedPost.timedOut || unrelatedPost.signal || unrelatedPost.status !== 0 || !existsSync(artifacts.unrelatedPost) || !nativeSessionEvidence(unrelated.source, unrelatedPost)) return { status: "FAIL", scenario, detail: "The original unrelated provider control did not produce a new attributable post-stop sentinel." };
-  const restarted = await restartQualificationServer();
-  if (!restarted) return { status: "FAIL", scenario, detail: "Token Furnace could not restart before latch persistence verification." };
-  url = restarted.url;
-  const restartedState = await scenarioState(url);
-  if (!restartedState) return { status: "FAIL", scenario, detail: "Budget state was unavailable after the provider-stop restart." };
-  const blocked = await runNative(targets.get(matching.source), workspace, `Create ${artifacts.blocked} containing exactly PROVIDER_STOP_BLOCKED.`, 60_000, matching);
-  if (taskUnavailable(blocked)) return { status: "BLOCKED", scenario, detail: `The post-stop matching-provider launch was unavailable, not a denial: ${safeTail(blocked.output)}` };
-  if (blocked.timedOut || blocked.signal || existsSync(artifacts.blocked) || !nativeSessionEvidence(matching.source, blocked) || !decisionEvidence(matching.source, blocked.requestId, blocked.startedAt, false)) return { status: "FAIL", scenario, detail: "A fresh matching-provider launch lacked a correlated native denial or created a child side effect after restart." };
-  const unlocked = await unlockScope(url, restartedState.mutationToken, { kind: "provider", provider: matching.provider });
-  if (!unlocked.ok) return { status: "FAIL", scenario, detail: "Provider unlock failed after the verified stop." };
-  const recovered = await runNative(targets.get(matching.source), workspace, `Create ${artifacts.recovered} containing exactly PROVIDER_STOP_RECOVERED and then stop.`, 120_000, matching);
-  return !recovered.timedOut && !recovered.signal && recovered.status === 0 && existsSync(artifacts.recovered) && nativeSessionEvidence(matching.source, recovered) && Boolean(decisionEvidence(matching.source, recovered.requestId, recovered.startedAt, true))
-    ? { status: "PASS", scenario, detail: "Real matching provider workers exited, the original unrelated control advanced after a released post-confirmation barrier, the latch survived restart, and explicit unlock recovered a fresh native task." }
-    : { status: "FAIL", scenario, detail: "Explicit provider unlock did not permit a fresh native task." };
-}
-
-async function scenarioModelStop(source, url, workspace, browser) {
-  const state = await scenarioState(url);
-  const scenario = `model-stop:${source}`;
-  if (!state) return { status: "BLOCKED", scenario, detail: "Budget API was unavailable." };
-  const reset = await resetPolicies(url);
-  if (!reset.ok) return { status: "FAIL", scenario, detail: "Could not clear prior admission policies before the model scenario." };
-  const target = targets.get(source);
-  if (!target?.capabilities?.sharedModelHost) return { status: "BLOCKED", scenario, detail: `${source} did not advertise an installed shared-host model route; separate processes are not accepted as model-stop evidence.` };
-  let candidates = mergeModelCandidates([], modelCandidates(state).filter((candidate) => candidate.source === source));
-  if (candidates.length < 2) candidates = mergeModelCandidates(candidates, await discoverNativeModels(target, workspace));
-  const matching = candidates[0];
-  const unrelated = candidates.find((candidate) => candidate.model !== matching?.model && candidate.provider === matching?.provider) ?? candidates.find((candidate) => candidate.model !== matching?.model);
-  if (!matching || !unrelated) return { status: "BLOCKED", scenario, detail: "Two canonical models from the same actual native host were not discoverable; no second historical model was required when the native client exposed a model catalog." };
-  const host = await startOpenCodeHost(target, workspace);
-  if (!host) return { status: "BLOCKED", scenario, detail: "OpenCode did not expose a real shared native server for mixed-model work." };
-  nativeWorkers.push(host.child);
-  const artifacts = scenarioArtifacts(workspace, source, "model-stop", ["matching", "unrelated", "unrelatedPost", "resumeBypass", "switchBypass", "bypass", "other", "recovered"]);
-  const matchingWorker = startNative(target, workspace, delayedPrompt(artifacts.matching, "MODEL_STOP_MATCHING", artifacts.matchingBarrier), 30_000, { ...matching, hostEndpoint: host.url });
-  const unrelatedWorker = startNative(target, workspace, delayedPrompt(artifacts.unrelated, "MODEL_STOP_UNRELATED", artifacts.unrelatedBarrier), 30_000, { ...unrelated, hostEndpoint: host.url });
-  nativeWorkers.push(matchingWorker.child, unrelatedWorker.child);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (matchingWorker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) {
-    const output = `${matchingWorker.output()} ${unrelatedWorker.output()}`;
-    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario, detail: `Mixed-model native work was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario, detail: "A mixed-model native task completed before the confirmation boundary." };
-  }
-  if (existsSync(artifacts.matching) || existsSync(artifacts.unrelated) || !workerNativeEvidence(source, matchingWorker) || !workerNativeEvidence(source, unrelatedWorker)) return { status: "FAIL", scenario, detail: "The mixed-model boundary lacked unique pre-confirmation or native session evidence." };
-  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
-  const preview = await stopPreview(url, state.mutationToken, { kind: "model", provider: matching.provider, model: matching.model });
-  if (!preview.ok) return { status: "FAIL", scenario, detail: `Model stop preview failed: ${safeTail(preview.value?.error)}` };
-  if (!previewHasSafetyArrays(preview.value)) return { status: "FAIL", scenario, detail: "Model preview omitted affected, unverified, or collateral entries." };
-  const selected = (preview.value?.targets ?? []).some((item) => item.model === matching.model && item.source === source && item.pid === host.child.pid && previewMatchesWorker(item, matching, matchingWorker, host.child.pid));
-  if (!selected) return { status: "BLOCKED", scenario, detail: "The real matching model worker did not appear in the verified preview." };
-  const browserStop = await driveStopBrowser(browser, url, `button[aria-label="Stop model ${matching.provider}/${matching.model}"]`, matching.model);
-  if (!browserStop.ok) return { status: browserStop.ran ? "FAIL" : "BLOCKED", scenario, detail: browserStop.detail };
-  const stopState = await scenarioState(url);
-  const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "model" && stop.scope.provider === matching.provider && stop.scope.model === matching.model)?.operationId;
-  const operation = operationId ? await getJson(`${url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
-  if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario, detail: "The UI confirmation did not produce a completed model stop operation." };
-  const matchingTargetIds = (preview.value?.targets ?? []).filter((target) => previewMatchesWorker(target, matching, matchingWorker, host.child.pid)).map((target) => target.id);
-  if (!matchingTargetIds.length || !matchingTargetIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario, detail: "The model stop operation lacked a correlated cancelled/terminated outcome for the matching preview target." };
-  releaseBarrier(artifacts.unrelatedBarrier);
-  const matchingResult = await matchingWorker.wait(8_000);
-  const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  const matchingRegistered = nativeSessionEvidence(source, matchingResult);
-  const unrelatedRegistered = nativeSessionEvidence(source, unrelatedOriginal);
-  const unrelatedSideEffect = existsSync(artifacts.unrelated);
-  if (matchingResult.timedOut || matchingResult.signal || matchingWorker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !unrelatedSideEffect) {
-    return { status: "FAIL", scenario: "model-stop", detail: `Selective model cancellation evidence failed: matching(${nativeDiagnostic(source, matchingResult, matchingRegistered, existsSync(artifacts.matching))}) unrelated(${nativeDiagnostic(source, unrelatedOriginal, unrelatedRegistered, unrelatedSideEffect)}) originalWasLive=${unrelatedWasLive}` };
-  }
-  const restarted = await restartQualificationServer();
-  if (!restarted) return { status: "FAIL", scenario, detail: "Token Furnace could not restart before model latch persistence verification." };
-  url = restarted.url;
-  const restartedState = await scenarioState(url);
-  if (!restartedState) return { status: "FAIL", scenario, detail: "Budget state was unavailable after the model-stop restart." };
-  const oldSessionId = workerSessionId(matchingWorker);
-  const resumeBypass = await resumeNative(target, workspace, oldSessionId, `Resume the stopped session and create ${artifacts.resumeBypass}.`, 60_000, { ...matching, hostEndpoint: host.url });
-  if (resumeBypass.timedOut || resumeBypass.signal || !resumeBypass.nativeSessionIds.includes(oldSessionId) || existsSync(artifacts.resumeBypass) || !decisionEvidence(source, resumeBypass.requestId, resumeBypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A stopped model session could evade the persisted latch through native resume." };
-  const switchBypass = await resumeNative(target, workspace, oldSessionId, `Resume the stopped session while switching models and create ${artifacts.switchBypass}.`, 60_000, { ...matching, model: unrelated.model, hostEndpoint: host.url });
-  if (switchBypass.timedOut || switchBypass.signal || !switchBypass.nativeSessionIds.includes(oldSessionId) || existsSync(artifacts.switchBypass) || !decisionEvidence(source, switchBypass.requestId, switchBypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A stopped model session could evade the persisted latch through a model-switch resume." };
-  const bypass = await runNative(target, workspace, `Create ${artifacts.bypass} containing exactly MODEL_STOP_BYPASS.`, 60_000, { ...matching, hostEndpoint: host.url });
-  if (taskUnavailable(bypass)) return { status: "BLOCKED", scenario, detail: `The post-stop matching-model launch was unavailable, not a denial: ${safeTail(bypass.output)}` };
-  if (bypass.timedOut || bypass.signal || !nativeSessionObserved(source, bypass) || existsSync(artifacts.bypass) || !decisionEvidence(source, bypass.requestId, bypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A fresh matching-model launch lacked a correlated native denial or created a child side effect." };
-  const other = await runNative(target, workspace, `Create ${artifacts.other} containing exactly MODEL_STOP_OTHER.`, 120_000, { ...unrelated, hostEndpoint: host.url });
-  if (taskUnavailable(other)) return { status: "BLOCKED", scenario, detail: `The unrelated model was unavailable after selective stop: ${safeTail(other.output)}` };
-  if (other.timedOut || other.signal || other.status !== 0 || !existsSync(artifacts.other) || !nativeSessionEvidence(source, other)) return { status: "FAIL", scenario, detail: "The unrelated model did not continue after selective stop." };
-  const unlocked = await unlockScope(url, restartedState.mutationToken, { kind: "model", provider: matching.provider, model: matching.model });
-  if (!unlocked.ok) return { status: "FAIL", scenario, detail: "Model unlock failed after the verified stop." };
-  const recovered = await runNative(target, workspace, `Create ${artifacts.recovered} containing exactly MODEL_STOP_RECOVERED and then stop.`, 120_000, { ...matching, hostEndpoint: host.url });
-  return !recovered.timedOut && !recovered.signal && recovered.status === 0 && existsSync(artifacts.recovered) && nativeSessionEvidence(source, recovered) && Boolean(decisionEvidence(source, recovered.requestId, recovered.startedAt, true))
-    ? { status: "PASS", scenario, detail: "Real same-host model stop, native resume/model-switch latch resistance, unrelated original-model continuation, restart persistence, and explicit recovery were observed." }
-    : { status: "FAIL", scenario, detail: "Explicit model unlock did not permit a fresh native task." };
-}
-
-async function scenarioForceRecovery(source, url, workspace) {
-  const state = await scenarioState(url);
-  const scenario = `force-termination-recovery:${source}`;
-  if (!state) return { status: "BLOCKED", scenario, detail: "Budget API was unavailable." };
-  const reset = await resetPolicies(url);
-  if (!reset.ok) return { status: "FAIL", scenario, detail: "Could not clear prior admission policies before force recovery." };
-  const candidate = nativeIdentityCandidates().find((value) => value.source === source);
-  if (!candidate) return { status: "BLOCKED", scenario, detail: "No canonical upstream identity was observed for a dedicated real session." };
-  const unrelated = nativeIdentityCandidates().find((value) => value.provider !== candidate.provider);
-  if (!unrelated) return { status: "BLOCKED", scenario, detail: "No unrelated real upstream control was available for force-stop collateral verification." };
-  const artifacts = scenarioArtifacts(workspace, source, "force-stop", ["matching", "unrelated", "unrelatedPost", "blocked", "recovered"]);
-  const worker = startNative(targets.get(candidate.source), workspace, delayedPrompt(artifacts.matching, "FORCE_STOP", artifacts.matchingBarrier), 30_000, candidate);
-  const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(artifacts.unrelated, "FORCE_STOP_UNRELATED", artifacts.unrelatedBarrier), 30_000, unrelated);
-  nativeWorkers.push(worker.child, unrelatedWorker.child);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) {
-    const output = `${worker.output()} ${unrelatedWorker.output()}`;
-    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario, detail: `Force-stop native work was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario, detail: "A force-stop native task completed before the CLI preview boundary." };
-  }
-  if (existsSync(artifacts.matching) || existsSync(artifacts.unrelated) || !workerNativeEvidence(candidate.source, worker) || !workerNativeEvidence(unrelated.source, unrelatedWorker)) return { status: "FAIL", scenario, detail: "The force-stop boundary lacked unique pre-confirmation or native session evidence." };
-  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
-  const env = isolatedEnv(candidate.source, targets.get(candidate.source).home, workspace, candidate);
-  const preview = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider], { cwd: workspace, env, timeout: 20_000 });
-  if (preview.status !== 0) return { status: "FAIL", scenario, detail: `Installed-package stop preview failed: ${safeTail(preview.output)}` };
-  if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "FAIL", scenario, detail: "The installed-package stop preview changed a live process before confirmation." };
-  const previewValue = jsonOutput(preview.output);
-  if (!previewValue || !previewHasSafetyArrays(previewValue) || !(previewValue.targets ?? []).some((target) => previewMatchesWorker(target, candidate, worker))) return { status: "BLOCKED", scenario, detail: "Installed-package preview did not expose the verified real target and safety scope before confirmation." };
-  const normal = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
-  if (normal.status === 0 && worker.child.exitCode === null) return { status: "FAIL", scenario, detail: "The graceful CLI stop reported success while the exact owned client remained alive." };
-  if (normal.status === 0 && worker.child.exitCode !== null) {
-    const normalValue = jsonOutput(normal.output);
-    if (!normalValue || normalValue.status !== "complete" || !(normalValue.outcomes ?? []).some((outcome) => ["cancelled", "terminated"].includes(outcome.status))) return { status: "FAIL", scenario, detail: "The graceful CLI stop exited successfully without a verified complete native outcome." };
-    releaseBarrier(artifacts.unrelatedBarrier);
-    const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-    if (!unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) return { status: "FAIL", scenario, detail: "The original unrelated control did not advance after the graceful stop confirmation." };
-    const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${artifacts.unrelatedPost} containing exactly FORCE_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
-    if (taskUnavailable(unrelatedPost)) return { status: "BLOCKED", scenario, detail: `The unrelated control was unavailable after graceful cancellation: ${safeTail(unrelatedPost.output)}` };
-    if (!nativeAttemptPasses(unrelatedPost) || !existsSync(artifacts.unrelatedPost) || !nativeSessionEvidence(unrelated.source, unrelatedPost)) return { status: "FAIL", scenario, detail: "The unrelated control did not produce an attributable post-stop sentinel after graceful cancellation." };
-    const blocked = await runNative(targets.get(candidate.source), workspace, `Create ${artifacts.blocked} containing exactly FORCE_STOP_BLOCKED.`, 60_000, candidate);
-    if (taskUnavailable(blocked)) return { status: "BLOCKED", scenario, detail: `The post-stop matching launch was unavailable, not a denial: ${safeTail(blocked.output)}` };
-    if (blocked.timedOut || blocked.signal || existsSync(artifacts.blocked) || !decisionEvidence(candidate.source, blocked.requestId, blocked.startedAt, false)) return { status: "FAIL", scenario, detail: "The graceful stop latch did not deny a fresh matching launch before unlock." };
-    const unlocked = await run(packageBin, ["budgets", "unlock", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
-    if (unlocked.status !== 0) return { status: "FAIL", scenario, detail: `CLI unlock after graceful cancellation failed: ${safeTail(unlocked.output)}` };
-    const recovered = await runNative(targets.get(candidate.source), workspace, `Create ${artifacts.recovered} containing exactly FORCE_STOP_RECOVERED and then stop.`, 120_000, candidate);
-    return nativeAttemptPasses(recovered) && existsSync(artifacts.recovered) && nativeSessionEvidence(candidate.source, recovered)
-      ? { status: "PASS", scenario, detail: "Installed-package graceful cancellation verified exact target exit, original unrelated advancement, durable deny, and CLI unlock recovery; force escalation was not required and was not claimed." }
-      : { status: "FAIL", scenario, detail: `CLI unlock after graceful cancellation failed: ${safeTail(unlocked.output)}` };
-  }
-  if (normal.timedOut || worker.child.exitCode !== null) return { status: "FAIL", scenario, detail: "The graceful CLI stop did not leave a live target for separately confirmed force escalation." };
-  const normalValue = jsonOutput(normal.output);
-  if (!normalValue || normalValue.status !== "partial" || !(normalValue.outcomes ?? []).some((outcome) => ["requested", "unresolved", "failed"].includes(outcome.status))) return { status: "FAIL", scenario, detail: "The graceful CLI stop did not report an unresolved native outcome before force escalation." };
-  const force = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider, "--confirm", "--force", "--force-confirm"], { cwd: workspace, env, timeout: 20_000 });
-  const forceValue = jsonOutput(force.output);
-  const unlocked = await run(packageBin, ["budgets", "unlock", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
-  releaseBarrier(artifacts.unrelatedBarrier);
-  const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  if (force.status !== 0 || force.timedOut || !forceValue || forceValue.status !== "complete" || !(forceValue.outcomes ?? []).some((outcome) => outcome.targetId && outcome.status === "terminated") || worker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) {
-    return { status: "FAIL", scenario, detail: `Force recovery did not verify target exit without collateral termination: ${safeTail(`${force.output} ${unlocked.output}`)}` };
-  }
-  const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${artifacts.unrelatedPost} containing exactly FORCE_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
-  if (taskUnavailable(unrelatedPost)) return { status: "BLOCKED", scenario, detail: `The unrelated control was unavailable after force escalation: ${safeTail(unrelatedPost.output)}` };
-  return !unrelatedPost.timedOut && !unrelatedPost.signal && unrelatedPost.status === 0 && existsSync(artifacts.unrelatedPost) && nativeSessionEvidence(unrelated.source, unrelatedPost) && unlocked.status === 0
-    ? { status: "PASS", scenario, detail: "Installed-package graceful request required separately confirmed force escalation; exact target exit, original unrelated advancement, and CLI recovery were verified." }
-    : { status: "FAIL", scenario, detail: `Force recovery did not verify exit and unlock: ${safeTail(`${force.output} ${unlocked.output}`)}` };
-}
-
-async function scenarioCrossHarness(workspace, browser) {
-  const server = servers.at(-1);
-  if (!server) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "Token Furnace server was not available for cross-harness control." };
-  const state = await scenarioState(server.url);
-  if (!state) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "Budget API was unavailable for cross-harness control." };
-  const candidates = nativeIdentityCandidates();
-  const byIdentity = new Map();
-  for (const candidate of candidates) {
-    const key = `${candidate.provider}/${candidate.model}`;
-    const values = byIdentity.get(key) ?? [];
-    values.push(candidate);
-    byIdentity.set(key, values);
-  }
-  const entry = [...byIdentity.values()].find((values) => new Set(values.map((value) => value.source)).size >= 2);
-  if (!entry) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "No identical observed provider/model identity was supported by two real harnesses." };
-  const reset = await resetPolicies(server.url);
-  if (!reset.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Could not clear prior policies before cross-harness stop." };
-  const artifacts = scenarioArtifacts(workspace, "cross-harness", "provider-model-stop", ["worker0", "worker1", "recovered0", "recovered1"]);
-  const workers = entry.slice(0, 2).map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(artifacts[`worker${index}`], `CROSS_HARNESS_${index}`, artifacts[`worker${index}Barrier`]), 30_000, candidate));
-  nativeWorkers.push(...workers.map((worker) => worker.child));
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (workers.some((worker) => worker.child.exitCode !== null)) {
-    const output = workers.map((worker) => worker.output()).join(" ");
-    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: `Cross-harness native work was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario: "cross-harness-provider-model", detail: "A cross-harness worker completed before the confirmation boundary." };
-  }
-  if (workers.some((worker, index) => existsSync(artifacts[`worker${index}`]) || !workerNativeEvidence(entry[index].source, worker))) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness workers lacked unique pre-confirmation or native session evidence." };
-  const first = entry[0];
-  const preview = await stopPreview(server.url, state.mutationToken, { kind: "model", provider: first.provider, model: first.model });
-  if (!preview.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: `Cross-harness preview failed: ${safeTail(preview.value?.error)}` };
-  if (!previewHasSafetyArrays(preview.value)) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness preview omitted affected, unverified, or collateral entries." };
-  const selected = preview.value?.targets ?? [];
-  if (!workers.every((worker, index) => selected.some((target) => target.provider === first.provider && target.model === first.model && previewMatchesWorker(target, entry[index], worker)))) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "The common provider/model did not resolve to both real native workers." };
-  const browserStop = await driveStopBrowser(browser, server.url, `button[aria-label="Stop model ${first.provider}/${first.model}"]`, first.model);
-  if (!browserStop.ok) return { status: browserStop.ran ? "FAIL" : "BLOCKED", scenario: "cross-harness-provider-model", detail: browserStop.detail };
-  const stopState = await scenarioState(server.url);
-  const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "model" && stop.scope.provider === first.provider && stop.scope.model === first.model)?.operationId;
-  const operation = operationId ? await getJson(`${server.url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
-  if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "The UI confirmation did not produce a completed cross-harness operation." };
-  const selectedIds = selected.filter((target) => entry.some((candidate, index) => previewMatchesWorker(target, candidate, workers[index]))).map((target) => target.id);
-  if (!selectedIds.length || !selectedIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "The cross-harness operation lacked correlated native outcomes for every preview target." };
-  for (const barrier of [artifacts.worker0Barrier, artifacts.worker1Barrier]) {
-    if (existsSync(barrier)) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "A cross-harness worker barrier changed before stop confirmation." };
-  }
-  const results = await Promise.all(workers.map((worker) => worker.wait(8_000)));
-  if (!results.every((result, index) => !result.timedOut && !result.signal && workers[index].child.exitCode !== null)) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness native stop did not verify both exact client exits." };
-  const restarted = await restartQualificationServer();
-  if (!restarted) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Token Furnace could not restart before cross-harness latch verification." };
-  const restartedState = await scenarioState(restarted.url);
-  if (!restartedState) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Budget state was unavailable after cross-harness restart." };
-  const unlocked = await unlockScope(restarted.url, restartedState.mutationToken, { kind: "model", provider: first.provider, model: first.model });
-  if (!unlocked.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness unlock failed after restart." };
-  const recoveries = await Promise.all(entry.slice(0, 2).map((candidate, index) => runNative(targets.get(candidate.source), workspace, `Create ${artifacts[`recovered${index}`]} containing exactly CROSS_HARNESS_RECOVERED_${index} and then stop.`, 120_000, candidate)));
-  return recoveries.every((result, index) => nativeAttemptPasses(result) && existsSync(artifacts[`recovered${index}`]) && nativeSessionEvidence(entry[index].source, result))
-    ? { status: "PASS", scenario: "cross-harness-provider-model", detail: "The same observed upstream provider/model was stopped across two real native harnesses, exact exits were observed, the latch survived restart, and explicit unlock recovered both routes." }
-    : { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness native stop did not verify both process exits and recovery." };
-}
-
-async function setSourcePolicy(url, source, limit) {
-  const current = await getJson(`${url}/api/budgets`);
-  if (!current.ok) return current;
-  const deadline = new Date(Date.now() + 15 * 60_000).toISOString();
-  const policies = (current.value.policies ?? []).filter((policy) => !(policy.scope?.kind === "source" && policy.scope.source === source));
-  policies.push({ scope: { kind: "source", source }, mode: "manual", unit: "tokens-total", limit, deadline });
-  try {
-    const response = await fetch(`${url}/api/budgets`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-token-furnace-mutation": current.value.mutationToken, origin: url },
-      body: JSON.stringify({ expectedRevision: current.value.revision, policies }),
-    });
-    return { ok: response.ok, value: await response.json() };
-  } catch { return { ok: false, value: null }; }
-}
-
-async function postJson(url, token, body) {
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-token-furnace-mutation": token, origin: new URL(url).origin },
-      body: JSON.stringify(body),
-    });
-    return { ok: response.ok, value: await response.json() };
-  } catch {
-    return { ok: false, value: null };
-  }
-}
-
-function budgetControlsReady(document) {
-  return ["Claude Code", "Codex", "OpenCode"].every((label) => document.querySelector(`select[aria-label="${label} budget mode"]`) && document.querySelector(`button[aria-label="Save ${label} budget"]`));
-}
-
-async function driveBudgetsBrowser(browser, url) {
-  const userData = mkdtempSync(join(tmpdir(), "token-furnace-browser-"));
-  temporary.push(userData);
-  const child = spawn(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=0", `--user-data-dir=${userData}`, "about:blank"], { stdio: ["ignore", "pipe", "pipe"] });
-  let socket;
-  try {
-    const portFile = join(userData, "DevToolsActivePort");
-    const started = await waitFor(() => existsSync(portFile), 15_000);
-    if (!started) return { ok: false, ran: false, detail: "Browser did not expose a DevTools target." };
-    const port = Number(readFileSync(portFile, "utf8").split("\n")[0]);
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    const target = targets.find((item) => item.type === "page" && item.webSocketDebuggerUrl);
-    if (!target) return { ok: false, ran: false, detail: "Browser page target was unavailable." };
-    socket = await connectCdp(target.webSocketDebuggerUrl);
-    await socket.command("Page.navigate", { url });
-    const controlsReady = await waitFor(async () => Boolean(await socket.evaluate(`(${budgetControlsReady.toString()})(document)`)), 15_000);
-    if (!controlsReady) return { ok: false, ran: true, detail: "The real browser did not render all three source budget controls before the readiness deadline." };
-    const result = await socket.evaluate(`(async () => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const setValue = (element, value) => {
-        const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, "value")?.set;
-        setter?.call(element, value);
-        element.dispatchEvent(new Event("input", { bubbles: true }));
-        element.dispatchEvent(new Event("change", { bubbles: true }));
-      };
-      const labels = ["Claude Code", "Codex", "OpenCode"];
-      const autoReadings = [];
-      for (const label of labels) {
-        const mode = document.querySelector('select[aria-label="' + label + ' budget mode"]');
-        const save = document.querySelector('button[aria-label="Save ' + label + ' budget"]');
-        if (!mode || !save) return { ok: false, detail: "The " + label + " budget controls disappeared after readiness." };
-        setValue(mode, "off"); await sleep(150); save.click(); await sleep(300);
-        setValue(mode, "auto"); await sleep(150); document.querySelector('button[aria-label="Save ' + label + ' budget"]')?.click(); await sleep(400);
-        const autoState = await (await fetch('/api/budgets', { cache: 'no-store' })).json();
-        const autoSource = autoState.sources?.find((source) => source.label === label);
-        if (autoSource) autoReadings.push(autoSource);
-        setValue(mode, "manual"); await sleep(150);
-        const limit = document.querySelector('input[aria-label="' + label + ' budget limit"]');
-        if (!limit) return { ok: false, detail: "The " + label + " Manual budget limit did not render after selecting Manual." };
-        setValue(limit, "1000");
-        await sleep(100); save.click(); await sleep(300);
-      }
-      return { ok: true, budgets: document.body.innerText.includes("Budgets"), modes: document.querySelectorAll('select[aria-label$="budget mode"]').length, autoReadings };
-    })()`);
-    if (!result?.ok || !result.budgets || result.modes < 3) return { ok: false, ran: true, detail: result?.detail ?? "The real browser did not render all source mode controls." };
-    return { ok: true, ran: true, detail: "browser controls exercised", autoReadings: result.autoReadings };
-  } catch (error) {
-    return { ok: false, ran: true, detail: `Browser scenario error: ${error instanceof Error ? error.message : String(error)}` };
-  } finally {
-    socket?.close();
-    await stopChild(child);
-  }
-}
-
-async function driveStopBrowser(browser, url, selector, expectedText) {
-  if (!browser) return { ok: false, ran: false, detail: "No supported Chromium browser was discovered for UI stop confirmation." };
-  const userData = mkdtempSync(join(tmpdir(), "token-furnace-stop-browser-"));
-  temporary.push(userData);
-  const child = spawn(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=0", `--user-data-dir=${userData}`, "about:blank"], { stdio: ["ignore", "pipe", "pipe"] });
-  let socket;
-  try {
-    const portFile = join(userData, "DevToolsActivePort");
-    if (!await waitFor(() => existsSync(portFile), 15_000)) return { ok: false, ran: true, detail: "Browser did not expose a DevTools target for stop confirmation." };
-    const port = Number(readFileSync(portFile, "utf8").split("\n")[0]);
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    const target = targets.find((item) => item.type === "page" && item.webSocketDebuggerUrl);
-    if (!target) return { ok: false, ran: true, detail: "Browser page target was unavailable for stop confirmation." };
-    socket = await connectCdp(target.webSocketDebuggerUrl);
-    await socket.command("Page.navigate", { url: `${url}/#budgets` });
-    if (!await waitFor(async () => Boolean(await socket.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`)), 15_000)) return { ok: false, ran: true, detail: "The real Budgets tab did not render the requested stop control before the readiness deadline." };
-    const result = await socket.evaluate(`(async () => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const button = document.querySelector(${JSON.stringify(selector)});
-      if (!button) return { ok: false, detail: "The required stop control was not rendered in the real Budgets tab." };
-      button.click();
-      let dialog = null;
-      for (let i = 0; i < 100; i++) {
-        dialog = document.querySelector('[role="dialog"]');
-        if (dialog && !dialog.innerText.includes('Loading verified stop preview')) break;
-        await sleep(100);
-      }
-      if (!dialog) return { ok: false, detail: "The real UI did not open a stop preview dialog." };
-      const previewText = dialog.innerText;
-      if (!previewText.includes(${JSON.stringify(expectedText)})) return { ok: false, detail: 'The UI preview did not show the expected verified identity.' };
-      const confirm = [...dialog.querySelectorAll('button')].find((candidate) => candidate.textContent?.trim() === 'Confirm stop');
-      if (!confirm) return { ok: false, detail: 'The real UI did not expose an explicit stop confirmation.' };
-      confirm.click();
-      for (let i = 0; i < 150; i++) {
-        if (!document.querySelector('[role="dialog"]')) return { ok: true, previewText };
-        await sleep(100);
-      }
-      return { ok: false, detail: 'The UI stop did not complete a verified operation before its bound.' };
-    })()`);
-    return result?.ok ? { ok: true, ran: true, detail: "real UI preview and confirmation completed" } : { ok: false, ran: true, detail: result?.detail ?? "Real UI stop confirmation failed." };
-  } catch (error) {
-    return { ok: false, ran: true, detail: `Browser stop scenario error: ${error instanceof Error ? error.message : String(error)}` };
-  } finally {
-    socket?.close();
-    await stopChild(child);
-  }
-}
-
-function delayedPrompt(sentinel, marker, barrier) {
-  return barrier
-    ? `Keep this native task active and do not create ${sentinel} before the harness releases the barrier. Only after ${barrier} exists and contains RELEASED, create ${sentinel} containing exactly ${marker} and stop.`
-    : `Create the file ${sentinel} containing exactly ${marker} and then stop.`;
-}
-
-async function runNative(target, workspace, prompt, timeout, identity = null) {
-  const worker = startNative(target, workspace, prompt, timeout, identity);
-  return worker.wait(timeout);
-}
-
-async function resumeNative(target, workspace, sessionId, prompt, timeout, identity = null) {
-  if (!sessionId) return { status: -1, signal: null, timedOut: false, output: "Native session ID was not observed.", nativeSessionIds: [], nativeSessionId: null, requestId: null, startedAt: Date.now() };
-  const worker = startNative(target, workspace, prompt, timeout, { ...identity, resumeSessionId: sessionId });
-  return worker.wait(timeout);
-}
-
-async function startOpenCodeHost(target, workspace) {
-  const child = spawn(target.command, ["serve", "--hostname", "127.0.0.1", "--port", "0"], { cwd: workspace, env: isolatedEnv(target.source, target.home, workspace), stdio: ["ignore", "pipe", "pipe"] });
-  let output = "";
-  const collect = (chunk) => { output = `${output}${chunk}`.slice(-4_000); };
-  child.stdout.on("data", collect);
-  child.stderr.on("data", collect);
-  const started = await waitFor(() => /https?:\/\/127\.0\.0\.1:\d+/.test(output), 15_000);
-  const match = output.match(/https?:\/\/127\.0\.0\.1:\d+/);
-  if (!started || !match) {
-    await stopChild(child);
-    return null;
-  }
-  return { child, url: match[0] };
-}
-
-function startNative(target, workspace, prompt, timeout, identity = null) {
-  if (!target) throw new Error("Native target was not discovered.");
-  const sessionId = `qualify-${target.source}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const requestId = identity?.requestId ?? sessionId;
-  const args = nativeArgs(target, workspace, prompt, identity);
-  const child = spawn(target.command, args, { cwd: workspace, env: isolatedEnv(target.source, target.home, workspace, { ...identity, sessionId, requestId }), stdio: ["ignore", "pipe", "pipe"] });
-  const startedAt = Date.now();
-  let output = "";
-  let parsedOutput = "";
-  const observedSessionIds = new Set();
-  const collect = (chunk) => {
-    output = `${output}${chunk}`.slice(-6_000);
-    parsedOutput = `${parsedOutput}${chunk}`.slice(-32_000);
-    for (const id of extractNativeSessionIds(parsedOutput, target.source)) observedSessionIds.add(id);
-  };
-  child.stdout.on("data", collect);
-  child.stderr.on("data", collect);
-  const sessionIds = () => extractNativeSessionIds(output, target.source);
-  return {
-    child,
-    sessionIds,
-    startedAt,
-    output: () => output,
-    wait: (waitTimeout = timeout) => new Promise((resolvePromise) => {
-      let settled = false;
-      let timer;
-      let timedOut = false;
-      const finish = (result) => { if (settled) return; settled = true; clearTimeout(timer); resolvePromise(finishNativeResult({ ...result, source: target.source }, timedOut, output, requestId, startedAt, [...observedSessionIds])); };
-      if (child.exitCode !== null || child.signalCode) {
-        finish({ status: child.exitCode ?? 1, signal: child.signalCode });
-        return;
-      }
-      timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 1_000).unref(); }, waitTimeout).unref();
-      child.once("error", (error) => finish({ status: -1, output: error.message }));
-      child.once("exit", (status, signal) => finish({ status: status ?? (signal ? 1 : -1), signal }));
+    source, home,
+    env: (more = {}) => ({
+      ...env,
+      HOME: source === "opencode" ? home : env.HOME,
+      CLAUDE_CONFIG_DIR: source === "claude" ? home : undefined,
+      CODEX_HOME: source === "codex" ? home : undefined,
+      XDG_CONFIG_HOME: source === "opencode" ? join(home, ".config") : env.XDG_CONFIG_HOME,
+      XDG_DATA_HOME: source === "opencode" ? join(home, ".local", "share") : env.XDG_DATA_HOME,
+      XDG_STATE_HOME: source === "opencode" ? join(home, ".local", "state") : env.XDG_STATE_HOME,
+      XDG_CACHE_HOME: source === "opencode" ? join(home, ".cache") : env.XDG_CACHE_HOME,
+      ...(state.tf ?? {}),
+      ...extra,
+      ...more,
+      PATH: `${state.binDir}:${env.PATH || ""}`,
     }),
   };
 }
 
-function finishNativeResult(result, timedOut, output, requestId, startedAt, observedSessionIds = []) {
-  const source = result.source ?? null;
-  const nativeSessionIds = result.nativeSessionIds ?? (observedSessionIds.length ? observedSessionIds : extractNativeSessionIds(output, source || "claude"));
-  return { ...result, timedOut: result.timedOut ?? timedOut, output, requestId, startedAt, nativeSessionIds, nativeSessionId: nativeSessionIds[0] ?? null };
+// ------------------------------------------------------------------ orchestration
+
+async function qualify(requested) {
+  state.workspace = tempDir("token-furnace-budget-qualify-");
+  const shared = tempDir("token-furnace-budget-state-");
+  state.tf = { TOKEN_FURNACE_CONFIG_HOME: join(shared, "config"), TOKEN_FURNACE_STATE_HOME: join(shared, "state"), TOKEN_FURNACE_CACHE_HOME: join(shared, "cache") };
+  for (const path of Object.values(state.tf)) mkdirSync(path, { recursive: true });
+  for (const [name, lane] of Object.entries(state.lanes)) {
+    const install = await run(process.execPath, [state.packageBin, "budgets", "enable", "--confirm"], { cwd: state.workspace, env: lane.env(), timeout: 60_000 });
+    state.setup[name] = install.status === 0 ? null : `adapter installation failed: ${safeTail(install.output)}`;
+    console.log(`SETUP ${name}: ${state.setup[name] ?? "budgets enable --confirm installed native adapters"}`);
+  }
+  await startServer();
+  const results = [];
+  const mode = await scenarioModePolicy(requested);
+  results.push(mode);
+  for (const source of requested) results.push(await scenarioAdmission(source));
+  const providerStop = await scenarioProviderStop(requested);
+  for (const source of requested) {
+    results.push(providerStop[source]);
+    results.push(await scenarioModelStop(source));
+    results.push(await scenarioForceRecovery(source));
+  }
+  results.push(requested.length >= 2 ? await scenarioCrossHarness(requested) : blocked("cross-harness-provider-model", "At least two requested native harnesses are required."));
+  return results;
 }
 
-function nativeAttemptPasses(result) {
-  return result?.status === 0 && !result?.timedOut && !result?.signal;
+// Each result prints as soon as it is decided, so a long run shows progress.
+function report(status, scenario, detail) { console.log(`${status} ${scenario}: ${detail}`); return { status, scenario, detail }; }
+function pass(scenario, detail) { return report("PASS", scenario, detail); }
+function fail(scenario, detail) { return report("FAIL", scenario, detail); }
+function blocked(scenario, detail) { return report("BLOCKED", scenario, detail); }
+
+// ------------------------------------------------------------------ 1. mode and policy
+
+async function scenarioModePolicy(requested) {
+  const id = "mode-and-policy-wiring";
+  if (!state.browser) return blocked(id, "No Chromium browser was discovered (TOKEN_FURNACE_QUALIFY_BROWSER).");
+  await resetPolicies();
+  const lane = state.lanes[requested[0]];
+  const offSentinel = artifact("mode-off");
+  const off = await oneShot(lane, shellPrompt(`echo MODE_OFF > ${offSentinel}`), { model: defaultModel(lane.source) });
+  if (unavailable(off)) return blocked(id, `Default-Off minimal ${lane.source} task was unavailable: ${safeTail(off.output)}`);
+  if (!completed(off) || !existsSync(offSentinel) || !decision(lane.source, off.requestId, off.startedAt, true)) return fail(id, `Default-Off ${lane.source} task lacked its sentinel or correlated allow decision (${nativeSummary(off)}).`);
+  // Exported/snapshot pages carry no mutation token, and a tokenless write is rejected without changes.
+  const before = await budgetState();
+  const page = await fetch(`${state.server.url}/dashboard.html`).then((response) => response.text()).catch(() => "");
+  const tokenless = await fetch(`${state.server.url}/api/budgets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: before?.revision, policies: [] }) }).then((response) => response.status).catch(() => 0);
+  const after = await budgetState();
+  if (!before?.mutationToken || page.includes(before.mutationToken) || tokenless !== 403 || after?.revision !== before.revision) return fail(id, `Read-only protections failed: snapshotHasToken=${page.includes(before?.mutationToken ?? "\u0000")} tokenlessStatus=${tokenless} revisionChanged=${after?.revision !== before?.revision}.`);
+  const browser = await driveBudgetsBrowser();
+  if (!browser.ok) return browser.ran ? fail(id, browser.detail) : blocked(id, browser.detail);
+  const saved = await budgetState();
+  if (requested.some((source) => !hasManualPolicy(saved, source, 1000))) return fail(id, "Browser Manual policies were not all persisted with the selected limit.");
+  await restartServer(true);
+  const persisted = await budgetState();
+  if (requested.some((source) => !hasManualPolicy(persisted, source, 1000))) return fail(id, "Manual browser policies did not survive a Token Furnace restart.");
+  const autoProblems = requested.flatMap((source) => {
+    const reading = browser.autoReadings.find((candidate) => candidate.source === source);
+    const meter = reading?.meter;
+    const observed = Date.parse(meter?.observedAt ?? "");
+    const reset = Date.parse(meter?.resetAt ?? "");
+    const used = Number(meter?.usedPercentagePoints);
+    if (reading?.policy?.mode !== "auto" || !meter?.authoritative || !meter.account || !meter.window || !Number.isFinite(observed) || Date.now() - observed > 5 * 60_000) return [`${source}: no fresh authoritative account/window quota (${meter ? `authoritative=${meter.authoritative} account=${Boolean(meter.account)} window=${meter.window ?? "none"} observedAt=${meter.observedAt ?? "none"}` : "meter=null"})`];
+    const expected = Math.max(0, 100 - used) / ((reset - observed) / 3_600_000);
+    if (!Number.isFinite(expected) || Math.abs(Number(reading.allowance) - expected) > Math.max(0.01, expected * 0.02)) return [`${source}: Auto allowance ${reading.allowance} does not equal remaining/hours-to-reset ${expected.toFixed(3)}`];
+    const kept = persisted?.sources?.find((candidate) => candidate.source === source)?.meter;
+    if (!kept || kept.account !== meter.account || kept.window !== meter.window || kept.observedAt !== meter.observedAt) return [`${source}: restart did not preserve the quota snapshot identity/observation time`];
+    return [];
+  });
+  if (autoProblems.length) return blocked(id, `UI Off/Auto/Manual saves, restart persistence, read-only protection and an Off ${lane.source} task passed, but Auto is not qualified: ${autoProblems.join("; ")}.`);
+  return pass(id, `Real browser saved Off/Auto/Manual for ${requested.join(", ")}; Auto equals remaining/hours-to-reset from fresh authoritative meters; Manual and meter snapshots survived restart; tokenless/snapshot writes rejected; Off ${lane.source} task allowed.`);
 }
 
-function nativeArgs(target, workspace, prompt, identity) {
-  const model = identity?.model;
-  return target.source === "claude"
-    ? ["-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", ...(identity?.resumeSessionId ? ["--resume", identity.resumeSessionId] : []), ...(model ? ["--model", model] : []), prompt]
-    : target.source === "codex"
-      ? ["exec", ...(identity?.resumeSessionId ? ["resume", identity.resumeSessionId] : []), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", ...(identity?.resumeSessionId ? [] : ["-C", workspace]), "--json", ...(model ? ["-m", model] : []), prompt]
-      : ["run", ...(identity?.resumeSessionId ? ["--session", identity.resumeSessionId] : []), ...(identity?.hostEndpoint ? ["--attach", identity.hostEndpoint] : []), "--dir", workspace, "--auto", "--format", "json", ...(identity?.provider && model ? ["--model", `${identity.provider}/${model}`] : []), prompt];
+// ------------------------------------------------------------------ 2-4. budget admission
+
+async function scenarioAdmission(source) {
+  const id = `budget-admission:${source}`;
+  const lane = state.lanes[source];
+  if (!lane || state.setup[source]) return blocked(id, state.setup[source] ?? "Native lane is unavailable.");
+  await resetPolicies();
+  if (!(await setSourcePolicy(source, admissionLimit(source))).ok) return fail(id, "Could not persist a positive Manual source budget through the API.");
+  const child = artifact(`${source}-child`);
+  const background = artifact(`${source}-background`);
+  const eligible = await delegate(lane, child, background, "BUDGET_ELIGIBLE");
+  if (unavailable(eligible.result)) return blocked(id, `Eligible ${source} delegation was unavailable: ${safeTail(eligible.result.output)}`);
+  const allowed = decision(source, eligible.result.requestId, eligible.result.startedAt, true);
+  const missing = [
+    !completed(eligible.result) && `run=${nativeSummary(eligible.result)}`,
+    !allowed && "no correlated allow decision",
+    !eligible.children.length && "no native child evidence",
+    !existsSync(child) && "child sentinel missing",
+    eligible.background && !existsSync(background) && "background sentinel missing",
+    !eligible.sessionId && "no native session id",
+  ].filter(Boolean);
+  if (missing.length) return fail(id, `Eligible delegation evidence failed: ${missing.join(", ")}.`);
+  const resumeSentinel = artifact(`${source}-resume`);
+  const resumed = await oneShot(lane, shellPrompt(`echo BUDGET_RESUMED > ${resumeSentinel}`), { resume: eligible.sessionId, model: defaultModel(source) });
+  if (unavailable(resumed)) return blocked(id, `Native resume was unavailable: ${safeTail(resumed.output)}`);
+  if (!completed(resumed) || !existsSync(resumeSentinel) || !resumed.sessionIds.includes(eligible.sessionId) || !decision(source, resumed.requestId, resumed.startedAt, true)) return fail(id, `Same-session resume evidence failed (${nativeSummary(resumed)} sameSession=${resumed.sessionIds.includes(eligible.sessionId)}).`);
+  const used = measuredUsage(source, eligible.result.startedAt);
+  if (!used) return fail(id, "Eligible native work left no attributable measured usage in the budget store.");
+  if (!(await setSourcePolicy(source, Math.max(1, Math.floor(used / 2)))).ok) return fail(id, "Could not persist the exhausted Manual policy.");
+  const blockedChild = artifact(`${source}-blocked-child`);
+  const blockedBackground = artifact(`${source}-blocked-background`);
+  const denied = await delegate(lane, blockedChild, blockedBackground, "BUDGET_BLOCKED", 120_000);
+  const denial = decision(source, denied.result.requestId, denied.result.startedAt, false);
+  const blockedResume = artifact(`${source}-blocked-resume`);
+  const resumeDenied = await oneShot(lane, shellPrompt(`echo BUDGET_BLOCKED_RESUME > ${blockedResume}`), { resume: eligible.sessionId, model: defaultModel(source), timeout: 120_000 });
+  const resumeDenial = decision(source, resumeDenied.requestId, resumeDenied.startedAt, false);
+  const leaks = [existsSync(blockedChild) && "child sentinel", existsSync(blockedBackground) && "background sentinel", denied.children.length && "native child", existsSync(blockedResume) && "resume sentinel"].filter(Boolean);
+  if (!denial || !resumeDenial || leaks.length) return fail(id, `Exhausted-budget evidence failed: delegationDenied=${Boolean(denial)} resumeDenied=${Boolean(resumeDenial)} leaked=[${leaks.join(", ")}].`);
+  return pass(id, `Real ${source} delegation (${eligible.children.length} native child${eligible.background ? " incl. background" : ""}) allowed with correlated decision; same-session resume allowed; ${used} measured weighted tokens; after exhausting the Manual limit the real hook denied delegation ("${safeTail(denial.reason)}") and resume, with no child or sentinel.`);
 }
 
-function isolatedEnv(source, home, workspace = undefined, identity = null) {
+/** One real delegation through the source's native child route; returns native child evidence. */
+async function delegate(lane, child, background, marker, timeout = 300_000) {
+  if (lane.source === "claude") {
+    const prompt = `Do exactly these steps and never write these files yourself. 1) Use the Agent tool with subagent_type "general-purpose" and model "${MODELS.claudeAlias}", prompt: "Run this one shell command and nothing else: echo ${marker} > ${child}". 2) Use the Agent tool with run_in_background=true, subagent_type "general-purpose", model "${MODELS.claudeAlias}", prompt: "Run this one shell command and nothing else: echo ${marker}_BACKGROUND > ${background}". 3) Wait for the background agent's completion notification, then reply DONE.`;
+    const host = startManaged(lane, ["--model", MODELS.claude, "--prompt", prompt, "--", "--dangerously-skip-permissions"]);
+    const result = await host.wait(timeout);
+    const events = result.events;
+    const children = unique(events.flatMap((event) => event.type === "system" && event.subtype === "task_started" && event.subagent_type ? [event.task_id] : []));
+    return { result, sessionId: events.find((event) => event.type === "system" && event.subtype === "init")?.session_id ?? null, children, background: true };
+  }
+  if (lane.source === "codex") {
+    const prompt = `Use the spawn_agent tool to start exactly one sub-agent with this task: "Run this one shell command and nothing else: echo ${marker} > ${child}". Then use the wait tool until it finishes, then reply DONE. Never write the file yourself.`;
+    const result = await oneShot(lane, prompt, { model: MODELS.codex, provider: MODELS.codexProvider, timeout });
+    const children = unique(result.events.flatMap((event) => event.item?.type === "collab_tool_call" && event.item.tool === "spawn_agent" ? event.item.receiver_thread_ids ?? [] : []));
+    return { result, sessionId: result.sessionIds[0] ?? null, children, background: false };
+  }
+  const prompt = `Use the task tool to delegate this job to a general subagent: "Run this one shell command and nothing else: echo ${marker} > ${child}". Never write the file yourself. Then reply DONE.`;
+  const result = await oneShot(lane, prompt, { model: MODELS.opencode, timeout });
+  const children = unique(result.events.flatMap((event) => {
+    const metadata = event.part?.tool === "task" ? event.part.state?.metadata : null;
+    return metadata?.sessionId && metadata.sessionId !== metadata.parentSessionId ? [metadata.sessionId] : [];
+  }));
+  return { result, sessionId: result.sessionIds[0] ?? null, children, background: false };
+}
+
+// ------------------------------------------------------------------ 5,8,11. provider stop (one shared run)
+
+async function scenarioProviderStop(requested) {
+  const ids = Object.fromEntries(requested.map((source) => [source, `provider-stop:${source}`]));
+  const all = (make) => Object.fromEntries(requested.map((source) => [source, make(ids[source], source)]));
+  const provider = MODELS.sharedProvider;
+  if (!state.browser) return all((id) => blocked(id, "No Chromium browser for the real UI stop confirmation."));
+  const lanes = sharedLanes(requested);
+  const missing = requested.filter((source) => !lanes[source]);
+  if (Object.keys(lanes).length < 2) return all((id) => blocked(id, `Fewer than two harnesses can reach the shared upstream ${provider} (missing: ${missing.join(", ")}).`));
+  await permissivePolicies();
+  const run = await startProviderWorkers(lanes, provider);
+  try {
+    const ready = await run.ready();
+    if (!ready.ok) return all((id, source) => (lanes[source] ? (ready.unavailable ? blocked : fail)(id, ready.detail) : blocked(id, `${source} cannot reach ${provider}.`)));
+    const preview = await stopPreview({ kind: "provider", provider });
+    const unmatched = run.matching.filter((worker) => !preview?.targets?.some((target) => worker.matches(target)));
+    if (unmatched.length) return all((id) => fail(id, `Stop preview omitted matching workers: ${unmatched.map((worker) => worker.label).join(", ")}.`));
+    const operationStart = Date.now();
+    const ui = await driveStopBrowser(`button[aria-label="Stop upstream provider ${provider} in all harnesses"]`, provider);
+    if (!ui.ok) return all((id) => (ui.ran ? fail : blocked)(id, ui.detail));
+    const operation = await latestOperation({ kind: "provider", provider }, operationStart);
+    await run.releaseControls();
+    const ceased = await run.matchingCeased();
+    const controls = await run.controlsAdvanced();
+    await restartServer(true);
+    const latched = (await budgetState())?.stops?.some((stop) => sameScope(stop.scope, { kind: "provider", provider }));
+    const fresh = {};
+    for (const source of Object.keys(lanes)) fresh[source] = await freshDenied(lanes[source], source, sharedModelFor(source), provider);
+    const unlocked = await unlock({ kind: "provider", provider });
+    const recovered = {};
+    for (const source of Object.keys(lanes)) recovered[source] = await freshAllowed(lanes[source], source, sharedModelFor(source));
+    return all((id, source) => {
+      if (!lanes[source]) return blocked(id, `${source} cannot reach the shared upstream ${provider}.`);
+      const worker = run.matching.find((candidate) => candidate.source === source);
+      const outcome = operation?.outcomes?.find((candidate) => worker.matches({ id: candidate.targetId }));
+      const problems = [
+        !operation && "no stop operation",
+        !["cancelled", "terminated"].includes(outcome?.status) && `outcome=${outcome?.status ?? "missing"}`,
+        !ceased[source] && "matching native work did not reach a terminal state",
+        !controls.ok && `unrelated controls did not advance (${controls.detail})`,
+        !latched && "latch missing after restart",
+        !fresh[source].ok && `fresh launch not denied (${fresh[source].detail})`,
+        !unlocked && "unlock failed",
+        !recovered[source].ok && `post-unlock task not allowed (${recovered[source].detail})`,
+      ].filter(Boolean);
+      if (problems.length) return (fresh[source].unavailable || recovered[source].unavailable ? blocked : fail)(id, `Provider ${provider} stop: ${problems.join("; ")}.`);
+      return pass(id, `UI Stop provider ${provider} across ${Object.keys(lanes).join("+")}: ${source} worker ${outcome.status} (${ceased[source]}); unrelated ${controls.detail}; latch survived restart; fresh ${source} launch denied; unlock allowed a fresh task.`);
+    });
+  } finally {
+    await run.stop();
+  }
+}
+
+async function startProviderWorkers(lanes, provider) {
+  const matching = [];
+  const controls = [];
+  let host = null;
+  for (const [source, lane] of Object.entries(lanes)) {
+    const barrier = artifact(`${source}-provider-barrier`);
+    const sentinel = artifact(`${source}-provider-match`);
+    if (source === "claude") matching.push(managedWorker(lane, "claude", `claude/${provider}`, ["--model", MODELS.sharedModel, "--prompt", shellPrompt(gated(barrier, `echo PROVIDER_MATCH > ${sentinel}`)), "--", "--dangerously-skip-permissions"], { sentinel, barrier, provider }));
+    else if (source === "codex") {
+      const controlSentinel = artifact("codex-provider-control");
+      const controlBarrier = artifact("codex-provider-control-barrier");
+      const worker = managedWorker(lane, "codex", `codex/${provider}`, ["--provider", provider, "--model", MODELS.sharedModel, "--prompt", shellPrompt(gated(barrier, `echo PROVIDER_MATCH > ${sentinel}`)),
+        "--thread-provider", MODELS.codexProvider, "--thread-model", MODELS.codex, "--thread-prompt", shellPrompt(gated(controlBarrier, `echo PROVIDER_CONTROL > ${controlSentinel}`)), ...codexHostArgs()], { sentinel, barrier, provider });
+      matching.push(worker);
+      controls.push({ label: `codex/${MODELS.codexProvider} thread in the same app-server`, sentinel: controlSentinel, barrier: controlBarrier, worker: worker.view({ provider: MODELS.codexProvider, model: MODELS.codex }, "codex control thread") });
+    } else {
+      host ??= await startOpenCodeHost(lane);
+      if (!host) return { ready: async () => ({ ok: false, unavailable: true, detail: "opencode serve did not start." }), matching, stop: async () => {} };
+      matching.push(openCodeWorker(lane, host, `opencode/${provider}`, `${provider}/${MODELS.sharedModel}`, shellPrompt(gated(barrier, `echo PROVIDER_MATCH > ${sentinel}`)), { sentinel, barrier, provider }));
+      const controlSentinel = artifact("opencode-provider-control");
+      const controlBarrier = artifact("opencode-provider-control-barrier");
+      controls.push({ label: `opencode ${MODELS.opencode} session in the same server`, sentinel: controlSentinel, barrier: controlBarrier, worker: openCodeWorker(lane, host, "opencode/control", MODELS.opencode, shellPrompt(gated(controlBarrier, `echo PROVIDER_CONTROL > ${controlSentinel}`)), { provider: MODELS.opencode.split("/")[0] }) });
+    }
+  }
+  if (state.lanes.claude) {
+    const controlSentinel = artifact("claude-provider-control");
+    const controlBarrier = artifact("claude-provider-control-barrier");
+    controls.push({ label: "claude first-party session", sentinel: controlSentinel, barrier: controlBarrier, worker: managedWorker(state.lanes.claude, "claude", "claude/anthropic", ["--model", MODELS.claude, "--prompt", shellPrompt(gated(controlBarrier, `echo PROVIDER_CONTROL > ${controlSentinel}`)), "--", "--dangerously-skip-permissions"], { provider: "anthropic" }) });
+  }
+  const everyone = [...matching, ...controls.map((control) => control.worker)];
   return {
-    ...process.env,
-    HOME: home,
-    CLAUDE_CONFIG_DIR: source === "claude" ? home : undefined,
-    CODEX_HOME: source === "codex" ? home : undefined,
-    OPENCODE_DATA_DIR: source === "opencode" ? opencodeDataDir(home) : undefined,
-    XDG_CONFIG_HOME: join(home, ".config"),
-    XDG_DATA_HOME: join(home, ".local", "share"),
-    XDG_STATE_HOME: join(home, ".local", "state"),
-    TOKEN_FURNACE_CONFIG_HOME: sharedConfigHome,
-    TOKEN_FURNACE_STATE_HOME: sharedStateHome,
-    TOKEN_FURNACE_CACHE_HOME: sharedCacheHome,
-    TOKEN_FURNACE_CONTROL_TARGET: "1",
-    TOKEN_FURNACE_SOURCE: source,
-    TOKEN_FURNACE_EXCLUSIVE: "1",
-    TOKEN_FURNACE_QUALIFY_REQUEST_ID: identity?.requestId,
-    TOKEN_FURNACE_QUALIFY_WORKSPACE: workspace,
-    PATH: qualifyPath(),
+    matching,
+    ready: async () => {
+      const ok = await waitFor(() => everyone.every((worker) => worker.registered() || worker.exited()), 240_000);
+      const missingWorkers = everyone.filter((worker) => !worker.registered());
+      if (!ok || missingWorkers.length) {
+        const exited = missingWorkers.filter((worker) => worker.exited());
+        return { ok: false, unavailable: exited.some((worker) => unavailable(worker.result())), detail: `Workers never registered a running native target with the expected provider: ${missingWorkers.map((worker) => `${worker.label}(${worker.exited() ? nativeSummary(worker.result()) : "running"})`).join(", ")}.` };
+      }
+      return { ok: true };
+    },
+    releaseControls: async () => { for (const control of controls) release(control.barrier); },
+    matchingCeased: async () => {
+      const out = {};
+      for (const worker of matching) out[worker.source] = await worker.ceased();
+      return out;
+    },
+    controlsAdvanced: async () => {
+      const ok = await waitFor(() => controls.every((control) => existsSync(control.sentinel)), 180_000);
+      const stuck = controls.filter((control) => !existsSync(control.sentinel)).map((control) => control.label);
+      return { ok: ok && controls.length > 0 && !stuck.length && matching.every((worker) => !existsSync(worker.sentinel)), detail: controls.length ? (stuck.length ? `stuck: ${stuck.join(", ")}` : `${controls.map((control) => control.label).join(", ")} wrote post-stop sentinels; matching sentinels absent`) : "no unrelated control available" };
+    },
+    stop: async () => { for (const worker of everyone) await worker.stop(); if (host) await stopChild(host.child); },
   };
 }
 
-function opencodeDataDir(home) {
-  return join(home, ".local", "share", "opencode");
-}
+// ------------------------------------------------------------------ 6,9,12. model stop
 
-function qualifyPath() {
-  return `${runtimeBinDir || dirname(resolve(packageBin))}:${process.env.PATH || ""}`;
-}
-
-function findBrowser() {
-  const candidates = [process.env.TOKEN_FURNACE_QUALIFY_BROWSER, "chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"].filter(Boolean);
-  for (const candidate of candidates) {
-    const result = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 5_000 });
-    if (!result.error && result.status === 0) return candidate;
+async function scenarioModelStop(source) {
+  const id = `model-stop:${source}`;
+  const lane = state.lanes[source];
+  if (!lane || state.setup[source]) return blocked(id, state.setup[source] ?? "Native lane is unavailable.");
+  if (!state.browser) return blocked(id, "No Chromium browser for the real UI stop confirmation.");
+  await permissivePolicies();
+  const targetBarrier = artifact(`${source}-model-target-barrier`);
+  const targetSentinel = artifact(`${source}-model-target`);
+  const keepBarrier = artifact(`${source}-model-keep-barrier`);
+  const keepSentinel = artifact(`${source}-model-keep-post`);
+  let host = null;
+  let target;
+  let keep;
+  try {
+    if (source === "claude") {
+      const prompt = `Do exactly these steps. 1) Use the Agent tool once with run_in_background=true, subagent_type "general-purpose", model "${MODELS.claudeChildAlias}", prompt: "Run this one shell command and nothing else: ${gated(targetBarrier, `echo MODEL_TARGET > ${targetSentinel}`)}". 2) Without waiting for it, use the Bash tool to run this one command: ${gated(keepBarrier, `echo MODEL_OTHER_POST > ${keepSentinel}`)} 3) Reply DONE.`;
+      const worker = managedWorker(lane, "claude", "claude host", ["--model", MODELS.claude, "--prompt", prompt, "--", "--dangerously-skip-permissions"], { provider: "anthropic" });
+      target = worker.view({ provider: "anthropic", task: true }, "claude child task");
+      keep = worker;
+    } else if (source === "codex") {
+      const worker = managedWorker(lane, "codex", "codex host", ["--provider", MODELS.codexProvider, "--model", MODELS.codexAlt, "--prompt", shellPrompt(gated(targetBarrier, `echo MODEL_TARGET > ${targetSentinel}`)),
+        "--thread-provider", MODELS.codexProvider, "--thread-model", MODELS.codex, "--thread-prompt", shellPrompt(gated(keepBarrier, `echo MODEL_OTHER_POST > ${keepSentinel}`)), ...codexHostArgs()], { provider: MODELS.codexProvider, model: MODELS.codexAlt });
+      target = worker;
+      keep = worker.view({ provider: MODELS.codexProvider, model: MODELS.codex }, "codex other thread");
+    } else {
+      host = await startOpenCodeHost(lane);
+      if (!host) return blocked(id, "opencode serve did not start.");
+      target = openCodeWorker(lane, host, "opencode target", MODELS.opencode, shellPrompt(gated(targetBarrier, `echo MODEL_TARGET > ${targetSentinel}`)), {});
+      keep = openCodeWorker(lane, host, "opencode other", MODELS.opencodeAlt, shellPrompt(gated(keepBarrier, `echo MODEL_OTHER_POST > ${keepSentinel}`)), {});
+    }
+    const registered = await waitFor(() => target.registered() && keep.registered(), 240_000);
+    if (!registered) return (target.exited() && unavailable(target.result()) ? blocked : fail)(id, `Mixed-model workers did not register native targets with resolved models (target=${target.registered()} other=${keep.registered()}; ${nativeSummary(target.result?.() ?? {})}).`);
+    const identity = target.identity();
+    const other = keep.identity();
+    if (!identity?.model || !other?.model || identity.model === other.model || identity.pid !== other.pid && source !== "opencode") return fail(id, `Expected two different models in one native host; got ${JSON.stringify(identity)} vs ${JSON.stringify(other)}.`);
+    const scope = { kind: "model", provider: identity.provider, model: identity.model };
+    const preview = await stopPreview(scope);
+    if (!preview?.targets?.some((candidate) => target.matches(candidate)) || preview.targets.some((candidate) => keep.matches(candidate) && candidate.id !== identity.id)) return fail(id, "Model stop preview did not isolate the target model's native work.");
+    const operationStart = Date.now();
+    const ui = await driveStopBrowser(`button[aria-label="Stop model ${identity.provider}/${identity.model}"]`, identity.model);
+    if (!ui.ok) return (ui.ran ? fail : blocked)(id, ui.detail);
+    const operation = await latestOperation(scope, operationStart);
+    const outcome = operation?.outcomes?.find((candidate) => target.matches({ id: candidate.targetId }));
+    release(keepBarrier);
+    const ceased = await target.ceased();
+    const otherAdvanced = await waitFor(() => existsSync(keepSentinel), 180_000);
+    if (!["cancelled", "terminated"].includes(outcome?.status) || !ceased || !otherAdvanced || existsSync(targetSentinel)) return fail(id, `Selective model stop failed: outcome=${outcome?.status ?? "missing"} targetCeased=${ceased} otherPostSentinel=${otherAdvanced} targetSentinel=${existsSync(targetSentinel)}.`);
+    await keep.wait?.(180_000);
+    await restartServer(true);
+    const latched = (await budgetState())?.stops?.some((stop) => sameScope(stop.scope, scope));
+    const bypass = await modelBypassAttempts(source, lane, identity, other, keep);
+    const unlocked = await unlock(scope);
+    const recovered = await freshAllowed(lane, source, source === "claude" ? MODELS.claudeChild : source === "codex" ? MODELS.codexAlt : MODELS.opencode, source === "codex" ? MODELS.codexProvider : undefined);
+    const problems = [!latched && "latch missing after restart", ...bypass.filter((attempt) => !attempt.ok).map((attempt) => `${attempt.name} not denied (${attempt.detail})`), !unlocked && "unlock failed", !recovered.ok && `recovered task not allowed (${recovered.detail})`].filter(Boolean);
+    if (problems.length) return (bypass.some((attempt) => attempt.unavailable) || recovered.unavailable ? blocked : fail)(id, `Model ${scope.provider}/${scope.model}: ${problems.join("; ")}.`);
+    return pass(id, `One ${source} host ran ${identity.model} and ${other.model}; UI Stop model ${scope.provider}/${scope.model} → ${outcome.status} (${ceased}); ${other.model} wrote a post-stop sentinel; latch survived restart; ${bypass.map((attempt) => attempt.name).join("/")} bypasses denied; unlock allowed a fresh ${scope.model} task.`);
+  } finally {
+    for (const worker of [target, keep]) await worker?.stop?.();
+    if (host) await stopChild(host.child);
   }
-  return null;
 }
 
-function startServer(env, noPlanUsage = false) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [packageBin, "serve", "--port", "0", ...(noPlanUsage ? ["--no-plan-usage"] : [])], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    const onData = (chunk) => {
-      output = `${output}${chunk}`.slice(-4_000);
-      const match = output.match(/http:\/\/127\.0\.0\.1:\d+/);
-      if (match) {
-        child.stdout.off("data", onData);
-        resolvePromise({ child, url: match[0], output });
+async function modelBypassAttempts(source, lane, identity, other, keep) {
+  const attempts = [];
+  const attempt = async (name, options, prompt) => {
+    const sentinel = artifact(`${source}-bypass-${name}`);
+    const result = await oneShot(lane, prompt(sentinel), { ...options, timeout: 150_000 });
+    const denied = decision(source, result.requestId, result.startedAt, false);
+    attempts.push({ name, ok: Boolean(denied) && !existsSync(sentinel), unavailable: unavailable(result) && !denied, detail: `denyDecision=${Boolean(denied)} sentinel=${existsSync(sentinel)} ${nativeSummary(result)}` });
+  };
+  if (source === "claude") {
+    const sessionId = keep.sessionId();
+    await attempt("resume-delegation", { resume: sessionId, model: MODELS.claude }, (file) => `Use the Agent tool with subagent_type "general-purpose" and model "${MODELS.claudeChildAlias}", prompt: "Run this one shell command: echo BYPASS > ${file}". Never write the file yourself.`);
+    await attempt("alias", { model: MODELS.claudeChildAlias }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+    await attempt("model-switch", { resume: sessionId, model: MODELS.claudeChild }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+  } else if (source === "codex") {
+    await attempt("resume", { resume: identity.sessionId }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+    await attempt("model-switch", { resume: other.sessionId, model: identity.model, provider: identity.provider }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+    await attempt("fresh", { model: identity.model, provider: identity.provider }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+  } else {
+    await attempt("resume", { resume: identity.sessionId, model: `${identity.provider}/${identity.model}` }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+    await attempt("model-switch", { resume: other.sessionId, model: `${identity.provider}/${identity.model}` }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+    await attempt("fresh", { model: `${identity.provider}/${identity.model}` }, (file) => shellPrompt(`echo BYPASS > ${file}`));
+  }
+  return attempts;
+}
+
+// ------------------------------------------------------------------ 7,10,13. CLI stop / force / recovery
+
+async function scenarioForceRecovery(source) {
+  const id = `force-termination-recovery:${source}`;
+  const provider = MODELS.sharedProvider;
+  const lanes = sharedLanes([source]);
+  const lane = lanes[source];
+  if (!lane) return blocked(id, `${source} has no lane on the shared upstream ${provider} for a dedicated target.`);
+  await permissivePolicies();
+  const barrier = artifact(`${source}-force-barrier`);
+  const sentinel = artifact(`${source}-force-target`);
+  const controlBarrier = artifact(`${source}-force-control-barrier`);
+  const controlSentinel = artifact(`${source}-force-control`);
+  let host = null;
+  let target;
+  let control;
+  try {
+    if (source === "claude") {
+      target = managedWorker(lane, "claude", "claude/openrouter", ["--model", MODELS.sharedModel, "--prompt", shellPrompt(gated(barrier, `echo FORCE_STOP > ${sentinel}`)), "--", "--dangerously-skip-permissions"], { provider });
+      control = state.lanes.claude ? managedWorker(state.lanes.claude, "claude", "claude/anthropic", ["--model", MODELS.claude, "--prompt", shellPrompt(gated(controlBarrier, `echo FORCE_CONTROL > ${controlSentinel}`)), "--", "--dangerously-skip-permissions"], { provider: "anthropic" }) : null;
+    } else if (source === "codex") {
+      target = managedWorker(lane, "codex", "codex host", ["--provider", provider, "--model", MODELS.sharedModel, "--prompt", shellPrompt(gated(barrier, `echo FORCE_STOP > ${sentinel}`)),
+        "--thread-provider", MODELS.codexProvider, "--thread-model", MODELS.codex, "--thread-prompt", shellPrompt(gated(controlBarrier, `echo FORCE_CONTROL > ${controlSentinel}`)), ...codexHostArgs()], { provider });
+      control = target.view({ provider: MODELS.codexProvider, model: MODELS.codex }, "codex control thread");
+    } else {
+      host = await startOpenCodeHost(lane);
+      if (!host) return blocked(id, "opencode serve did not start.");
+      target = openCodeWorker(lane, host, "opencode/openrouter", `${provider}/${MODELS.sharedModel}`, shellPrompt(gated(barrier, `echo FORCE_STOP > ${sentinel}`)), { provider });
+      control = openCodeWorker(lane, host, "opencode/control", MODELS.opencode, shellPrompt(gated(controlBarrier, `echo FORCE_CONTROL > ${controlSentinel}`)), {});
+    }
+    if (!control) return blocked(id, "No unrelated real upstream control is available for collateral verification.");
+    if (!(await waitFor(() => target.registered() && control.registered(), 240_000))) return (target.exited() && unavailable(target.result()) ? blocked : fail)(id, `Dedicated workers did not register (target=${target.registered()} control=${control.registered()}).`);
+    const cli = (...args) => run(process.execPath, [state.packageBin, "budgets", ...args], { cwd: state.workspace, env: state.lanes[source].env(), timeout: 120_000 });
+    const preview = await cli("stop", "--provider", provider);
+    const previewJson = jsonOutput(preview.output);
+    if (preview.status !== 0 || !previewJson?.targets?.some((candidate) => target.matches(candidate))) return fail(id, `CLI preview did not list the dedicated target (exit ${preview.status}).`);
+    let stop = await cli("stop", "--provider", provider, "--confirm");
+    let operation = jsonOutput(stop.output);
+    let ceased = await target.ceased();
+    let forced = false;
+    if (!ceased) {
+      if (operation?.status !== "partial") return fail(id, `Graceful CLI stop neither stopped the target nor reported partial (status=${operation?.status}).`);
+      stop = await cli("stop", "--provider", provider, "--confirm", "--force", "--force-confirm");
+      operation = jsonOutput(stop.output);
+      ceased = await target.ceased();
+      forced = true;
+    }
+    const outcome = operation?.outcomes?.find((candidate) => target.matches({ id: candidate.targetId }));
+    release(controlBarrier);
+    const controlAdvanced = await waitFor(() => existsSync(controlSentinel), 180_000);
+    const fresh = await freshDenied(lane, source, sharedModelFor(source), provider);
+    const unlocked = await cli("unlock", "--provider", provider, "--confirm");
+    const recovered = await freshAllowed(lane, source, sharedModelFor(source));
+    const problems = [
+      operation?.status !== "complete" && `operation=${operation?.status}`,
+      !["cancelled", "terminated"].includes(outcome?.status) && `outcome=${outcome?.status ?? "missing"}`,
+      !ceased && "target did not cease",
+      existsSync(sentinel) && "target sentinel written",
+      !controlAdvanced && "unrelated control did not advance",
+      !fresh.ok && `fresh launch not denied (${fresh.detail})`,
+      unlocked.status !== 0 && "CLI unlock failed",
+      !recovered.ok && `recovered task not allowed (${recovered.detail})`,
+    ].filter(Boolean);
+    if (problems.length) return (fresh.unavailable || recovered.unavailable ? blocked : fail)(id, `CLI provider stop: ${problems.join("; ")}.`);
+    return pass(id, `Installed CLI preview/confirm${forced ? " plus separately confirmed --force" : " (native cancellation sufficed; force not required)"} → ${outcome.status} (${ceased}); unrelated control advanced; fresh launch denied; CLI unlock allowed a fresh task.`);
+  } finally {
+    for (const worker of new Set([target, control])) await worker?.stop?.();
+    if (host) await stopChild(host.child);
+  }
+}
+
+// ------------------------------------------------------------------ 14. cross-harness model stop
+
+async function scenarioCrossHarness(requested) {
+  const id = "cross-harness-provider-model";
+  if (!state.browser) return blocked(id, "No Chromium browser for the real UI stop confirmation.");
+  const lanes = sharedLanes(requested);
+  if (Object.keys(lanes).length < 2) return blocked(id, `Fewer than two harnesses reach ${MODELS.sharedProvider}/${MODELS.sharedModel}.`);
+  await permissivePolicies();
+  const scope = { kind: "model", provider: MODELS.sharedProvider, model: MODELS.sharedModel };
+  const workers = [];
+  let host = null;
+  try {
+    for (const [source, lane] of Object.entries(lanes)) {
+      const barrier = artifact(`${source}-cross-barrier`);
+      const sentinel = artifact(`${source}-cross`);
+      const prompt = shellPrompt(gated(barrier, `echo CROSS_HARNESS > ${sentinel}`));
+      if (source === "claude") workers.push(managedWorker(lane, "claude", "claude", ["--model", MODELS.sharedModel, "--prompt", prompt, "--", "--dangerously-skip-permissions"], { sentinel, provider: scope.provider }));
+      else if (source === "codex") workers.push(managedWorker(lane, "codex", "codex", ["--provider", scope.provider, "--model", scope.model, "--prompt", prompt, ...codexHostArgs()], { sentinel, provider: scope.provider }));
+      else {
+        host = await startOpenCodeHost(lane);
+        if (host) workers.push(openCodeWorker(lane, host, "opencode", `${scope.provider}/${scope.model}`, prompt, { sentinel, provider: scope.provider }));
       }
+    }
+    if (!(await waitFor(() => workers.every((worker) => worker.registered() || worker.exited()), 240_000)) || workers.some((worker) => !worker.registered())) {
+      return fail(id, `Workers did not register ${scope.provider}/${scope.model}: ${workers.filter((worker) => !worker.registered()).map((worker) => `${worker.label}(${worker.exited() ? nativeSummary(worker.result()) : "running"})`).join(", ")}.`);
+    }
+    const preview = await stopPreview(scope);
+    if (workers.some((worker) => !preview?.targets?.some((target) => worker.matches(target)))) return fail(id, "Model stop preview did not include every harness's matching worker.");
+    const operationStart = Date.now();
+    const ui = await driveStopBrowser(`button[aria-label="Stop model ${scope.provider}/${scope.model}"]`, scope.model);
+    if (!ui.ok) return (ui.ran ? fail : blocked)(id, ui.detail);
+    const operation = await latestOperation(scope, operationStart);
+    const statuses = workers.map((worker) => operation?.outcomes?.find((candidate) => worker.matches({ id: candidate.targetId }))?.status ?? "missing");
+    const ceased = [];
+    for (const worker of workers) ceased.push(await worker.ceased());
+    await restartServer(true);
+    const unlocked = await unlock(scope);
+    const recovered = [];
+    for (const source of Object.keys(lanes)) recovered.push(await freshAllowed(lanes[source], source, sharedModelFor(source)));
+    const problems = [
+      statuses.some((status) => !["cancelled", "terminated"].includes(status)) && `outcomes=${statuses.join(",")}`,
+      ceased.some((value) => !value) && "a worker did not cease",
+      workers.some((worker) => existsSync(worker.sentinel)) && "a stopped worker wrote its sentinel",
+      !unlocked && "unlock failed",
+      recovered.some((value) => !value.ok) && `recovery not allowed (${recovered.filter((value) => !value.ok).map((value) => value.detail).join("; ")})`,
+    ].filter(Boolean);
+    if (problems.length) return fail(id, `Cross-harness model stop: ${problems.join("; ")}.`);
+    return pass(id, `UI Stop model ${scope.provider}/${scope.model} stopped ${workers.map((worker, index) => `${worker.label}=${statuses[index]}`).join(", ")} in one operation; unlock allowed fresh tasks in every harness.`);
+  } finally {
+    for (const worker of workers) await worker.stop();
+    if (host) await stopChild(host.child);
+  }
+}
+
+// ------------------------------------------------------------------ workers
+
+function sharedLanes(sources) {
+  const out = {};
+  for (const source of sources) {
+    if (source === "claude" && state.lanes.claudeShared && !state.setup.claudeShared) out.claude = state.lanes.claudeShared;
+    if (source === "codex" && state.lanes.codex && !state.setup.codex && env.TOKEN_FURNACE_QUALIFY_OPENROUTER_KEY_FILE) out.codex = state.lanes.codex;
+    if (source === "opencode" && state.lanes.opencode && !state.setup.opencode) out.opencode = state.lanes.opencode;
+  }
+  return out;
+}
+
+function sharedModelFor(source) {
+  return source === "opencode" ? `${MODELS.sharedProvider}/${MODELS.sharedModel}` : MODELS.sharedModel;
+}
+
+function codexHostArgs() {
+  return ["--", "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"'];
+}
+
+function defaultModel(source) {
+  return source === "claude" ? MODELS.claude : source === "codex" ? MODELS.codex : MODELS.opencode;
+}
+
+/** A `token-furnace native run` host; registration evidence comes from its own registered events. */
+function managedWorker(lane, source, label, args, expect) {
+  const requestId = newRequestId(source);
+  const process_ = streamProcess(process.execPath, [state.packageBin, "native", "run", "--source", source, "--cwd", state.workspace, ...args], lane.env({ TOKEN_FURNACE_QUALIFY_REQUEST_ID: requestId }));
+  const registrations = () => {
+    const latest = new Map();
+    for (const event of process_.events()) if (event.type === "token_furnace" && event.event === "registered") latest.set(event.targetId, event);
+    return [...latest.values()];
+  };
+  const finished = () => new Set(process_.events().filter((event) => event.type === "token_furnace" && /finished$/.test(event.event ?? "")).map((event) => event.targetId));
+  // A view selects one registered target of the host (a Codex thread or a Claude task) by its identity.
+  const view = (filter, viewLabel) => {
+    const pick = () => registrations().find((event) => filter.task === event.targetId.includes(":task:")
+      && (!filter.provider || event.provider === filter.provider) && (!filter.model || event.model === filter.model)
+      && Boolean(event.model) && (source !== "codex" || Boolean(event.native?.turnId)));
+    return {
+      source, label: viewLabel, sentinel: filter.sentinel, barrier: filter.barrier, requestId,
+      registered: () => Boolean(pick()),
+      identity: () => { const event = pick(); return event && { id: event.targetId, provider: event.provider, model: event.model, sessionId: event.sessionId, pid: event.pid }; },
+      matches: (target) => Boolean(pick()) && pick().targetId === target.id,
+      sessionId: () => process_.events().find((event) => event.type === "system" && event.subtype === "init")?.session_id ?? pick()?.sessionId ?? null,
+      exited: () => process_.exited(),
+      result: () => process_.result(),
+      wait: (timeout) => process_.wait(timeout),
+      // Terminal evidence is native: a finished turn/task event, a stopped task notification, or the host exiting.
+      ceased: async () => {
+        const id = pick()?.targetId;
+        const taskStopped = () => filter.task && process_.events().some((event) => event.type === "system" && event.subtype === "task_notification" && id?.endsWith(`:task:${event.task_id}`) && event.status === "stopped");
+        const ok = await waitFor(() => (id && finished().has(id)) || taskStopped() || process_.exited(), 30_000);
+        return ok ? (taskStopped() ? "native task_notification stopped" : id && finished().has(id) ? "native terminal event" : "native host exited") : false;
+      },
+      view: (more, moreLabel) => view({ task: false, ...more }, moreLabel),
+      stop: () => process_.stop(),
     };
-    child.stdout.on("data", onData);
-    child.once("error", reject);
-    child.once("exit", (code) => { if (code !== null) reject(new Error(`Token Furnace server exited ${code}: ${safeTail(output)}`)); });
-    setTimeout(() => reject(new Error("Token Furnace server did not start within 15 seconds.")), 15_000).unref();
+  };
+  return view({ task: false, ...expect }, label);
+}
+
+/** An OpenCode session attached to a shared `opencode serve`; ownership is the plugin's registration. */
+function openCodeWorker(lane, host, label, model, prompt, expect) {
+  const requestId = newRequestId("opencode");
+  const process_ = streamProcess("opencode", ["run", "--attach", host.url, "--dir", state.workspace, "--auto", "--format", "json", "--model", model, prompt], lane.env({ TOKEN_FURNACE_QUALIFY_REQUEST_ID: requestId }));
+  const sessionId = () => process_.events().find((event) => typeof event.sessionID === "string")?.sessionID ?? null;
+  const row = () => {
+    const id = sessionId();
+    if (!id) return null;
+    return controlTargets().find((target) => target.source === "opencode" && target.session_id === id && target.model) ?? null;
+  };
+  return {
+    source: "opencode", label, sentinel: expect.sentinel, barrier: expect.barrier, requestId,
+    registered: () => Boolean(row()),
+    identity: () => { const target = row(); return target && { id: target.id, provider: target.provider, model: target.model, sessionId: target.session_id, pid: target.pid }; },
+    matches: (target) => Boolean(row()) && (target.id === row().id || target.sessionId === sessionId()),
+    exited: () => process_.exited(),
+    result: () => process_.result(),
+    wait: (timeout) => process_.wait(timeout),
+    // Native terminal evidence: the server reports the session no longer busy.
+    ceased: async () => {
+      const id = sessionId();
+      const idle = async () => {
+        const statuses = await fetch(`${host.url}/session/status`).then((response) => response.json()).catch(() => null);
+        return statuses && statuses[id]?.type !== "busy";
+      };
+      return (await waitFor(idle, 30_000)) ? "opencode session not busy (aborted)" : false;
+    },
+    stop: () => process_.stop(),
+  };
+}
+
+async function startOpenCodeHost(lane) {
+  const child = streamProcess("opencode", ["serve", "--hostname", "127.0.0.1", "--port", "0"], lane.env());
+  const started = await waitFor(() => /https?:\/\/127\.0\.0\.1:\d+/.test(child.output()), 30_000);
+  const url = child.output().match(/https?:\/\/127\.0\.0\.1:\d+/)?.[0];
+  if (!started || !url) { await child.stop(); return null; }
+  return { child: child.child, url };
+}
+
+/** One-shot native CLI run (fresh or resumed) with correlated request id. */
+async function oneShot(lane, prompt, options = {}) {
+  const requestId = newRequestId(lane.source);
+  const args = nativeArgs(lane.source, prompt, options);
+  const process_ = streamProcess(lane.source, args, lane.env({ TOKEN_FURNACE_QUALIFY_REQUEST_ID: requestId }));
+  const result = await process_.wait(options.timeout ?? 240_000);
+  return { ...result, requestId };
+}
+
+function nativeArgs(source, prompt, options) {
+  if (source === "claude") return ["-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", ...(options.resume ? ["--resume", options.resume] : []), ...(options.model ? ["--model", options.model] : []), prompt];
+  if (source === "codex") {
+    return ["exec", ...(options.resume ? ["resume", options.resume] : []), "--json", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--skip-git-repo-check",
+      ...(options.resume ? [] : ["-C", state.workspace]), ...(options.provider ? ["-c", `model_provider="${options.provider}"`] : []), ...(options.model ? ["-m", options.model] : []), prompt];
+  }
+  return ["run", ...(options.resume ? ["--session", options.resume] : []), "--dir", state.workspace, "--auto", "--format", "json", ...(options.model ? ["--model", options.model] : []), prompt];
+}
+
+async function freshDenied(lane, source, model, provider) {
+  const sentinel = artifact(`${source}-fresh-denied`);
+  const result = await oneShot(lane, shellPrompt(`echo FRESH_BLOCKED > ${sentinel}`), { model, provider: source === "codex" ? provider : undefined, timeout: 150_000 });
+  const denied = decision(source, result.requestId, result.startedAt, false);
+  return { ok: Boolean(denied) && !existsSync(sentinel), unavailable: !denied && unavailable(result), detail: `denyDecision=${Boolean(denied)} sentinel=${existsSync(sentinel)} ${nativeSummary(result)}` };
+}
+
+async function freshAllowed(lane, source, model, provider) {
+  const sentinel = artifact(`${source}-recovered`);
+  const result = await oneShot(lane, shellPrompt(`echo RECOVERED > ${sentinel}`), { model, provider: source === "codex" ? (provider ?? (model === MODELS.sharedModel ? MODELS.sharedProvider : MODELS.codexProvider)) : undefined, timeout: 240_000 });
+  const allowed = decision(source, result.requestId, result.startedAt, true);
+  return { ok: completed(result) && existsSync(sentinel) && Boolean(allowed), unavailable: unavailable(result), detail: `allowDecision=${Boolean(allowed)} sentinel=${existsSync(sentinel)} ${nativeSummary(result)}` };
+}
+
+function streamProcess(command, args, childEnv) {
+  const startedAt = Date.now();
+  const child = spawn(command, args, { cwd: state.workspace, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+  children.add(child);
+  const events = [];
+  let output = "";
+  let buffer = "";
+  let exit = null;
+  child.stdout.on("data", (chunk) => {
+    output = `${output}${chunk}`.slice(-8_000);
+    buffer += chunk;
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf("\n");
+      if (line.startsWith("{")) try { events.push(JSON.parse(line)); } catch { /* partial diagnostics */ }
+    }
+  });
+  child.stderr.on("data", (chunk) => { output = `${output}${chunk}`.slice(-8_000); });
+  const exited = new Promise((resolvePromise) => {
+    child.once("error", (error) => { exit = { status: -1, signal: null, error: error.message }; children.delete(child); resolvePromise(); });
+    child.once("exit", (status, signal) => { exit = { status: status ?? (signal ? 1 : -1), signal }; children.delete(child); resolvePromise(); });
+  });
+  const result = (timedOut = false) => ({
+    status: exit?.status ?? -1, signal: exit?.signal ?? null, timedOut, output, events: [...events], startedAt,
+    sessionIds: sessionIdsFrom(command, events),
+  });
+  return {
+    child, events: () => events, output: () => output, exited: () => exit !== null, result: () => result(false),
+    wait: async (timeout = 240_000) => {
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 2_000).unref(); }, timeout);
+      await exited;
+      clearTimeout(timer);
+      return result(timedOut);
+    },
+    stop: async () => { await stopChild(child); },
+  };
+}
+
+function sessionIdsFrom(command, events) {
+  const ids = [];
+  for (const event of events) {
+    const id = command === "claude" ? (event.type === "system" && event.subtype === "init" ? event.session_id : null)
+      : command === "codex" ? (event.type === "thread.started" ? event.thread_id : null)
+        : command === "opencode" ? event.sessionID : null;
+    if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+// ------------------------------------------------------------------ Token Furnace server and API
+
+async function startServer(noPlanUsage = false) {
+  const lane = state.lanes.opencode ?? Object.values(state.lanes)[0];
+  const serverEnv = {
+    ...lane.env(),
+    CLAUDE_CONFIG_DIR: state.lanes.claude?.home, CODEX_HOME: state.lanes.codex?.home,
+  };
+  const child = streamProcess(process.execPath, [state.packageBin, "serve", "--port", "0", ...(noPlanUsage ? ["--no-plan-usage"] : [])], serverEnv);
+  const started = await waitFor(() => /http:\/\/127\.0\.0\.1:\d+/.test(child.output()) || child.exited(), 30_000);
+  const url = child.output().match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+  if (!started || !url) throw new Error(`Token Furnace server did not start: ${safeTail(child.output())}`);
+  state.server = { child: child.child, url, stop: child.stop };
+}
+
+async function restartServer(noPlanUsage) {
+  await state.server?.stop();
+  await startServer(noPlanUsage);
+}
+
+async function budgetState() {
+  return fetch(`${state.server.url}/api/budgets`, { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null);
+}
+
+async function postBudget(path, body) {
+  const current = await budgetState();
+  if (!current?.mutationToken) return { ok: false, value: null };
+  return fetch(`${state.server.url}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-token-furnace-mutation": current.mutationToken, origin: state.server.url }, body: JSON.stringify(typeof body === "function" ? body(current) : body) })
+    .then(async (response) => ({ ok: response.ok, value: await response.json().catch(() => null) })).catch(() => ({ ok: false, value: null }));
+}
+
+function resetPolicies() { return postBudget("/api/budgets", (current) => ({ expectedRevision: current.revision, policies: [] })); }
+async function stopPreview(scope) { return (await postBudget("/api/budgets/stop-preview", { scope })).value; }
+async function unlock(scope) { return (await postBudget("/api/budgets/unlock", { scope })).ok; }
+
+/** Stop scenarios run with enforcement on (generous Manual limits): hook-launched sessions register only while enforcing. */
+function permissivePolicies() {
+  return postBudget("/api/budgets", (current) => ({
+    expectedRevision: current.revision,
+    policies: supported.map((source) => ({ scope: { kind: "source", source }, mode: "manual", unit: "tokens-per-hour", limit: admissionLimit(source) * 10, deadline: null })),
+  }));
+}
+
+function setSourcePolicy(source, limit) {
+  return postBudget("/api/budgets", (current) => ({
+    expectedRevision: current.revision,
+    policies: [...(current.policies ?? []).filter((policy) => !(policy.scope?.kind === "source" && policy.scope.source === source)), { scope: { kind: "source", source }, mode: "manual", unit: "tokens-per-hour", limit, deadline: null }],
+  }));
+}
+
+async function latestOperation(scope, since) {
+  let found = null;
+  await waitFor(async () => {
+    const current = await budgetState();
+    const stop = (current?.stops ?? []).filter((candidate) => sameScope(candidate.scope, scope) && Date.parse(candidate.createdAt ?? "") >= since - 2_000).at(-1);
+    if (!stop?.operationId) return false;
+    const response = await fetch(`${state.server.url}/api/budgets/operations/${encodeURIComponent(stop.operationId)}`).then((value) => value.ok ? value.json() : null).catch(() => null);
+    found = response;
+    return Boolean(response && response.status !== "pending" && (response.outcomes ?? []).every((outcome) => outcome.status !== "requested"));
+  }, 30_000);
+  return found;
+}
+
+function hasManualPolicy(value, source, limit) {
+  return Boolean(value?.policies?.some((policy) => policy.scope?.kind === "source" && policy.scope.source === source && policy.mode === "manual" && policy.limit === limit));
+}
+
+function sameScope(left, right) {
+  return left?.kind === right.kind && (left.source ?? null) === (right.source ?? null) && (left.provider ?? null) === (right.provider ?? null) && (left.model ?? null) === (right.model ?? null);
+}
+
+// ------------------------------------------------------------------ durable evidence
+
+function withDb(name, fn, fallback) {
+  let db;
+  try { db = new DatabaseSync(join(state.tf.TOKEN_FURNACE_STATE_HOME, "token-furnace", name)); return fn(db); }
+  catch { return fallback; }
+  finally { db?.close(); }
+}
+
+/** A real hook decision correlated to this qualification run; its own request id (if any) comes from the native payload. */
+function decision(source, correlationId, startedAt, allowed) {
+  return withDb("budgets.sqlite", (db) => db.prepare("SELECT allowed, reason, request_id, session_id FROM admission_decisions WHERE source = ? AND correlation_id = ? AND (request_id IS NULL OR request_id <> correlation_id) AND at >= ? ORDER BY at DESC")
+    .all(source, correlationId, Math.max(0, startedAt - 2_000)).find((row) => Boolean(row.allowed) === allowed) ?? null, null);
+}
+
+function measuredUsage(source, since) {
+  return withDb("budgets.sqlite", (db) => Number(db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM usage_events WHERE scope_key = ? AND at >= ? AND amount > 0").get(`source:${source}`, Math.max(0, since - 2_000))?.total ?? 0), 0);
+}
+
+function admissionLimit(source) {
+  return withDb("budgets.sqlite", (db) => {
+    const used = Number(db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM usage_events WHERE scope_key = ?").get(`source:${source}`)?.total ?? 0);
+    const reserved = Number(db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM reservations WHERE scope_key = ? AND status = 'reserved'").get(`source:${source}`)?.total ?? 0);
+    return admissionLimitForLedger({ used, reserved });
+  }, QUALIFY_ADMISSION_FLOOR);
+}
+
+function admissionLimitForLedger(ledger) {
+  return Math.max(QUALIFY_ADMISSION_FLOOR, Math.ceil((ledger.used > 0 ? ledger.used : 0) + (ledger.reserved > 0 ? ledger.reserved : 0)) * 4);
+}
+
+function controlTargets() {
+  return withDb("control.sqlite", (db) => db.prepare("SELECT id, source, provider, model, session_id, pid FROM targets").all(), []);
+}
+
+// ------------------------------------------------------------------ browser (real Chromium over CDP)
+
+async function withBrowser(fn) {
+  const userData = tempDir("token-furnace-browser-");
+  const child = spawn(state.browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=0", `--user-data-dir=${userData}`, "about:blank"], { stdio: ["ignore", "ignore", "ignore"] });
+  children.add(child);
+  let socket;
+  try {
+    const portFile = join(userData, "DevToolsActivePort");
+    if (!await waitFor(() => existsSync(portFile), 20_000)) return { ok: false, ran: false, detail: "Browser did not expose a DevTools endpoint." };
+    const port = Number(readFileSync(portFile, "utf8").split("\n")[0]);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((item) => item.type === "page" && item.webSocketDebuggerUrl);
+    if (!page) return { ok: false, ran: false, detail: "Browser page target was unavailable." };
+    socket = await connectCdp(page.webSocketDebuggerUrl);
+    return await fn(socket);
+  } catch (error) {
+    return { ok: false, ran: true, detail: `Browser error: ${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    socket?.close();
+    await stopChild(child);
+  }
+}
+
+function driveBudgetsBrowser() {
+  return withBrowser(async (socket) => {
+    await socket.command("Page.navigate", { url: `${state.server.url}/#budgets` });
+    if (!await waitFor(async () => Boolean(await socket.evaluate(`(${budgetControlsReady.toString()})(document)`)), 20_000)) return { ok: false, ran: true, detail: "The Budgets tab did not render all three source budget controls." };
+    const result = await socket.evaluate(`(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const setValue = (element, value) => {
+        Object.getOwnPropertyDescriptor(element.constructor.prototype, "value")?.set?.call(element, value);
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const save = async (label) => { document.querySelector('button[aria-label="Save ' + label + ' budget"]')?.click(); await sleep(500); };
+      const autoReadings = [];
+      for (const label of ["Claude Code", "Codex", "OpenCode"]) {
+        const mode = () => document.querySelector('select[aria-label="' + label + ' budget mode"]');
+        if (!mode()) return { ok: false, detail: "The " + label + " budget mode control is missing." };
+        setValue(mode(), "off"); await sleep(150); await save(label);
+        setValue(mode(), "auto"); await sleep(150); await save(label);
+        const autoState = await (await fetch('/api/budgets', { cache: 'no-store' })).json();
+        const reading = autoState.sources?.find((source) => source.label === label);
+        if (reading) autoReadings.push(reading);
+        setValue(mode(), "manual"); await sleep(150);
+        const limit = document.querySelector('input[aria-label="' + label + ' budget limit"]');
+        if (!limit) return { ok: false, detail: "The " + label + " Manual limit field did not render." };
+        setValue(limit, "1000"); await sleep(100); await save(label);
+      }
+      return { ok: true, autoReadings };
+    })()`);
+    return result?.ok ? { ok: true, ran: true, autoReadings: result.autoReadings } : { ok: false, ran: true, detail: result?.detail ?? "Browser form scenario failed." };
   });
 }
 
+function driveStopBrowser(selector, expectedText) {
+  return withBrowser(async (socket) => {
+    await socket.command("Page.navigate", { url: `${state.server.url}/#budgets` });
+    if (!await waitFor(async () => Boolean(await socket.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`)), 30_000)) return { ok: false, ran: true, detail: `The Budgets tab did not render ${selector}.` };
+    const result = await socket.evaluate(`(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const button = document.querySelector(${JSON.stringify(selector)});
+      if (button.disabled) return { ok: false, detail: "The stop button is disabled in the Budgets tab." };
+      button.click();
+      let dialog = null;
+      for (let i = 0; i < 150; i++) {
+        dialog = document.querySelector('dialog[open], [role="dialog"]');
+        if (dialog && !/Loading/i.test(dialog.innerText)) break;
+        await sleep(100);
+      }
+      if (!dialog) return { ok: false, detail: "No stop preview dialog opened." };
+      if (!dialog.innerText.includes(${JSON.stringify(expectedText)})) return { ok: false, detail: "The stop preview did not name the expected identity." };
+      const confirm = [...dialog.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Confirm stop');
+      if (!confirm) return { ok: false, detail: "No explicit Confirm stop button." };
+      confirm.click();
+      for (let i = 0; i < 300; i++) {
+        const open = document.querySelector('dialog[open], [role="dialog"]');
+        if (!open) return { ok: true };
+        if (/remain unresolved/i.test(open.innerText)) return { ok: true, partial: true };
+        if (/failed/i.test(open.innerText) && !open.querySelector('button[disabled]')) return { ok: false, detail: "UI stop error: " + open.innerText.slice(-200) };
+        await sleep(100);
+      }
+      return { ok: false, detail: "The UI stop did not finish within its bound." };
+    })()`);
+    return result?.ok ? { ok: true, ran: true } : { ok: false, ran: true, detail: result?.detail ?? "UI stop confirmation failed." };
+  });
+}
+
+function budgetControlsReady(documentLike) {
+  return ["Claude Code", "Codex", "OpenCode"].every((label) => documentLike.querySelector(`select[aria-label="${label} budget mode"]`) && documentLike.querySelector(`button[aria-label="Save ${label} budget"]`));
+}
+
 async function connectCdp(url) {
-  if (typeof WebSocket !== "function") throw new Error("This Node runtime has no WebSocket client for browser control.");
   const socket = new WebSocket(url);
   const pending = new Map();
   let id = 0;
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(String(event.data));
-    const resolver = pending.get(message.id);
-    if (resolver) { pending.delete(message.id); resolver(message); }
+    pending.get(message.id)?.(message);
+    pending.delete(message.id);
   });
   await new Promise((resolvePromise, reject) => { socket.addEventListener("open", resolvePromise, { once: true }); socket.addEventListener("error", reject, { once: true }); });
   const command = (method, params = {}) => new Promise((resolvePromise, reject) => {
     const requestId = ++id;
-    pending.set(requestId, (message) => message.error ? reject(new Error(message.error.message)) : resolvePromise(message.result));
+    pending.set(requestId, (message) => (message.error ? reject(new Error(message.error.message)) : resolvePromise(message.result)));
     socket.send(JSON.stringify({ id: requestId, method, params }));
   });
   await command("Runtime.enable");
@@ -1125,28 +1036,72 @@ async function connectCdp(url) {
     command,
     evaluate: async (expression) => {
       const result = await command("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "Browser evaluation failed.");
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
       return result.result?.value;
     },
     close: () => socket.close(),
   };
 }
 
-function getJson(url) {
-  return fetch(url, { cache: "no-store" }).then(async (response) => ({ ok: response.ok, value: await response.json() })).catch(() => ({ ok: false, value: null }));
+function findBrowser() {
+  for (const candidate of [env.TOKEN_FURNACE_QUALIFY_BROWSER, "chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"].filter(Boolean)) {
+    const result = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 10_000 });
+    if (!result.error && result.status === 0) return candidate;
+  }
+  return null;
+}
+
+// ------------------------------------------------------------------ small helpers
+
+function shellPrompt(command) {
+  return `Run exactly this one shell command with your shell/Bash tool and nothing else, then reply OK: ${command}`;
+}
+
+function gated(barrier, command) {
+  return `while [ ! -f ${barrier} ]; do sleep 1; done; ${command}`;
+}
+
+function release(barrier) {
+  if (barrier && !existsSync(barrier)) writeFileSync(barrier, "RELEASED\n", { mode: 0o600 });
+}
+
+function artifact(name) {
+  return join(state.workspace, `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.sentinel`);
+}
+
+function newRequestId(source) {
+  return `qualify-${source}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function completed(result) {
+  return result?.status === 0 && !result.timedOut && !result.signal;
+}
+
+/** Access/route unavailability (auth, quota, missing option, timeouts) is BLOCKED, not FAIL. */
+function unavailable(result) {
+  if (!result || result.timedOut || result.signal) return true;
+  if (result.status === 0) return false;
+  return /(?:\b(?:not found|unknown option|unavailable|timed out|rate.?limit|usage limit|quota|429)\b|\b(?:login|auth(?:entication)?|credential(?:s)?)\b[\s\S]*?\b(?:fail(?:ed|ure)?|error|required|invalid|denied|missing|expired)\b)/i.test(result.output ?? "");
+}
+
+function nativeSummary(result) {
+  return `exit=${result?.status} timedOut=${Boolean(result?.timedOut)} signal=${result?.signal ?? "none"} sessions=${result?.sessionIds?.length ?? 0} tail="${safeTail(result?.output)}"`;
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function run(command, args, options) {
   return new Promise((resolvePromise) => {
     const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
-    const collect = (chunk) => { output = `${output}${chunk}`.slice(-6_000); };
-    child.stdout.on("data", collect);
-    child.stderr.on("data", collect);
+    child.stdout.on("data", (chunk) => { output = `${output}${chunk}`.slice(-200_000); });
+    child.stderr.on("data", (chunk) => { output = `${output}${chunk}`.slice(-200_000); });
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 1_000).unref(); }, options.timeout).unref();
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, options.timeout);
     child.once("error", (error) => { clearTimeout(timer); resolvePromise({ status: -1, output: error.message }); });
-    child.once("exit", (status, signal) => { clearTimeout(timer); resolvePromise({ status: status ?? (signal ? 1 : -1), signal, timedOut, output }); });
+    child.once("exit", (status, signal) => { clearTimeout(timer); resolvePromise({ status: status ?? -1, signal, timedOut, output }); });
   });
 }
 
@@ -1154,51 +1109,45 @@ async function waitFor(check, timeout) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
     if (await check()) return true;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   }
   return Boolean(await check());
 }
 
 async function stopChild(child) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode) return;
   child.kill("SIGTERM");
   await new Promise((resolvePromise) => {
-    const timer = setTimeout(() => { child.kill("SIGKILL"); resolvePromise(); }, 1_000);
+    const timer = setTimeout(() => { child.kill("SIGKILL"); resolvePromise(); }, 3_000);
     child.once("exit", () => { clearTimeout(timer); resolvePromise(); });
   });
 }
 
-function printBlocked(reasons) {
-  console.error("BLOCKED: native authenticated budget qualification did not run.");
-  for (const reason of reasons) console.error(`- ${reason}`);
-  console.error(`No provider requests, native hook decisions, process cancellations, or PASS results were fabricated. Package identity: token-furnace@${packageVersion || "unknown"}.`);
+function tempDir(prefix) {
+  const path = mkdtempSync(join(tmpdir(), prefix));
+  temporary.push(path);
+  return path;
 }
 
 function safeTail(value) {
-  return String(value || "").replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/(token|key|secret|password)[=:]\s*\S+/gi, "$1=[redacted]").slice(-300).replace(/\s+/g, " ");
+  return String(value || "").replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/sk-[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/(token|key|secret|password)["']?\s*[=:]\s*["']?[^\s"',}]+/gi, "$1=[redacted]").replace(/\s+/g, " ").slice(-300);
 }
 
+/** The last JSON object line of CLI output (the CLI writes previews to stderr, results to stdout). */
 function jsonOutput(value) {
   for (const line of String(value || "").trim().split(/\r?\n/).reverse()) {
-    try {
-      const parsed = JSON.parse(line);
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch { /* CLI diagnostics may surround its JSON result. */ }
+    try { const parsed = JSON.parse(line); if (parsed && typeof parsed === "object") return parsed; } catch { /* diagnostics */ }
   }
   return null;
 }
 
-function isPersonalTarget(path) {
+function isPersonal(path) {
   const home = realpathOr(homedir());
-  return [join(home, ".claude"), join(home, ".codex"), join(home, ".local", "share", "opencode")].map(realpathOr).includes(path);
+  return [join(home, ".claude"), join(home, ".codex"), join(home, ".local", "share", "opencode"), home].map(realpathOr).includes(path);
 }
 
 function readPackageVersion(rootPath) {
   try { return JSON.parse(readFileSync(join(rootPath, "package.json"), "utf8")).version; } catch { return null; }
-}
-
-function pathToFileUrl(path) {
-  return `file://${path.split("\\").join("/").replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
 }
 
 function realpathOr(path) {
@@ -1207,11 +1156,35 @@ function realpathOr(path) {
 
 function parseSources(args) {
   const index = args.indexOf("--sources");
-  const value = index >= 0 ? args[index + 1] : supported.join(",");
-  const sources = String(value || "").split(",").map((source) => source.trim()).filter(Boolean);
+  const sources = String(index >= 0 ? args[index + 1] ?? "" : supported.join(",")).split(",").map((source) => source.trim()).filter(Boolean);
   if (!sources.length || sources.some((source) => !supported.includes(source))) {
     console.error(`Usage: npm run qualify:budgets -- --sources ${supported.join(",")}`);
     process.exit(2);
   }
   return [...new Set(sources)];
+}
+
+function selfTest() {
+  const checks = [];
+  const expect = (name, ok) => { if (!ok) checks.push(name); };
+  state.workspace = "/tmp/ws";
+  const claudeResume = nativeArgs("claude", "p", { resume: "s", model: "m" });
+  const codexFresh = nativeArgs("codex", "p", { model: "m", provider: "openrouter" });
+  const codexResume = nativeArgs("codex", "p", { resume: "t" });
+  const opencode = nativeArgs("opencode", "p", { resume: "s", model: "x/y" });
+  expect("claude resume", claudeResume.includes("--resume") && claudeResume.includes("--output-format") && claudeResume.at(-1) === "p");
+  expect("codex fresh", codexFresh.includes("-C") && codexFresh.includes('model_provider="openrouter"') && codexFresh.includes("--json"));
+  expect("codex resume", codexResume[1] === "resume" && !codexResume.includes("-C"));
+  expect("opencode session", opencode.includes("--session") && opencode.includes("--format") && opencode.includes("x/y"));
+  expect("session ids", sessionIdsFrom("claude", [{ type: "system", subtype: "init", session_id: "a" }])[0] === "a" && sessionIdsFrom("codex", [{ type: "thread.started", thread_id: "t" }])[0] === "t" && sessionIdsFrom("opencode", [{ sessionID: "o" }])[0] === "o");
+  expect("unavailable", unavailable({ timedOut: true }) && !unavailable({ status: 0, output: "auth failed narrative" }) && unavailable({ status: 1, output: "Error: usage limit exceeded" }) && !unavailable({ status: 1, output: "denied by Token Furnace budget" }));
+  expect("gated", gated("/b", "echo x > /f").includes("while [ ! -f /b ]"));
+  expect("artifacts unique", artifact("a") !== artifact("a"));
+  expect("admission limit", admissionLimitForLedger({ used: 10, reserved: 5 }) === QUALIFY_ADMISSION_FLOOR && admissionLimitForLedger({ used: 1_000_000, reserved: 0 }) === 4_000_000);
+  expect("scope", sameScope({ kind: "model", provider: "p", model: "m" }, { kind: "model", provider: "p", model: "m" }) && !sameScope({ kind: "provider", provider: "p" }, { kind: "provider", provider: "q" }));
+  expect("redaction", !safeTail("Authorization: Bearer abc123 sk-or-v1-abcdefghij token=xyz").match(/abc123|abcdefghij|xyz/));
+  expect("json output", jsonOutput('noise\n{"status":"complete"}\n')?.status === "complete");
+  expect("controls ready", budgetControlsReady({ querySelector: () => ({}) }) && !budgetControlsReady({ querySelector: () => null }));
+  if (checks.length) { console.error(`qualification contract failed: ${checks.join(", ")}`); process.exitCode = 1; }
+  else console.log("qualification contract ok");
 }

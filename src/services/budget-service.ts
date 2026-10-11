@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   autoPace,
+  BUDGET_STALE_MS,
+  meterWindowMs,
   canonicalIdentity,
   policyKey,
   policyMatches,
@@ -34,6 +36,10 @@ export interface BudgetSourceDescriptor {
 export interface BudgetSourceStatus extends BudgetSourceDescriptor {
   policy: BudgetPolicy | null;
   meter: BudgetMeter | null;
+  /** Every meter the provider supplies for this source; the most restrictive window decides. */
+  meters: BudgetMeter[];
+  /** Auto converts weighted tokens to quota points with a ratio measured in the meter's window. */
+  calibration: { estimated: true; meterId: string; percentagePointsPerMillionTokens: number | null } | null;
   pace: number | null;
   allowance: number | null;
   blockedWork: number;
@@ -135,6 +141,10 @@ CREATE TABLE IF NOT EXISTS meters (
   observed_at INTEGER NOT NULL,
   authoritative INTEGER NOT NULL,
   window TEXT
+);
+CREATE TABLE IF NOT EXISTS meter_refreshes (
+  source TEXT PRIMARY KEY,
+  tried_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS usage_events (
   event_id TEXT PRIMARY KEY,
@@ -291,6 +301,14 @@ export class BudgetService {
         statement.run(meter.id, meter.source, canonicalIdentity(meter.provider), canonicalIdentity(meter.account),
           meter.usedPercentagePoints, meter.resetAt.getTime(), meter.observedAt.getTime(), meter.authoritative ? 1 : 0, meter.window ?? null);
       }
+      // A provider's windows are replaced as a set: a window it stopped supplying must not linger and go stale.
+      const keep = new Set(meters.map((meter) => meter.id));
+      const providers = new Set(meters.map((meter) => `${meter.source}\0${canonicalIdentity(meter.provider) ?? ""}`));
+      for (const row of this.meters()) {
+        if (providers.has(`${row.source}\0${canonicalIdentity(row.provider) ?? ""}`) && !keep.has(row.id)) {
+          this.db.prepare("DELETE FROM meters WHERE id = ?").run(row.id);
+        }
+      }
     });
   }
 
@@ -305,10 +323,16 @@ export class BudgetService {
     return result;
   }
 
-  /** Resolve an account only from authoritative meter identities; never infer it from a model label. */
+  /**
+   * Resolve an account only from authoritative meter identities; never infer it from a model label.
+   * A candidate the hook derived itself (credentials, transcript) must equal a meter's account. Without
+   * a candidate (Codex, whose account is only known to its app-server), the account is the one distinct
+   * account across this machine's authoritative meters for that provider, and none when there are several.
+   * Freshness is judged by admit, so a stale meter reads "stale" and not "unresolved".
+   */
   verifiedAccount(source: Source, provider: string | null, candidate?: string | null): string | null {
     const matches = this.meters().filter((meter) => meter.source === source && canonicalIdentity(meter.provider) === canonicalIdentity(provider) && meter.authoritative && meter.account);
-    if (candidate && matches.some((meter) => canonicalIdentity(meter.account) === canonicalIdentity(candidate))) return canonicalIdentity(candidate);
+    if (candidate) return matches.some((meter) => canonicalIdentity(meter.account) === canonicalIdentity(candidate)) ? canonicalIdentity(candidate) : null;
     const accounts = [...new Set(matches.map((meter) => canonicalIdentity(meter.account)).filter((account): account is string => Boolean(account)))];
     return accounts.length === 1 ? accounts[0] : null;
   }
@@ -325,10 +349,17 @@ export class BudgetService {
       stops: stops.map((stop) => ({ scope: stop.scope, operationId: stop.operationId, createdAt: new Date(stop.createdAt).toISOString() })),
       sources: sources.map((source) => {
         const policy = loaded.settings.policies.find((candidate) => candidate.scope.kind === "source" && candidate.scope.source === source.source) ?? null;
-        const meter = meters.find((candidate) => candidate.source === source.source) ?? null;
+        const sourceMeters = meters.filter((candidate) => candidate.source === source.source);
+        const paced = sourceMeters.map((candidate) => ({ candidate, pace: meterIsAdmissible(candidate, now) ? autoPace(candidate, now) : null }));
+        // One unavailable window leaves the most restrictive one unknown, so the whole source is unavailable.
+        const tightest = paced.length && paced.every((entry) => entry.pace !== null)
+          ? paced.reduce((best, entry) => (entry.pace! < best.pace! ? entry : best))
+          : null;
+        const meter = tightest?.candidate ?? sourceMeters[0] ?? null;
         const active = stops.some((stop) => stop.scope.kind === "source" && stop.scope.source === source.source);
-        const pace = policy?.mode === "auto" && meterIsAdmissible(meter, now) ? autoPace(meter, now) : policy?.mode === "manual" ? policy.limit : null;
-        const allowance = policy?.mode === "auto" && meterIsAdmissible(meter, now) ? pace : policy?.mode === "manual" ? policy.limit : null;
+        const pace = policy?.mode === "auto" ? tightest?.pace ?? null : policy?.mode === "manual" ? policy.limit : null;
+        const allowance = pace;
+        const ratio = policy?.mode === "auto" && tightest ? this.calibrationRatio(tightest.candidate, policyKey(policy.scope), now) : null;
         const blockedWork = this.blockedCount(source.source, policy, now);
         const status: BudgetSourceStatus["status"] = active
           ? "Emergency stopped"
@@ -343,6 +374,8 @@ export class BudgetService {
           ...source,
           policy,
           meter,
+          meters: sourceMeters,
+          calibration: policy?.mode === "auto" && meter ? { estimated: true, meterId: meter.id, percentagePointsPerMillionTokens: ratio === null ? null : ratio * 1e6 } : null,
           pace,
           allowance,
           blockedWork,
@@ -403,32 +436,43 @@ export class BudgetService {
         if (policy.deadline && Date.parse(policy.deadline) <= now.getTime()) {
           return this.decision(input, false, "Budget deadline has expired.", policy.deadline, matched);
         }
-        const meter = this.meterFor(policy, identity);
-        const unit = policy.mode === "auto" ? "percentage-per-hour" : policy.unit;
-        const limit = policy.mode === "auto" ? (meter ? autoPace(meter, now) : null) : policy.limit;
-        if ((policy.mode === "auto" || policy.unit === "percentage-per-hour") && !identity.account) {
-          return this.decision(input, false, "Enabled quota budget requires a verified account identity.", policy.deadline, matched);
+        // Quota budgets (Auto, Manual percentage-per-hour) are metered in percentage points but admitted,
+        // reserved and reconciled in weighted tokens, converted with a ratio measured in each meter's window.
+        const quota = policy.mode === "auto" || policy.unit === "percentage-per-hour";
+        const unit = quota ? "tokens-per-hour" : policy.unit;
+        const quotaMeters = quota ? this.metersFor(policy, identity) : [];
+        if (quota && !identity.account) {
+          return this.decision(input, false, "Account identity unresolved: an enabled quota budget needs a verified account.", policy.deadline, matched);
         }
-        if ((policy.mode === "auto" || policy.unit === "percentage-per-hour") && !meterIsAdmissible(meter, now)) {
+        if (quota && (!quotaMeters.length || !quotaMeters.every((meter) => meterIsAdmissible(meter, now)))) {
           return this.decision(input, false, "Authoritative budget meter is unavailable, stale, or unconfirmed.", policy.deadline, matched);
         }
-        if (limit === null || limit === undefined) {
+        const limit = policy.mode === "auto" ? null : policy.limit;
+        if (!quota && (limit === null || limit === undefined)) {
           return this.decision(input, false, "Budget meter is unavailable or stale.", policy.deadline, matched);
         }
-        if (input.costUnit && input.costUnit !== unit) {
+        const costUnitOk = !input.costUnit || input.costUnit === unit || (quota && input.costUnit === "tokens-total");
+        if (!costUnitOk) {
           return this.decision(input, false, `Estimated cost unit does not match ${unit}.`, policy.deadline, matched);
         }
-        const estimatedCost = validCost(input.estimatedCost) && (!input.costUnit || input.costUnit === unit)
+        const estimatedCost = validCost(input.estimatedCost)
           ? Number(input.estimatedCost)
           : this.estimateFor(policy, identity, unit, now);
         if (estimatedCost === null) {
           return this.decision(input, false, "Enabled budget has no attributable recent usage to estimate this request.", policy.deadline, matched);
         }
         const key = policyKey(policy.scope);
+        if (quota) {
+          const denied = this.quotaDenial(policy, key, quotaMeters, estimatedCost, now);
+          if (denied) return this.decision(input, false, denied, policy.deadline ?? new Date(now.getTime() + 3_600_000).toISOString(), matched);
+          if (policy.deadline && !retryAt) retryAt = new Date(policy.deadline);
+          reservations.push({ scopeKey: key, amount: estimatedCost, unit });
+          continue;
+        }
         const start = policy.unit === "tokens-total" ? this.policyStartedAt(key) : now.getTime() - 3_600_000;
         const used = Number((this.db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM usage_events WHERE scope_key = ? AND unit = ? AND at >= ?").get(key, unit, start) as { total: number }).total);
         const reserved = Number((this.db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM reservations WHERE scope_key = ? AND unit = ? AND status = 'reserved'").get(key, unit) as { total: number }).total);
-        if (used + reserved + estimatedCost > limit + 1e-9) {
+        if (used + reserved + estimatedCost > limit! + 1e-9) {
           return this.decision(input, false, "Budget allowance is exhausted.", policy.deadline ?? new Date(now.getTime() + 3_600_000).toISOString(), matched);
         }
         if (policy.deadline && !retryAt) retryAt = new Date(policy.deadline);
@@ -595,6 +639,31 @@ export class BudgetService {
     return Number((this.db.prepare("SELECT COUNT(*) AS count FROM admission_decisions WHERE source = ? AND allowed = 0 AND at >= ?").get(source, since) as { count: number }).count);
   }
 
+  /** True while any Auto or Manual percentage-per-hour policy is enabled, so quota meters must be kept fresh. */
+  quotaEnabled(source?: Source): boolean {
+    const loaded = this.readSettings();
+    return !loaded.error && loaded.settings.policies.some((policy) => policy.mode !== "off" &&
+      (policy.mode === "auto" || policy.unit === "percentage-per-hour") &&
+      (!source || policy.scope.kind !== "source" || policy.scope.source === source));
+  }
+
+  /**
+   * One hook process at a time may refresh a source's quota meters: only when a quota policy applies and a
+   * meter is missing or over 4 minutes old, and at most once a minute across processes.
+   */
+  claimMeterRefresh(source: Source): boolean {
+    if (!this.quotaEnabled(source)) return false;
+    return this.writeTransaction(() => {
+      const at = this.now().getTime();
+      const meters = this.meters().filter((meter) => meter.source === source);
+      if (meters.length && meters.every((meter) => at - meter.observedAt.getTime() <= BUDGET_STALE_MS - 60_000)) return false;
+      const row = this.db.prepare("SELECT tried_at FROM meter_refreshes WHERE source = ?").get(source) as { tried_at: number } | undefined;
+      if (row && at - row.tried_at < 60_000) return false;
+      this.db.prepare("INSERT INTO meter_refreshes (source, tried_at) VALUES (?, ?) ON CONFLICT(source) DO UPDATE SET tried_at = excluded.tried_at").run(source, at);
+      return true;
+    });
+  }
+
   /** True when any policy is on, a stop is latched, or settings are unreadable, so hooks must do control work. */
   enforcing(): boolean {
     const loaded = this.readSettings();
@@ -606,12 +675,40 @@ export class BudgetService {
     return row?.started_at ?? 0;
   }
 
-  private meterFor(policy: BudgetPolicy, identity: BudgetIdentity): BudgetMeter | null {
-    const meters = this.meters();
+  /** Every window the provider supplies for this identity: all of them bound admission. */
+  private metersFor(policy: BudgetPolicy, identity: BudgetIdentity): BudgetMeter[] {
     const provider = policy.scope.kind === "source" ? identity.provider : policy.scope.provider;
-    return meters.find((meter) => meter.source === identity.source &&
+    return this.meters().filter((meter) => meter.source === identity.source &&
       canonicalIdentity(meter.provider) === canonicalIdentity(provider) &&
-      (!identity.account || canonicalIdentity(meter.account) === canonicalIdentity(identity.account))) ?? null;
+      (!identity.account || canonicalIdentity(meter.account) === canonicalIdentity(identity.account)));
+  }
+
+  /** Quota percentage points per weighted token, measured from this window's own movement, or null. */
+  private calibrationRatio(meter: BudgetMeter, scopeKey: string, now: Date): number | null {
+    const length = meterWindowMs(meter.window);
+    if (length === null) return null;
+    const start = Math.min(now.getTime(), meter.resetAt.getTime() - length);
+    const tokens = this.tokensSince(scopeKey, start);
+    return tokens > 0 && meter.usedPercentagePoints > 0 ? meter.usedPercentagePoints / tokens : null;
+  }
+
+  private tokensSince(scopeKey: string, since: number): number {
+    return Number((this.db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM usage_events WHERE scope_key = ? AND unit = 'tokens-per-hour' AND at >= ?").get(scopeKey, since) as { total: number }).total);
+  }
+
+  /** A denial reason when the request would push any window past its hourly limit, else null. */
+  private quotaDenial(policy: BudgetPolicy, scopeKey: string, meters: BudgetMeter[], estimateTokens: number, now: Date): string | null {
+    const usedTokens = this.tokensSince(scopeKey, now.getTime() - 3_600_000);
+    const reservedTokens = Number((this.db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM reservations WHERE scope_key = ? AND unit = 'tokens-per-hour' AND status = 'reserved'").get(scopeKey) as { total: number }).total);
+    for (const meter of meters) {
+      if (meterWindowMs(meter.window) === null) return "Authoritative budget meter has no known window length.";
+      const limit = policy.mode === "auto" ? autoPace(meter, now) : policy.limit;
+      if (limit === null || limit === undefined) return "Budget meter is unavailable or stale.";
+      const ratio = this.calibrationRatio(meter, scopeKey, now);
+      if (ratio === null) return "Auto needs measured quota movement to convert usage; no calibration in the current window.";
+      if ((usedTokens + reservedTokens + estimateTokens) * ratio > limit + 1e-9) return "Budget allowance is exhausted.";
+    }
+    return null;
   }
 
   private estimateFor(policy: BudgetPolicy, _identity: BudgetIdentity, unit: string, now: Date): number | null {

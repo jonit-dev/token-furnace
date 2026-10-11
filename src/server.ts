@@ -21,6 +21,7 @@ import { controlTargetProof } from "./services/agent-control";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { installBudgetAdapters, pendingRepairs, runFixConfig } from "./setup/agents";
 import { openCodeWeek, planReading, planWeek } from "./services/usage-client";
+import { refreshBudgetMeters } from "./services/budget-meters";
 import { resetsSnapshot } from "./services/resets-client";
 import {
   deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
@@ -44,6 +45,7 @@ export interface LiveServer {
 
 /** The refresh that runs on its own, without a browser tab asking for it. */
 const TICK_MS = 60_000;
+const METER_REFRESH_MS = 60_000;
 
 /** Serve until the process is stopped. Ctrl-C ends it. */
 export async function serve(app: App, options: ServeOptions): Promise<void> {
@@ -80,11 +82,20 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     notifyTick(app, options.planUsage, options.weeklyBudget).catch(() => {}).finally(() => { ticker.running = false; });
   }, TICK_MS);
   timer.unref();
+  // Quota meters stay fresh without a dashboard open while an Auto (or percentage-per-hour Manual) policy is on.
+  const meterTicker = { running: false };
+  const meterTimer = setInterval(() => {
+    if (meterTicker.running || !app.budgets.quotaEnabled()) return;
+    meterTicker.running = true;
+    refreshBudgetMeters(app, options.planUsage).catch(() => {}).finally(() => { meterTicker.running = false; });
+  }, METER_REFRESH_MS);
+  meterTimer.unref();
   return {
     url: `http://127.0.0.1:${port}`,
     port,
     close: () => new Promise((done) => {
       clearInterval(timer);
+      clearInterval(meterTimer);
       http.close(() => { app.close(); done(); });
     }),
   };
@@ -476,26 +487,6 @@ function seedBudgetUsage(app: App): void {
     }
   }
   if (events.length) app.budgets.seedRecentUsage(events);
-}
-
-async function refreshBudgetMeters(app: App, network: boolean): Promise<void> {
-  const now = app.now();
-  const [plan, open] = await Promise.all([
-    planReading(app.env, now, network),
-    openCodeWeek(app.env, now, network),
-  ]);
-  const codex = app.sources.find((source) => source.name === "codex")?.weekReading?.(now)
-    ?? app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
-  const meters = [
-    plan ? { id: "anthropic:weekly", source: "claude" as const, provider: "anthropic", account: plan.account ?? null, usedPercentagePoints: plan.used, resetAt: plan.resets, observedAt: validObservedAt(plan.observedAt), authoritative: plan.authoritative ?? true, window: plan.window } : null,
-    codex ? { id: "openai:weekly", source: "codex" as const, provider: "openai", account: codex.account ?? null, usedPercentagePoints: codex.used, resetAt: codex.resets, observedAt: validObservedAt(codex.observedAt), authoritative: codex.authoritative ?? true, window: codex.window } : null,
-    open ? { id: "opencode-go:weekly", source: "opencode" as const, provider: "opencode-go", account: open.account ?? null, usedPercentagePoints: open.used, resetAt: open.resets, observedAt: validObservedAt(open.observedAt), authoritative: open.authoritative ?? true, window: open.window } : null,
-  ].filter((meter): meter is NonNullable<typeof meter> => meter !== null);
-  if (meters.length) app.budgets.setMeters(meters);
-}
-
-function validObservedAt(value: Date | undefined): Date {
-  return value && Number.isFinite(value.getTime()) ? value : new Date(0);
 }
 
 function budgetWriteError(req: Request, mutationToken: string): { status: number; message: string } | null {

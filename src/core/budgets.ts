@@ -74,6 +74,14 @@ export function autoPace(meter: BudgetMeter, now: Date = new Date()): number | n
   return Math.max(0, 100 - used) / hoursUntilReset;
 }
 
+/** Length of a meter window label such as "5h", "7d" or "300m", or null when it is not one. */
+export function meterWindowMs(window: string | undefined): number | null {
+  const match = /^(\d+(?:\.\d+)?)(m|h|d)$/.exec(window ?? "");
+  if (!match) return null;
+  const value = Number(match[1]) * ({ m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as "m" | "h" | "d"]);
+  return value > 0 ? value : null;
+}
+
 export function autoAllowance(meter: BudgetMeter, now: Date = new Date(), hours = 1): number | null {
   if (!Number.isFinite(hours) || hours <= 0) return null;
   const pace = autoPace(meter, now);
