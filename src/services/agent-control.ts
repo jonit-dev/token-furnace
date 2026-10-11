@@ -119,19 +119,28 @@ interface ProcessInspectionResult {
   detail?: string;
 }
 
+interface ProcessMetadataGraph {
+  available: boolean;
+  byPid: Map<number, ProcessIdentity>;
+  detail?: string;
+}
+
 /** Durable ownership-aware local control. Unregistered or unverifiable work is never signalled. */
 export class AgentControl {
   private readonly inspectProcess: (pid: number) => ProcessIdentity | null;
   private readonly signalProcess: (pid: number, signal: NodeJS.Signals) => void;
   private readonly currentUid: number | null;
   private readonly currentOwner: string | null;
-  private readonly currentOwnerSid: string | null;
+  private currentOwnerSid: string | null;
+  private readonly resolveCurrentOwnerSid: boolean;
+  private currentOwnerSidResolved = false;
   private readonly currentPid: number;
   private readonly env: Env;
   private readonly store: ControlStore | null;
   private readonly discoverRuntime?: () => ControlTarget[];
   private readonly listProcesses: () => ProcessIdentity[];
   private readonly listNativeProcesses: () => ProcessIdentity[];
+  private readonly metadataAncestry: boolean;
   private readonly graceMs: number;
   private readonly adapters = new Map<string, { cancel?: () => Promise<boolean>; state?: () => Promise<boolean> }>();
   private runtimeUnverified: ControlPreview["unverified"] = [];
@@ -147,9 +156,8 @@ export class AgentControl {
     this.currentOwner = options.currentOwner === undefined
       ? process.platform === "win32" && env.USERDOMAIN && env.USERNAME ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME ?? env.USER ?? null
       : options.currentOwner;
-    this.currentOwnerSid = options.currentOwnerSid === undefined
-      ? process.platform === "win32" ? this.inspectSafely(this.currentPid).identity?.ownerSid ?? null : null
-      : options.currentOwnerSid;
+    this.currentOwnerSid = options.currentOwnerSid ?? null;
+    this.resolveCurrentOwnerSid = process.platform === "win32" && options.currentOwnerSid === undefined;
     this.env = env;
     const state = env.TOKEN_FURNACE_STATE_HOME || env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state");
     const storePath = options.storePath ?? options.statePath ?? join(state, "token-furnace", "control.sqlite");
@@ -160,6 +168,7 @@ export class AgentControl {
     this.discoverRuntime = options.discoverRuntime;
     this.listProcesses = options.listProcesses ?? listProcessIdentities;
     this.listNativeProcesses = options.listNativeProcesses ?? options.listProcesses ?? listNativeProcessIdentities;
+    this.metadataAncestry = process.platform === "win32" || options.listProcesses !== undefined;
     this.graceMs = Math.max(0, options.graceMs ?? 5_000);
   }
 
@@ -172,7 +181,9 @@ export class AgentControl {
     const ownerIdentity = target.ownerIdentity ?? observed?.ownerIdentity ?? null;
     const ownerSid = target.ownerSid ?? observed?.ownerSid ?? null;
     if (this.currentUid !== null && ownerUid !== null && ownerUid !== this.currentUid) return false;
-    if (this.currentOwnerSid && ownerSid && ownerSid !== this.currentOwnerSid) return false;
+    const currentOwnerSid = this.ownerSid();
+    if (this.requiresVerifiedOwnerSid() && !currentOwnerSid) return false;
+    if (currentOwnerSid && ownerSid && ownerSid !== currentOwnerSid) return false;
     const normalized: ControlTarget = {
       ...target,
       provider: canonicalIdentity(target.provider),
@@ -228,11 +239,12 @@ export class AgentControl {
     const targets: ControlTarget[] = [];
     const unverified: ControlPreview["unverified"] = [...this.runtimeUnverified];
     const collateral: ControlPreview["collateral"] = [];
+    const metadataGraph = this.metadataAncestry ? this.readMetadataGraph() : undefined;
     if (this.storeError) unverified.push({ id: "control-store", source: null, provider: null, model: null, detail: `Control store unavailable: ${this.storeError}` });
     for (const target of this.readTargets()) {
       const relation = scopeRelation(scope, target);
       if (relation === "none") continue;
-      const verification = this.verify(target);
+      const verification = this.verify(target, metadataGraph);
       if (relation === "unknown") {
         unverified.push({ id: target.id, source: target.source, provider: target.provider, model: target.model, detail: "Provider or model identity is unresolved for this stop scope." });
       } else if (verification.ok) {
@@ -265,7 +277,8 @@ export class AgentControl {
     if (!initial.available) return this.finish(target, { targetId: target.id, status: "unresolved", detail: initial.detail ?? "Process identity lookup is unavailable." });
     const identity = initial.identity;
     if (!identity) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process is no longer discoverable." });
-    const protection = this.protectsCurrentProcess(target.pid);
+    const metadataGraph = this.metadataAncestry ? this.readMetadataGraph() : undefined;
+    const protection = this.protectsCurrentProcess(target.pid, metadataGraph);
     if (!protection.available) return this.finish(target, { targetId: target.id, status: "unresolved", detail: protection.detail ?? "Ancestor identity lookup is unavailable." });
     if (target.pid === this.currentPid || protection.protected) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Refused to target Token Furnace or an ancestor." });
@@ -276,7 +289,7 @@ export class AgentControl {
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process is not owned by the current user." });
     }
-    if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) {
+    if (!this.matchesCurrentOwner(identity)) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process owner SID changed." });
     }
     if (target.executable && identity.executable && !sameExecutable(target.executable, identity.executable)) {
@@ -285,7 +298,7 @@ export class AgentControl {
 
     if (!force && target.nativeCancel) {
       try {
-        const beforeNative = this.verify(target);
+        const beforeNative = this.verify(target, metadataGraph);
         if (!beforeNative.ok) return this.finish(target, { targetId: target.id, status: "unresolved", detail: beforeNative.detail });
         if (await target.nativeCancel()) {
           const terminal = await this.waitForTerminal(target);
@@ -302,16 +315,16 @@ export class AgentControl {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "No native adapter and process fallback is not exclusive." });
     }
     try {
-      const beforeSignal = this.verify(target);
+      const beforeSignal = this.verify(target, metadataGraph);
       if (!beforeSignal.ok) return this.finish(target, { targetId: target.id, status: "unresolved", detail: beforeSignal.detail });
-      const descendants = this.ownedDescendants(target);
+      const descendants = this.ownedDescendants(target, metadataGraph);
       if (descendants === null) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant could not be verified for process fallback." });
       this.signalProcess(target.pid, force ? "SIGKILL" : "SIGTERM");
       for (const descendant of descendants) {
         const inspected = this.inspectSafely(descendant.pid);
         if (!inspected.available) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant identity lookup is unavailable." });
         if (!inspected.identity) continue;
-        if (!this.verifyProcessIdentity(descendant, inspected.identity)) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant changed identity before termination." });
+        if (!this.verifyProcessIdentity(descendant, inspected.identity, metadataGraph)) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant changed identity before termination." });
         this.signalProcess(descendant.pid, force ? "SIGKILL" : "SIGTERM");
       }
       const terminal = await this.waitForProcessExit(target, descendants);
@@ -403,25 +416,52 @@ export class AgentControl {
     }
   }
 
-  private verify(target: ControlTarget): { ok: true } | { ok: false; detail: string } {
+  private verify(target: ControlTarget, metadataGraph?: ProcessMetadataGraph): { ok: true } | { ok: false; detail: string } {
     const inspected = this.inspectSafely(target.pid);
     if (!inspected.available) return { ok: false, detail: inspected.detail ?? "Process identity lookup is unavailable." };
     const identity = inspected.identity;
     if (!identity) return { ok: false, detail: "Process is no longer discoverable." };
-    const protection = this.protectsCurrentProcess(target.pid);
+    const protection = this.protectsCurrentProcess(target.pid, metadataGraph);
     if (!protection.available) return { ok: false, detail: protection.detail ?? "Ancestor identity lookup is unavailable." };
     if (target.pid === this.currentPid || protection.protected) return { ok: false, detail: "Token Furnace or an ancestor is protected." };
     if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null) || (identity.ownerSid ?? null) !== (target.ownerSid ?? null)) return { ok: false, detail: "Process ownership or start identity changed." };
     if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return { ok: false, detail: "Process owner identity is unavailable." };
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return { ok: false, detail: "Process is not owned by the current user." };
     if (this.currentOwner && identity.ownerIdentity && identity.ownerIdentity !== this.currentOwner) return { ok: false, detail: "Process owner identity changed." };
-    if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) return { ok: false, detail: "Process owner SID changed." };
+    if (!this.matchesCurrentOwner(identity)) return { ok: false, detail: "Process owner identity changed or is unavailable." };
     if (target.executable && identity.executable && !sameExecutable(target.executable, identity.executable)) return { ok: false, detail: "Executable identity changed." };
     return { ok: true };
   }
 
-  /** Walk the current process's parents: descendants are valid workers, ancestors are protected. */
-  private protectsCurrentProcess(pid: number): { protected: boolean; available: boolean; detail?: string } {
+  private readMetadataGraph(): ProcessMetadataGraph {
+    try {
+      const byPid = new Map<number, ProcessIdentity>();
+      for (const identity of this.listProcesses()) {
+        if (!Number.isInteger(identity.pid) || identity.pid <= 0 || !Number.isFinite(identity.processStartTime) || identity.processStartTime <= 0 || (identity.parentPid !== null && (!Number.isInteger(identity.parentPid) || identity.parentPid < 0)) || (identity.executable != null && typeof identity.executable !== "string")) {
+          return { available: false, byPid, detail: `Process metadata graph is malformed at PID ${identity.pid} (start ${identity.processStartTime}, parent PID ${identity.parentPid ?? "none"}).` };
+        }
+        if (byPid.has(identity.pid)) return { available: false, byPid, detail: `Process metadata graph contains duplicate PID ${identity.pid}.` };
+        byPid.set(identity.pid, identity);
+      }
+      return { available: true, byPid };
+    } catch (error) {
+      return {
+        available: false,
+        byPid: new Map(),
+        detail: `Process metadata graph is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  private graphInspection(graph: ProcessMetadataGraph, pid: number): ProcessInspectionResult {
+    if (!graph.available) return { identity: null, available: false, detail: graph.detail };
+    const identity = graph.byPid.get(pid);
+    return identity ? { identity, available: true } : this.inspectSafely(pid);
+  }
+
+  /** Walk a complete metadata graph: ancestors are protected, successful absence ends the chain. */
+  private protectsCurrentProcess(pid: number, metadataGraph?: ProcessMetadataGraph): { protected: boolean; available: boolean; detail?: string } {
+    if (metadataGraph) return this.protectsWithMetadataGraph(pid, metadataGraph);
     const seen = new Set<number>();
     const currentResult = this.inspectSafely(this.currentPid);
     if (!currentResult.available || !currentResult.identity) return {
@@ -429,19 +469,55 @@ export class AgentControl {
       available: false,
       detail: currentResult.detail ?? "Token Furnace identity lookup is unavailable.",
     };
-    let current = currentResult.identity.parentPid;
-    while (current && current > 1 && !seen.has(current)) {
-      if (current === pid) return { protected: true, available: true };
-      seen.add(current);
-      const inspected = this.inspectSafely(current);
-      if (!inspected.available || !inspected.identity) return {
-        protected: false,
-        available: false,
-        detail: inspected.detail ?? "Ancestor identity lookup is unavailable.",
-      };
-      current = inspected.identity.parentPid;
+    let child = currentResult.identity;
+    while (child.parentPid && child.parentPid > 1) {
+      const parentPid = child.parentPid;
+      if (seen.has(parentPid)) return { protected: false, available: false, detail: this.generationDetail(child, parentPid, "ancestor cycle") };
+      seen.add(parentPid);
+      const inspected = this.inspectSafely(parentPid);
+      if (!inspected.available) return { protected: false, available: false, detail: this.ancestorLookupDetail(parentPid, child, inspected.detail) };
+      if (!inspected.identity) return { protected: false, available: true };
+      if (!this.validGeneration(child, inspected.identity)) return { protected: false, available: false, detail: this.generationDetail(inspected.identity, parentPid, "parent start is newer than child") };
+      if (parentPid === pid) return { protected: true, available: true };
+      child = inspected.identity;
     }
     return { protected: false, available: true };
+  }
+
+  private protectsWithMetadataGraph(pid: number, graph: ProcessMetadataGraph): { protected: boolean; available: boolean; detail?: string } {
+    if (!graph.available) return { protected: false, available: false, detail: graph.detail ?? "Process metadata graph is unavailable." };
+    const currentResult = this.graphInspection(graph, this.currentPid);
+    if (!currentResult.available || !currentResult.identity) return {
+      protected: false,
+      available: false,
+      detail: currentResult.detail ?? "Token Furnace identity lookup is unavailable.",
+    };
+    const seen = new Set<number>([currentResult.identity.pid]);
+    let child = currentResult.identity;
+    while (child.parentPid && child.parentPid > 1) {
+      const parentPid = child.parentPid;
+      if (seen.has(parentPid)) return { protected: false, available: false, detail: this.generationDetail(child, parentPid, "ancestor cycle") };
+      seen.add(parentPid);
+      const inspected = this.graphInspection(graph, parentPid);
+      if (!inspected.available) return { protected: false, available: false, detail: this.ancestorLookupDetail(parentPid, child, inspected.detail) };
+      if (!inspected.identity) return { protected: false, available: true };
+      if (!this.validGeneration(child, inspected.identity)) return { protected: false, available: false, detail: this.generationDetail(inspected.identity, parentPid, "parent start is newer than child") };
+      if (parentPid === pid) return { protected: true, available: true };
+      child = inspected.identity;
+    }
+    return { protected: false, available: true };
+  }
+
+  private validGeneration(child: ProcessIdentity, parent: ProcessIdentity): boolean {
+    return parent.processStartTime <= child.processStartTime;
+  }
+
+  private ancestorLookupDetail(parentPid: number, child: ProcessIdentity, detail?: string): string {
+    return `Ancestor identity lookup is unavailable at PID ${parentPid} (child PID ${child.pid}, child start ${child.processStartTime}, parent PID ${child.parentPid ?? "none"})${detail ? `: ${detail}` : "."}`;
+  }
+
+  private generationDetail(parent: ProcessIdentity, boundaryPid: number, reason: string): string {
+    return `Ancestor generation is inconsistent at PID ${boundaryPid} (start ${parent.processStartTime}, parent PID ${parent.parentPid ?? "none"}): ${reason}.`;
   }
 
   private async waitForTerminal(target: ControlTarget): Promise<boolean> {
@@ -478,22 +554,46 @@ export class AgentControl {
     }
   }
 
-  private verifyProcessIdentity(expected: ProcessIdentity, observed?: ProcessIdentity): boolean {
+  private verifyProcessIdentity(expected: ProcessIdentity, observed?: ProcessIdentity, metadataGraph?: ProcessMetadataGraph): boolean {
     const inspected = observed ? { identity: observed, available: true } : this.inspectSafely(expected.pid);
     if (!inspected.available) return false;
     const identity = inspected.identity;
     if (!identity || !sameProcessIdentity(identity, expected)) return false;
-    const protection = this.protectsCurrentProcess(expected.pid);
+    const protection = this.protectsCurrentProcess(expected.pid, metadataGraph);
     if (!protection.available || expected.pid === this.currentPid || protection.protected) return false;
     if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return false;
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return false;
-    if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) return false;
+    if (!this.matchesCurrentOwner(identity)) return false;
     return true;
   }
 
-  private ownedDescendants(target: ControlTarget): ProcessIdentity[] | null {
-    let processes: ProcessIdentity[];
-    try { processes = this.listProcesses(); } catch { return null; }
+  private ownerSid(): string | null {
+    if (!this.resolveCurrentOwnerSid || this.currentOwnerSidResolved) return this.currentOwnerSid;
+    this.currentOwnerSidResolved = true;
+    const inspected = this.inspectSafely(this.currentPid);
+    if (inspected.available) this.currentOwnerSid = inspected.identity?.ownerSid ?? null;
+    return this.currentOwnerSid;
+  }
+
+  private requiresVerifiedOwnerSid(): boolean {
+    return process.platform === "win32" && this.resolveCurrentOwnerSid;
+  }
+
+  private matchesCurrentOwner(identity: ProcessIdentity): boolean {
+    const currentOwnerSid = this.ownerSid();
+    if (this.requiresVerifiedOwnerSid() && !currentOwnerSid) return false;
+    if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return false;
+    if (this.currentOwner && identity.ownerIdentity && identity.ownerIdentity !== this.currentOwner) return false;
+    if (currentOwnerSid && identity.ownerSid !== currentOwnerSid) return false;
+    return this.currentUid !== null || Boolean(this.currentOwner) || Boolean(currentOwnerSid);
+  }
+
+  private ownedDescendants(target: ControlTarget, metadataGraph?: ProcessMetadataGraph): ProcessIdentity[] | null {
+    if (metadataGraph && !metadataGraph.available) return null;
+    const processes = metadataGraph ? [...metadataGraph.byPid.values()] : (() => {
+      try { return this.listProcesses(); } catch { return null; }
+    })();
+    if (!processes) return null;
     const children = new Map<number, ProcessIdentity[]>();
     for (const identity of processes) {
       if (identity.parentPid === null) continue;
@@ -512,8 +612,10 @@ export class AgentControl {
         queue.push(...(children.get(identity.pid) ?? []));
         continue;
       }
+      if (!sameProcessMetadata(identity, observed)) return null;
       if (!sameProcessOwner(observed, target)) return null;
-      if (!this.verifyProcessIdentity(identity, observed)) return null;
+      const verified = { ...identity, ownerUid: observed.ownerUid, ownerIdentity: observed.ownerIdentity, ownerSid: observed.ownerSid, executable: identity.executable ?? observed.executable };
+      if (!this.verifyProcessIdentity(verified, observed, metadataGraph)) return null;
       result.push(observed);
       queue.push(...(children.get(identity.pid) ?? []));
     }
@@ -743,6 +845,12 @@ function sameExecutable(expected: string, actual: string): boolean {
 function sameProcessIdentity(actual: ProcessIdentity, expected: Pick<ProcessIdentity, "pid" | "processStartTime" | "ownerUid" | "ownerIdentity" | "ownerSid">): boolean {
   return actual.pid === expected.pid && actual.processStartTime === expected.processStartTime && actual.ownerUid === expected.ownerUid &&
     (actual.ownerIdentity ?? null) === (expected.ownerIdentity ?? null) && (actual.ownerSid ?? null) === (expected.ownerSid ?? null);
+}
+
+function sameProcessMetadata(actual: ProcessIdentity, expected: ProcessIdentity): boolean {
+  if (actual.pid !== expected.pid || actual.processStartTime !== expected.processStartTime || actual.parentPid !== expected.parentPid) return false;
+  if (expected.executable && (!actual.executable || !sameExecutable(expected.executable, actual.executable))) return false;
+  return true;
 }
 
 function sameProcessOwner(actual: ProcessIdentity, expected: ControlTarget): boolean {
@@ -1062,7 +1170,17 @@ function discoverNativeProcesses(list: () => ProcessIdentity[], inspect: (pid: n
     if (!source) continue;
     const owner = resolveNativeProcess(identity, source, inspect, byPid);
     if (markedSource === "claude" || markedSource === "codex" || markedSource === "opencode") {
-      if (owner) targets.push(targetFromProcess(owner, source, { ...env, ...readProcEnv(owner.pid) }));
+      if (owner) {
+        const verifiedOwner = inspect(owner.pid);
+        if (verifiedOwner) targets.push(targetFromProcess(verifiedOwner, source, { ...env, ...readProcEnv(verifiedOwner.pid) }));
+        else unverified.push({
+          id: `unmanaged:${source}:${identity.pid}:${identity.processStartTime}`,
+          source,
+          provider: null,
+          model: null,
+          detail: `${source} owning runtime PID ${owner.pid} is no longer discoverable for ownership verification.`,
+        });
+      }
       else unverified.push({
         id: `unmanaged:${source}:${identity.pid}:${identity.processStartTime}`,
         source,
@@ -1212,7 +1330,7 @@ function listProcessIdentities(): ProcessIdentity[] {
 }
 
 function listNativeProcessIdentities(): ProcessIdentity[] {
-  if (process.platform === "win32") return listWindowsProcesses(true, true);
+  if (process.platform === "win32") return listWindowsProcesses(false, false);
   return listProcessIdentities();
 }
 
@@ -1282,10 +1400,11 @@ function listWindowsProcesses(nativeOnly: boolean, includeOwners = true): Proces
 
 function windowsProcessScript(query: string, nativeOnly = false, includeOwners = true): string {
   const filter = nativeOnly ? " | Where-Object { $_.ExecutablePath -match '(?i)claude|codex|opencode' -or $_.CommandLine -match '(?i)claude|codex|opencode' }" : "";
+  const actionable = `${query}${filter} | Where-Object { [int]$_.ProcessId -gt 0 }`;
   const owner = includeOwners
     ? "$owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ throw \"CIM owner lookup failed for PID $($_.ProcessId).\" };"
     : "$owner=$null; $sid=$null;";
-  return `$ErrorActionPreference='Stop'; $rows=@(${query}${filter} | ForEach-Object { ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } }); $rows | ConvertTo-Json -Compress`;
+  return `$ErrorActionPreference='Stop'; $rows=@(${actionable} | ForEach-Object { if(-not $_.CreationDate){ throw \"CIM process start lookup failed for PID $($_.ProcessId).\" }; ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } }); $rows | ConvertTo-Json -Compress`;
 }
 
 function parseWindowsOutput(output: string): ProcessIdentity[] {

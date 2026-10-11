@@ -108,17 +108,164 @@ describe("AgentControl", () => {
     const signal = vi.fn();
     const currentPid = 9000;
     const identities = new Map<number, ProcessIdentity>([
-      [currentPid, { pid: currentPid, processStartTime: 1, ownerUid: 7, parentPid: 8000 }],
+      [currentPid, { pid: currentPid, processStartTime: 3, ownerUid: 7, parentPid: 8000 }],
       [8000, { pid: 8000, processStartTime: 2, ownerUid: 7, parentPid: 1 }],
-      [7000, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: currentPid }],
+      [7000, { pid: 7000, processStartTime: 4, ownerUid: 7, parentPid: currentPid }],
     ]);
     const control = makeControl({ currentPid, currentUid: 7, signal, graceMs: 0, inspect: (pid) => identities.get(pid) ?? null, storePath: testStore() });
     const ancestor = await control.cancel(target({ id: "ancestor", pid: 8000, processStartTime: 2, exclusive: true }), true);
     expect(ancestor.status).toBe("unresolved");
     expect(signal).not.toHaveBeenCalled();
-    const child = await control.cancel(target({ id: "child", pid: 7000, processStartTime: 3, exclusive: true }), true);
+    const child = await control.cancel(target({ id: "child", pid: 7000, processStartTime: 4, exclusive: true }), true);
     expect(child.status).toBe("unresolved");
     expect(signal).toHaveBeenCalledWith(7000, "SIGKILL");
+  });
+
+  it("treats a successfully absent ancestor as the end of the protection chain", async () => {
+    const identities = new Map<number, ProcessIdentity>([
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 8000 }],
+      [7000, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: 1 }],
+    ]);
+    const signal = vi.fn((pid: number) => identities.delete(pid));
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => identities.get(pid) ?? null,
+      listProcesses: () => [...identities.values()],
+      signal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ id: "absent-ancestor", pid: 7000, processStartTime: 3, exclusive: true }), true);
+    expect(outcome.status).toBe("terminated");
+    expect(signal).toHaveBeenCalledWith(7000, "SIGKILL");
+  });
+
+  it("keeps an ancestor lookup failure unresolved", async () => {
+    const identity: ProcessIdentity = { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 8000 };
+    const signal = vi.fn();
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => {
+        if (pid === 8000) throw new Error("ancestor query denied");
+        return pid === 9000 ? identity : { pid, processStartTime: 3, ownerUid: 7, parentPid: 1 };
+      },
+      listProcesses: () => [identity, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: 1 }],
+      signal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ id: "failed-ancestor", pid: 7000, processStartTime: 3, exclusive: true }), true);
+    expect(outcome.status).toBe("unresolved");
+    expect(outcome.detail).toMatch(/identity lookup is unavailable/i);
+    expect(signal).not.toHaveBeenCalled();
+  });
+
+  it("rejects a parent PID reused by a newer process generation", async () => {
+    const graph: ProcessIdentity[] = [
+      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000 },
+      { pid: 8000, processStartTime: 20, ownerUid: 7, parentPid: 1 },
+      { pid: 7000, processStartTime: 30, ownerUid: 7, parentPid: 1 },
+    ];
+    const signal = vi.fn();
+    const byPid = new Map(graph.map((item) => [item.pid, item]));
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => byPid.get(pid) ?? null,
+      listProcesses: () => graph,
+      signal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ id: "reused-parent", pid: 7000, processStartTime: 30, exclusive: true }), true);
+    expect(outcome.status).toBe("unresolved");
+    expect(outcome.detail).toMatch(/generation|ancestor/i);
+    expect(signal).not.toHaveBeenCalled();
+  });
+
+  it("uses one metadata graph for ancestry instead of owner queries per parent", async () => {
+    const graph: ProcessIdentity[] = [
+      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000 },
+      { pid: 8000, processStartTime: 9, ownerUid: 7, parentPid: 7000 },
+      { pid: 7000, processStartTime: 8, ownerUid: 7, parentPid: 1 },
+      { pid: 4321, processStartTime: 30, ownerUid: 7, parentPid: 1 },
+    ];
+    const byPid = new Map(graph.map((item) => [item.pid, item]));
+    const inspect = vi.fn((pid: number) => byPid.get(pid) ?? null);
+    const listProcesses = vi.fn(() => [...byPid.values()]);
+    const signal = vi.fn((pid: number) => byPid.delete(pid));
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect,
+      listProcesses,
+      signal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ pid: 4321, processStartTime: 30, exclusive: true }), true);
+    expect(outcome.status).toBe("terminated");
+    expect(inspect.mock.calls.filter(([pid]) => pid === 8000 || pid === 7000)).toHaveLength(0);
+    expect(listProcesses).toHaveBeenCalledTimes(1);
+  });
+
+  it("revalidates ownerless descendant metadata before signalling", async () => {
+    const graph: ProcessIdentity[] = [
+      { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 },
+      { pid: 4321, processStartTime: 10, ownerUid: null, parentPid: 1, executable: "C:\\agent.exe" },
+      { pid: 4322, processStartTime: 11, ownerUid: null, parentPid: 4321, executable: "C:\\tool.exe" },
+    ];
+    const fresh = new Map<number, ProcessIdentity>([
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
+      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: "C:\\agent.exe" }],
+      [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321, executable: "C:\\tool.exe" }],
+    ]);
+    const signal = vi.fn((pid: number) => fresh.delete(pid));
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => fresh.get(pid) ?? null,
+      listProcesses: () => graph,
+      signal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ pid: 4321, ownerUid: 7, executable: "C:\\agent.exe", exclusive: true }), true);
+    expect(outcome.status).toBe("terminated");
+    expect(signal.mock.calls.map(([pid]) => pid)).toEqual([4321, 4322]);
+  });
+
+  it("rejects a foreign or reused descendant from a metadata-only graph", async () => {
+    for (const observedDescendant of [
+      { pid: 4322, processStartTime: 11, ownerUid: 8, parentPid: 4321, executable: "C:\\tool.exe" },
+      { pid: 4322, processStartTime: 12, ownerUid: 7, parentPid: 4321, executable: "C:\\tool.exe" },
+    ]) {
+      const graph: ProcessIdentity[] = [
+        { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 },
+        { pid: 4321, processStartTime: 10, ownerUid: null, parentPid: 1, executable: "C:\\agent.exe" },
+        { pid: 4322, processStartTime: 11, ownerUid: null, parentPid: 4321, executable: "C:\\tool.exe" },
+      ];
+      const fresh = new Map<number, ProcessIdentity>([
+        [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
+        [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: "C:\\agent.exe" }],
+        [4322, observedDescendant],
+      ]);
+      const signal = vi.fn((pid: number) => { fresh.delete(pid); });
+      const control = makeControl({
+        currentPid: 9000,
+        currentUid: 7,
+        inspect: (pid) => fresh.get(pid) ?? null,
+        listProcesses: () => graph,
+        signal,
+        graceMs: 0,
+        storePath: testStore(),
+      });
+      const outcome = await control.cancel(target({ pid: 4321, ownerUid: 7, executable: "C:\\agent.exe", exclusive: true }), true);
+      expect(outcome.status).toBe("unresolved");
+      expect(signal).not.toHaveBeenCalled();
+    }
   });
 
   it("does not report force termination until process exit is observed", async () => {
@@ -283,9 +430,6 @@ describe("AgentControl", () => {
       expect(identity.ownerUid !== null || identity.ownerIdentity || identity.ownerSid).toBeTruthy();
       expect(control.register({ ...target({ id: "real-child", pid: child.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
       markWindowsStopStage(timing, "registration");
-      const previewStarted = Date.now();
-      control.preview({ kind: "source", source: "claude" });
-      if (process.platform === "win32") timing.stages.preview = Date.now() - previewStarted;
       const outcome = await control.cancel({ ...target({ id: "real-child", pid: child.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
       markWindowsStopStage(timing, "cancelAndVerification");
       if (process.platform === "win32") console.info(`TOKEN_FURNACE_WINDOWS_STOP_OUTCOME ${JSON.stringify(outcome)}`);
@@ -337,9 +481,6 @@ describe("AgentControl", () => {
       expect(grandchildPid).toBeDefined();
       expect(control.register({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
       markWindowsStopStage(timing, "registration");
-      const previewStarted = Date.now();
-      control.preview({ kind: "source", source: "claude" });
-      if (process.platform === "win32") timing.stages.preview = Date.now() - previewStarted;
       const outcome = await control.cancel({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
       markWindowsStopStage(timing, "cancelAndVerification");
       if (process.platform === "win32") console.info(`TOKEN_FURNACE_WINDOWS_STOP_OUTCOME ${JSON.stringify(outcome)}`);
