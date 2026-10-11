@@ -138,7 +138,20 @@ describe("budget HTTP controls", () => {
     const { server, body, stop } = await boot(true);
     const validHeaders = { "content-type": "application/json", "x-token-furnace-mutation": body.mutationToken, origin: server.url };
     const payload = JSON.stringify({ expectedRevision: 0, policies: [] });
+    const previewResponse = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST", headers: validHeaders, body: JSON.stringify({ scope: { kind: "provider", provider: "anthropic" } }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json() as { id: string; fingerprint: string };
+    const stopPayload = JSON.stringify({ previewId: preview.id, fingerprint: preview.fingerprint, force: true, forceConfirm: true, outcomes: [] });
     const before = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+    const expectUnchanged = async (label: string) => {
+      const after = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+      expect(after.revision, label).toBe(before.revision);
+      expect(after.policies, label).toEqual(before.policies);
+      expect(after.stops, label).toEqual(before.stops);
+      expect(stop, label).not.toHaveBeenCalled();
+    };
     const rejected = [
       { name: "host", headers: { ...validHeaders, host: "evil.example" }, expected: 403 },
       { name: "origin", headers: { ...validHeaders, origin: "https://evil.example" }, expected: 403 },
@@ -146,10 +159,15 @@ describe("budget HTTP controls", () => {
       { name: "content type", headers: { ...validHeaders, "content-type": "text/plain" }, expected: 415 },
     ];
     for (const attempt of rejected) {
-      const status = attempt.name === "host"
+      const policyStatus = attempt.name === "host"
         ? await postWithHost(`${server.url}/api/budgets`, attempt.headers, payload)
         : (await fetch(`${server.url}/api/budgets`, { method: "POST", headers: attempt.headers, body: payload })).status;
-      expect(status, attempt.name).toBe(attempt.expected);
+      expect(policyStatus, `${attempt.name} policy`).toBe(attempt.expected);
+      const stopStatus = attempt.name === "host"
+        ? await postWithHost(`${server.url}/api/budgets/stop`, attempt.headers, stopPayload)
+        : (await fetch(`${server.url}/api/budgets/stop`, { method: "POST", headers: attempt.headers, body: stopPayload })).status;
+      expect(stopStatus, `${attempt.name} stop`).toBe(attempt.expected);
+      await expectUnchanged(attempt.name);
     }
     const unsupported = await fetch(`${server.url}/api/budgets/stop-preview`, {
       method: "POST",
@@ -157,22 +175,13 @@ describe("budget HTTP controls", () => {
       body: JSON.stringify({ scope: { kind: "unsupported", source: "claude" } }),
     });
     expect(unsupported.status).toBe(400);
-    const after = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
-    expect(after.revision).toBe(before.revision);
-    expect(after.policies).toEqual(before.policies);
-    expect(after.stops).toEqual(before.stops);
-    expect(stop).not.toHaveBeenCalled();
-
-    const previewResponse = await fetch(`${server.url}/api/budgets/stop-preview`, {
-      method: "POST", headers: validHeaders, body: JSON.stringify({ scope: { kind: "provider", provider: "anthropic" } }),
-    });
-    expect(previewResponse.status).toBe(200);
-    const preview = await previewResponse.json() as { id: string; fingerprint: string };
+    await expectUnchanged("unsupported selector");
     const committed = await fetch(`${server.url}/api/budgets/stop`, {
-      method: "POST", headers: validHeaders, body: JSON.stringify({ previewId: preview.id, fingerprint: preview.fingerprint, outcomes: [] }),
+      method: "POST", headers: validHeaders, body: stopPayload,
     });
     expect(committed.status).toBe(200);
     expect(stop).toHaveBeenCalledTimes(1);
+    expect(stop.mock.calls[0]?.[1]).toBe(true);
   });
 
   it("rejects stale, altered, and replayed stop confirmations without extra cancellation", async () => {
