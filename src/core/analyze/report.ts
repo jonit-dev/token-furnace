@@ -19,6 +19,7 @@ import { configChecks } from "./config-checks";
 import { baseline } from "./baseline";
 import { weekPoints } from "./burn";
 import { PROVIDERS } from "../providers";
+import { activityTurns, agentActivity } from "./agent-activity";
 import type {
   ActiveSession,
   HourSlot,
@@ -328,6 +329,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   };
 
   const report: RawReport = {
+    agentActivity: agentActivity(input.activity ?? activityTurns(input.sessions), now, input.live),
     days,
     total,
     turns: [...sessions.values()].reduce((sum, row) => sum + row[1], 0),

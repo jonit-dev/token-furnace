@@ -60,6 +60,22 @@ describe("refresh", () => {
 });
 
 describe("getReport", () => {
+  it("keeps lifetime agent peaks outside a one-day report window", async () => {
+    const app = fixtureApp();
+    await app.reports.refresh();
+    const template = app.repo.all().flatMap(file => file.turns)[0];
+    const at = new Date(now.getTime() - 10 * 86_400_000);
+    for (let i = 0; i < 10; i++) app.repo.save({
+      source: "claude", path: `/old-${i}.jsonl`, mtimeMs: at.getTime(), title: null,
+      turns: [{ ...template, source: "claude", session: `old-${i}`, when: at, baseIn: 1 }],
+    }, 1);
+    const report = app.reports.getReport(1, "all", { weeklyBudget: null, now })!;
+    expect(report.agentActivity?.peakLifetime).toBe(10);
+    expect(report.agentActivity?.peak7d).toBeLessThan(10);
+    expect(report.agentActivity?.timeline.at(-1)?.[1]).toBe(report.active.length);
+    expect(report.agentActivity).toEqual(app.reports.getReport(7, "all", { weeklyBudget: null, now })!.agentActivity);
+  });
+
   it("reads the same files as the test harness, and the same cached plan week", async () => {
     const app = fixtureApp();
     await app.reports.refresh();

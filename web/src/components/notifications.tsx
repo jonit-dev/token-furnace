@@ -64,6 +64,7 @@ export function Notifications() {
         telegram: { enabled: draft.telegram.enabled, chatId: draft.telegram.chatId, botToken: draft.telegram.botToken },
         conditions: {
           newReset: draft.conditions.newReset,
+          sessionSpike: draft.conditions.sessionSpike,
           upcoming: draft.conditions.upcoming,
           leadMinutes: draft.conditions.leadMinutes,
           usage: { enabled: draft.conditions.usage.enabled, percent: draft.conditions.usage.percent, provider: draft.conditions.usage.provider },
@@ -201,6 +202,11 @@ export function Notifications() {
 
       <Card title="Conditions" icon="Clock" sub="Each one needs the master switch above to send anything">
         <div className="grid gap-3 sm:grid-cols-2">
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-0.5" checked={draft.conditions.sessionSpike}
+              onChange={(event) => set((current) => ({ ...current, conditions: { ...current.conditions, sessionSpike: event.target.checked } }))} />
+            <span>Active session burn spike<span className="block text-[11px] text-muted">Alert when a session burns above twice its provider’s ideal hourly pace. Sends once until it recovers or becomes inactive. Checks every minute while this server runs.</span></span>
+          </label>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-0.5" checked={draft.conditions.newReset}
               onChange={(event) => set((current) => ({ ...current, conditions: { ...current.conditions, newReset: event.target.checked } }))} />

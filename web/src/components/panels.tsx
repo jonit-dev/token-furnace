@@ -1,9 +1,10 @@
 import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/context";
 import { sessionFixPrompt } from "../../../src/core/analyze/issues";
+import { isSessionSpike } from "../../../src/core/analyze/burn";
 import { useId, useState, type ReactNode } from "react";
 import type { Burn, Report, Source } from "../../../src/core/model";
 import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
-import { Bar, Card, CopyButton, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
+import { Bar, Card, CopyButton, MetricInfo, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
 import { Icon } from "./icons";
 import { Modal } from "./modal";
@@ -99,6 +100,7 @@ function SessionTable({
               <tr key={sessionKey(s)} onClick={() => onOpen(s)} className="border-t border-line cursor-pointer hover:bg-chip/40">
                 <td className="px-1 py-1.5 min-w-0 flex items-center gap-1.5">
                   <SourceBadge source={s.source} />
+                  {isSessionSpike(s, burns?.[s.source]) ? <span className="shrink-0 rounded border border-accent px-1 text-[10px] font-semibold text-accent" title="Burn spike: above twice this provider's ideal hourly pace">Critical</span> : null}
                   <span className="truncate font-medium min-w-0" title={title}>
                     {title}
                   </span>
@@ -296,8 +298,9 @@ export function ActiveSessions({
   if (!sessions.length) {
     return <p className="text-sm text-muted">No session had a turn in the last 30 minutes.</p>;
   }
-  const attention = sessions.filter((s) => (s.flags?.length ?? 0) > 0);
-  const others = sessions.filter((s) => !s.flags || s.flags.length === 0);
+  const needsAttention = (s: ActiveRow) => (s.flags?.length ?? 0) > 0 || isSessionSpike(s, burns?.[s.source]);
+  const attention = sessions.filter(needsAttention);
+  const others = sessions.filter((s) => !needsAttention(s));
   const close = () => setModal(null);
 
   return (
@@ -310,7 +313,7 @@ export function ActiveSessions({
         {attention.length ? (
           <SessionTable sessions={attention} burns={burns} onOpen={select} />
         ) : (
-          <p className="text-xs text-muted py-1">No active sessions have triggered leak flags.</p>
+          <p className="text-xs text-muted py-1">No active sessions have triggered leak flags or burn spikes.</p>
         )}
       </div>
       <div>
@@ -326,6 +329,38 @@ export function ActiveSessions({
       <SessionModal session={selected} burns={burns} onClose={close} />
     </div>
   );
+}
+
+export function ActiveAgents({ r }: { r: Partial<Report> }) {
+  const active = r.active ?? [];
+  const counts = new Map<string, number>(Object.keys(r.burns ?? {}).map(provider => [provider, 0]));
+  for (const session of active) counts.set(session.source, (counts.get(session.source) ?? 0) + 1);
+  return <Card title="Active agents" sub="Across all providers" icon="Users"
+    right={<MetricInfo label="Active agents">
+      <p>Sessions with a recorded assistant turn in the last 30 minutes, added across all providers. The provider counts break down that total. This estimates recent activity; it does not inspect running processes.</p>
+      <p>The line reconstructs the last 24 hours, sampled every 30 minutes. A session stays active for 30 minutes after each recorded turn; repeated turns from the same session do not add extra agents.</p>
+      <p>7d peak is the highest simultaneous count in the last seven days. Lifetime peak covers all available local transcripts, including activity before Token Furnace started. Peaks use exact activity times, so brief overlaps between chart samples still count. Deleted transcripts are excluded.</p>
+    </MetricInfo>}>
+    <div className="flex items-baseline gap-2 mb-3">
+      <strong className="text-4xl font-heading tabular-nums">{active.length}</strong>
+      <span className="text-xs text-muted">last 30 min</span>
+    </div>
+    <ul aria-label="Active agents by provider" className="space-y-1 text-xs mb-4">
+      {[...counts].map(([provider, count]) => (
+        <li key={provider} className="flex justify-between gap-3"><span className="text-muted">{sourceLabel(provider)}</span> <span className="tabular-nums">{count}</span></li>
+      ))}
+    </ul>
+    {r.agentActivity ? <div className="mt-auto">
+      <div role="img" aria-label="Active agents over the last 24 hours">
+        <Spark values={r.agentActivity.timeline.map(([, count]) => count)} className="h-16" />
+      </div>
+      <div className="flex justify-between text-[10px] text-muted mt-1"><span>24 h ago</span><span>now</span></div>
+      <div className="flex flex-wrap justify-between gap-x-2 text-xs text-muted mt-3 pt-3 border-t border-line">
+        <span>7d peak <strong className="text-ink tabular-nums">{r.agentActivity.peak7d}</strong></span>
+        <span title="Peak across available local transcripts">Lifetime peak <strong className="text-ink tabular-nums">{r.agentActivity.peakLifetime}</strong></span>
+      </div>
+    </div> : <span className="text-xs text-muted mt-auto">History unavailable</span>}
+  </Card>;
 }
 
 export function KpiStrip({
@@ -355,6 +390,11 @@ export function KpiStrip({
     <Tile
       key="burn"
       label="Burn / hour"
+      help={<>
+        <p>How fast {source ? sourceLabel(source) : "the selected provider"} used tokens during the last hour. With a quota reading, the number is percentage points of the weekly quota used per hour; otherwise it is weighted tokens per hour.</p>
+        <p>Ideal pace spreads the remaining budget over the time until reset. Above that pace, you are spending faster than the remaining budget can sustain.</p>
+        <p>The line shows recent hourly spend. The dashed line marks the ideal pace. Weighted tokens adjust usage for model cost, caching, and generated output; they are an estimate of relative cost.</p>
+      </>}
       icon="Flame"
       value={
         inPct ? (
@@ -394,6 +434,10 @@ export function KpiStrip({
       <Tile
         key="week"
         label="Weekly limit"
+        help={<>
+          <p>The percentage of the selected provider’s weekly quota already used, from its latest subscription reading or local usage estimate.</p>
+          <p>The smaller number shows the estimated percentage-point increase over the named period. The bar shows quota used; the marker shows how far through the week you are. Spending ahead of that marker means you are ahead of an even weekly pace.</p>
+        </>}
         icon="CalendarDays"
         value={Math.round(used) + "%"}
         line={(key ? gain(key)?.replace(/ \(.*/, "") : null) ?? "no recent spend"}
@@ -409,6 +453,11 @@ export function KpiStrip({
       <Tile
         key="dry"
         label="Meltdown ETA"
+        help={<>
+          <p>Estimated time until the selected provider’s weekly quota runs out if the recent pace continues. The forecast uses the last 24 hours when a projection is available, otherwise the last hour.</p>
+          <p>“Never” means this forecast lasts until the next reset. It is a pace estimate: changing your usage changes the prediction.</p>
+          <p>The upper bar compares time until the quota runs out with the lower bar’s time until reset. Red means the quota is expected to run out before reset.</p>
+        </>}
         icon="Clock"
         value={crit ? hoursLabel(dry) : "never"}
         line={crit && empty ? "~" + dayTime(empty) : "no run-out"}
@@ -423,17 +472,24 @@ export function KpiStrip({
     );
   } else {
     tiles.push(
-      <Tile key="week" label="Weekly limit" icon="CalendarDays" value="—" line="no subscription reading yet" state={null} />,
+      <Tile key="week" label="Weekly limit" icon="CalendarDays" value="—" line="no subscription reading yet" state={null}
+        help={<p>This card shows the percentage of the selected provider’s weekly quota already used. There is no subscription reading yet, so usage against the weekly limit is unknown. A dash means unavailable data.</p>} />,
     );
   }
   const days = r.days ?? 0;
   // One "spend over the context target" tile; the all-provider tile and each provider tile share it.
-  const overTile = (key: string, label: string, rows: Report["timeline"], over: number, total: number, tip: string) => {
+  const overTile = (key: string, label: string, rows: Report["timeline"], over: number, total: number, tip: string, provider?: Source) => {
     const max = MAX_OVER_TARGET_SHARE * 100;
     return (
       <Tile
         key={key}
         label={label}
+        help={<>
+          <p>{Math.round(over)}% of {provider ? `${sourceLabel(provider)}’s` : "all providers’"} weighted token spend in the last {days} days came from turns whose context was above the recommended target.</p>
+          <p>Context is the input the model sees for a turn: instructions, conversation, and tool results, including cached input. {provider ? `The ${sourceLabel(provider)} target is ${fmt(r.contextTargets?.[provider])} tokens.` : `Each provider uses its own target: ${Object.entries(r.contextTargets ?? {}).map(([id, target]) => `${sourceLabel(id)} ${fmt(target)}`).join("; ")}.`} These are recommended working sizes, not the models’ maximum context limits.</p>
+          <p>The whole turn’s spend counts toward this percentage, including output; it does not count only the input beyond the target. Weighted tokens adjust usage for model cost and caching. The smaller {fmt(total)} number is total weighted spend over {days} days.</p>
+          <p>The line shows the above-target spend share for each of the last 24 recorded hourly buckets. The dashed line marks the {max}% goal. Lower is better: compact a long conversation or start a fresh session when its accumulated context is no longer useful.</p>
+        </>}
         icon="TrendingUp"
         value={Math.round(over) + "%"}
         line={fmt(total) + " · " + days + " d"}
@@ -475,6 +531,17 @@ export function KpiStrip({
       <Tile
         key={k.name}
         label={(SHORT[k.name] ?? k.name) + " · 3 h"}
+        help={<>
+          <p>{k.unit === "k"
+            ? `${k.name}: the middle context size among this provider’s turns in the latest recorded three-hour block. Half the turns had a context at or below this size. Context includes instructions, conversation, tool results, and cached input.`
+            : k.name === "Caller reads per tool call"
+              ? "The percentage of tool calls that read files or logs into the main agent’s own context in the latest recorded three-hour block. For example, 46% means about 46 out of every 100 tool calls were these reads."
+              : "The percentage of turns whose context exceeded their own provider’s recommended context target in the latest recorded three-hour block. Every turn counts equally here, regardless of its token spend."}</p>
+          <p>{k.unit === "k"
+            ? `The recommended target is ${kpiFmt(k, k.target)} tokens. It is a working-size recommendation, not the model’s maximum capacity.`
+            : `The goal is at most ${kpiFmt(k, k.target)}. ${k.name === "Caller reads per tool call" ? "Delegate bounded file-reading tasks when their results can be summarized, to reduce context accumulated by the main agent." : "Compact long conversations or start fresh sessions to reduce large-context turns."}`}</p>
+          <p>The line shows successive recorded three-hour blocks; gaps without recorded activity are omitted. The dashed line marks the target. Lower is better. A red dot means the latest value exceeds the target.</p>
+        </>}
         icon="Activity"
         tip={k.name + " · latest 3 h block" + (k.target != null ? " · target " + kpiFmt(k, k.target) : "")}
         value={last == null ? "—" : kpiFmt(k, last)}
@@ -485,24 +552,6 @@ export function KpiStrip({
       </Tile>,
     );
   }
-  const active = r.active ?? [];
-  const top = active[0];
-  const topBurn = top ? r.burns?.[top.source] : undefined;
-  // The benchmark is the top burner's own provider goal: red when that provider runs over it, green when under.
-  const topOver = top && topBurn?.goal ? topBurn.rate > topBurn.goal && top.rateShare >= 50 : null;
-  tiles.push(
-    <Tile
-      key="active"
-      label="Active sessions"
-      icon="Users"
-      value={active.length}
-      line={top ? `top ${Math.round(top.rateShare)}%` : "none in 30 min"}
-      tip={top ? "Top burner: " + (top.title || top.id) : "No session had a turn in the last 30 minutes"}
-      state={topOver == null ? null : topOver ? "over" : "ok"}
-    >
-      {top ? <Bar pct={top.rateShare} cls={topOver == null ? "bg-muted" : topOver ? "bg-hot" : "bg-ok"} /> : null}
-    </Tile>,
-  );
   for (const provider of Object.keys(r.timelines ?? {}) as Source[]) {
     const rows = r.timelines?.[provider] ?? [];
     const [cool, hot] = rows.reduce<[number, number]>((sum, row) => [sum[0] + row[1], sum[1] + row[2]], [0, 0]);
@@ -514,10 +563,11 @@ export function KpiStrip({
         (100 * hot) / (cool + hot || 1),
         cool + hot,
         `${sourceLabel(provider)} spend over its context target · ${fmt(cool + hot)} weighted tokens in ${days} d`,
+        provider,
       ),
     );
   }
-  return <div className="grid gap-3 grid-cols-2 sm:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">{tiles}</div>;
+  return <div className="grid items-start gap-3 grid-cols-2 sm:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">{tiles}</div>;
 }
 
 export function Dashboard({
@@ -548,7 +598,7 @@ export function Dashboard({
   const weekly = Object.values(weeklyBurns).some(b => (b?.weekBurndown?.length ?? 0) > 1);
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-4">
         <Card title="Combustion rate" sub="Token burn, last hour" icon="Flame" right={toggle}>
           <div className="flex-1 flex items-center justify-center">
             <Gauge burn={burn} />
@@ -568,6 +618,7 @@ export function Dashboard({
             <Burndown rows={r.burndown ?? []} budget={r.budget}  />
           </Card>
         )}
+        <ActiveAgents r={r} />
       </div>
       <KpiStrip r={r} burn={burn} source={source} />
       <Card title="Hourly spend by context" sub="Tokens burned per hour, split by context window" icon="ChartColumn"

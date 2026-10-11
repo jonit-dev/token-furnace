@@ -1,4 +1,4 @@
-import type { SessionInput, SourceFile } from "../core/model";
+import type { ActivityTurn, SessionInput, SourceFile } from "../core/model";
 
 /**
  * Where parsed turns live between runs. PRD-003 ships the memory map only; PRD-004 adds
@@ -15,6 +15,8 @@ export interface SessionRepository {
    * session keeps only the turns at or after it, so the report reads no turn the analysis skips.
    */
   all(cutoff?: Date): SessionInput[];
+  /** Timestamp-only history, chronologically ordered, with positive context like report turns. */
+  activity(): Iterable<ActivityTurn>;
   /** Store one parsed file, with its size: the two fields that say when to reparse it. */
   save(session: SessionInput, size: number): void;
 }

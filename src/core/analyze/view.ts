@@ -1,6 +1,6 @@
 import { MAX_OVER_TARGET_SHARE } from "../context";
 import { PROVIDERS } from "../providers";
-import { burnGoal } from "./burn";
+import { burnGoal, isSessionSpike } from "./burn";
 import { fixed, int0 } from "./format";
 import { CONTEXT_TARGET, CHECK_HOURS, LEVELS, LONG_LIVED_HOURS } from "./flags";
 import { issuePrompt, topIssues } from "./issues";
@@ -72,6 +72,10 @@ export function reportView(report: RawReport, now: Date): Report {
   const actions: string[] = [];
   for (const s of report.active) {
     const name = s.title || s.id;
+    const [goal] = burnGoal(report, s.source);
+    if (isSessionSpike(s, { goal, limit: report.burns[s.source]?.week?.limit })) {
+      actions.push(`Burn spike in “${name}” (${PROVIDERS[s.source].label}): ${int0(s.rate)} tokens/h, above twice the ideal pace. Pause or finish this session.`);
+    }
     if (s.context > CONTEXT_TARGET[s.source]) {
       actions.push(`Run /compact in “${name}”: its context is ${int0(s.context / 1000)}k.`);
     } else if (s.hours >= LONG_LIVED_HOURS) {
@@ -129,6 +133,7 @@ export function reportView(report: RawReport, now: Date): Report {
       prompt: issuePrompt(i),
     })),
     active: report.active.map(named),
+    agentActivity: report.agentActivity,
     burndown,
     contextTargets: CONTEXT_TARGET,
     budget: report.budget,

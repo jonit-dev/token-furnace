@@ -229,6 +229,12 @@ describe("SqliteSessionRepository", () => {
       const full = repo.all();
       expect(full.map((s) => s.path)).toEqual(["/a.jsonl", "/b.jsonl"]); // file rows and order kept
       expect(full[0].turns.map((t) => t.when.getTime())).toEqual([999, 1000, 5000]);
+      expect([...repo.activity()]).toEqual([
+        { source: "claude", project: "p", session: "s", at: 999 },
+        { source: "claude", project: "p", session: "s", at: 1000 },
+        { source: "codex", project: "p", session: "s", at: 1000 },
+        { source: "claude", project: "p", session: "s", at: 5000 },
+      ]);
 
       const filtered = repo.all(new Date(1000));
       expect(filtered.map((s) => s.path)).toEqual(["/a.jsonl", "/b.jsonl"]);

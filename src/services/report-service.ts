@@ -162,6 +162,7 @@ export class ReportService {
       weeklyBudget: opts.weeklyBudget,
       live,
       sessions,
+      activity: this.repo.activity(),
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,
       opencodeWeek: opts.opencodeWeek ?? null,

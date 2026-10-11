@@ -71,7 +71,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   const timer = setInterval(() => {
     if (ticker.running) return; // a slow run is never joined by a second one
     ticker.running = true;
-    notifyTick(app, options.planUsage).catch(() => {}).finally(() => { ticker.running = false; });
+    notifyTick(app, options.planUsage, options.weeklyBudget).catch(() => {}).finally(() => { ticker.running = false; });
   }, TICK_MS);
   timer.unref();
   return {
@@ -91,7 +91,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
  * window cannot zero it, with the network call gated by each client's own cache.
  * planUsage false (--no-plan-usage) never fetches quota: only the saved reading is used.
  */
-export async function notifyTick(app: App, planUsage = true): Promise<{ alerts: unknown; delivered: DeliveryResult[] }> {
+export async function notifyTick(app: App, planUsage = true, weeklyBudget: number | null = null): Promise<{ alerts: unknown; delivered: DeliveryResult[] }> {
   const now = app.now();
   const settings = loadSettings(app.env);
   if (!settings.enabled) return { alerts: [], delivered: [] };
@@ -106,7 +106,12 @@ export async function notifyTick(app: App, planUsage = true): Promise<{ alerts: 
     codex: codex?.used ?? null,
     opencode: open?.used ?? null,
   };
-  return runAlerts(app.env, { now, feed: snapshot.feed, fresh: !snapshot.stale, usage, settings });
+  let report = null;
+  if (settings.conditions.sessionSpike) {
+    await app.reports.refresh();
+    report = app.reports.getReport(7, "all", { now, weeklyBudget, planWeek: plan, opencodeWeek: open });
+  }
+  return runAlerts(app.env, { now, feed: snapshot.feed, fresh: !snapshot.stale, usage, settings, report });
 }
 
 /**

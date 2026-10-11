@@ -32,7 +32,7 @@ const SETTINGS = {
   enabled: false,
   ntfy: { enabled: false, server: "https://ntfy.sh", topic: "", token: "", hasToken: false },
   telegram: { enabled: false, chatId: "", botToken: "", hasToken: false },
-  conditions: { newReset: true, upcoming: true, leadMinutes: 60, usage: { enabled: false, percent: 80, provider: "any" } },
+  conditions: { newReset: true, sessionSpike: false, upcoming: true, leadMinutes: 60, usage: { enabled: false, percent: 80, provider: "any" } },
 };
 
 /** The live-page protocols are what the components use to decide they may talk to the server. */
@@ -126,12 +126,13 @@ describe("the Notifications tab", () => {
     await waitFor(() => expect(screen.getByLabelText("Topic")).not.toBeNull());
     fireEvent.change(screen.getByLabelText("Topic"), { target: { value: "token-furnace" } });
     fireEvent.click(screen.getByLabelText(/Send notifications from this server/));
+    fireEvent.click(screen.getByLabelText(/Active session burn spike/));
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/Saved/));
     const call = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/api/notifications") && init?.method === "POST");
     expect(call).toBeTruthy();
-    expect(JSON.parse(String((call as any)[1].body))).toMatchObject({ enabled: true, ntfy: { topic: "token-furnace" } });
+    expect(JSON.parse(String((call as any)[1].body))).toMatchObject({ enabled: true, ntfy: { topic: "token-furnace" }, conditions: { sessionSpike: true } });
   });
 
   it("opens and closes each channel setup modal", async () => {

@@ -13,7 +13,8 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Source } from "../core/model";
+import type { Report, Source } from "../core/model";
+import { isSessionSpike } from "../core/analyze/burn";
 import { eventKey, type ResetsFeed, type ResetEvent } from "./resets-client";
 import { usageCachePath } from "./usage-client";
 import type { Env } from "../sources/agent-source";
@@ -32,6 +33,7 @@ export interface NotificationSettings {
   telegram: { enabled: boolean; botToken: string; chatId: string };
   conditions: {
     newReset: boolean;
+    sessionSpike: boolean;
     upcoming: boolean;
     /** How long before an announced reset time the reminder goes out. */
     leadMinutes: number;
@@ -49,7 +51,7 @@ export function defaultSettings(): NotificationSettings {
     enabled: false,
     ntfy: { enabled: false, server: "https://ntfy.sh", topic: "", token: "" },
     telegram: { enabled: false, botToken: "", chatId: "" },
-    conditions: { newReset: true, upcoming: true, leadMinutes: 60,
+    conditions: { newReset: true, sessionSpike: false, upcoming: true, leadMinutes: 60,
       usage: { enabled: false, percent: 80, provider: "any" } },
   };
 }
@@ -115,6 +117,7 @@ function mergeInto(saved: NotificationSettings, raw: unknown): { settings: Notif
     },
     conditions: {
       newReset: nested(conditions, "newReset", saved.conditions.newReset),
+      sessionSpike: nested(conditions, "sessionSpike", saved.conditions.sessionSpike),
       upcoming: nested(conditions, "upcoming", saved.conditions.upcoming),
       leadMinutes,
       usage: {
@@ -351,6 +354,7 @@ export interface AlertInput {
   fresh: boolean;
   /** Subscription utilization per provider, the same number the report shows. */
   usage: Partial<Record<Source, number | null>>;
+  report?: Pick<Report, "active" | "burns"> | null;
   settings?: NotificationSettings | null;
   send?: Sender;
 }
@@ -419,6 +423,22 @@ export async function runAlerts(env: Env, input: AlertInput): Promise<{ alerts: 
     }
   }
 
+  if (input.report) {
+    const live = new Set<string>();
+    if (settings.conditions.sessionSpike) {
+      for (const session of input.report.active) {
+        if (!isSessionSpike(session, input.report.burns[session.source])) continue;
+        const key = `spike:${JSON.stringify([session.source, session.project, session.fullId || session.id])}`;
+        live.add(key);
+        candidates.push({ key, title: "Active session: critical burn spike",
+          message: `${session.title || session.id} (${session.source}, ${session.id}) is burning ${Math.round(session.rate).toLocaleString("en-US")} tokens/h, above twice the ideal pace. Pause or finish this session.` });
+      }
+    }
+    for (const key of Object.keys(state.alerts)) {
+      if (key.startsWith("spike:") && !live.has(key)) delete state.alerts[key];
+    }
+  }
+
   const threshold = settings.conditions.usage.percent;
   const wanted = settings.conditions.usage.provider;
   if (settings.conditions.usage.enabled) {
@@ -448,6 +468,7 @@ export async function runAlerts(env: Env, input: AlertInput): Promise<{ alerts: 
     if (candidates.some((alert) => alert.key === key)) continue;
     if (!Object.values(marker.fails).some((failure) => failure.tries < RETRY_MAX)) continue;
     if (key.startsWith("event:") && !settings.conditions.newReset) continue;
+    if (key.startsWith("spike:")) continue; // only retry sessions still critical in this report
     if (key.startsWith("upcoming:") && !settings.conditions.upcoming) continue;
     if (key.startsWith("usage:")) {
       if (!settings.conditions.usage.enabled) continue;

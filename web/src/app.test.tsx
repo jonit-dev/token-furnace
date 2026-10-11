@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./App";
 import { useUi } from "./store";
-import { KpiStrip } from "./components/panels";
+import { ActiveAgents, ActiveSessions, KpiStrip } from "./components/panels";
 import type { Report } from "../../src/core/model";
 import { buildFull, saveUsageReading } from "../../test/fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "../../test/harness";
@@ -38,6 +38,8 @@ const okFetch = (body: unknown) =>
   vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body });
 
 beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
   window.__REPORT__ = fixtureReport;
   localStorage.clear();
   useUi.setState({ tab: "dashboard", source: "claude", hourlySource: "all", pins: {}, online: true, modal: null, doneTips: [] });
@@ -59,19 +61,113 @@ afterEach(() => {
 const hasText = (label: string) => expect(screen.queryAllByText(label).length, label).toBeGreaterThan(0);
 
 describe("App", () => {
-  it("judges the top active session against its own provider's budget", () => {
-    const report: Report = { ...fixtureReport, active: [{
-      source: "codex", project: "api", id: "codex001", title: "Top Codex session",
-      share: 50, turns: 10, peak: 100_000, hours: 1, context: 100_000,
-      idle: 1, flags: [], model: "gpt-5.5", rate: 1_000, rateShare: 100,
-    }], burns: {
-      claude: { ...fixtureReport.burns.claude!, rate: 10_000, goal: 1_000 },
-      codex: { ...fixtureReport.burns.codex!, rate: 1_000, goal: 2_000 },
-    } };
-    render(<KpiStrip r={report} burn={report.burns.claude} />);
-    const tile = screen.getByText("Active sessions").closest(".card")!;
-    expect(tile.querySelector("span.rounded-full.bg-ok")).not.toBeNull();
-    expect(tile.querySelector("span.rounded-full.bg-hot")).toBeNull();
+  it("explains every KPI through an info button and closes its modal", () => {
+    render(<KpiStrip r={fixtureReport} burn={fixtureReport.burns.claude} source="claude" />);
+    const buttons = screen.getAllByRole("button", { name: /^About / });
+    expect(buttons.length).toBe(document.querySelectorAll(".card").length);
+    for (const button of buttons) {
+      fireEvent.click(button);
+      const dialog = screen.getByRole("dialog", { name: button.getAttribute("aria-label")!.replace(/^About /, "") });
+      expect(dialog.getAttribute("open")).not.toBeNull();
+      expect(dialog.textContent!.length).toBeGreaterThan(100);
+      fireEvent.click(within(dialog).getByRole("button", { name: "Got it" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    }
+  });
+
+  it("explains provider spend using its own target and the whole-turn denominator", () => {
+    render(<KpiStrip r={fixtureReport} />);
+    const opener = screen.getByRole("button", { name: "About Codex >target" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Codex >target" });
+    within(dialog).getByRole("button", { name: "Close modal" }).focus();
+    expect(within(dialog).getByText(/The Codex target is 300k tokens/)).toBeTruthy();
+    expect(within(dialog).getByText(/weighted token spend in the last 7 days/)).toBeTruthy();
+    expect(within(dialog).getByText(/The whole turn’s spend counts/)).toBeTruthy();
+    expect(within(dialog).getByText(/The smaller .* number is total weighted spend/)).toBeTruthy();
+    fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("explains an unavailable weekly reading and supports the close button", () => {
+    render(<KpiStrip r={{}} />);
+    fireEvent.click(screen.getByRole("button", { name: "About Weekly limit" }));
+    const dialog = screen.getByRole("dialog", { name: "Weekly limit" });
+    expect(within(dialog).getByText(/A dash means unavailable data/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close modal" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("places active agents after quota in the top row and outside the KPI strip", () => {
+    render(<App />);
+    const agents = screen.getByRole("heading", { name: "Active agents" }).closest(".card")!;
+    const quota = screen.getByRole("heading", { name: "Weekly quota" }).closest(".card")!;
+    expect(agents.parentElement).toBe(quota.parentElement);
+    expect(quota.nextElementSibling).toBe(agents);
+    expect(agents.parentElement!.nextElementSibling!.textContent).not.toContain("Active agents");
+    fireEvent.click(within(agents as HTMLElement).getByRole("button", { name: "About Active agents" }));
+    expect(screen.getByRole("dialog", { name: "Active agents" }).textContent).toContain("does not inspect running processes");
+  });
+
+  it("counts active agents across providers and keeps idle providers visible", () => {
+    const session = fixtureReport.active[0];
+    const report: Report = { ...fixtureReport, active: [
+      { ...session, source: "claude", id: "claude01" },
+      { ...session, source: "codex", id: "codex001" },
+      { ...session, source: "codex", id: "codex002" },
+    ], burns: { ...fixtureReport.burns, opencode: fixtureReport.burns.claude! } };
+    window.__REPORT__ = report;
+    vi.stubGlobal("fetch", okFetch(report));
+    render(<App />);
+    const tile = within(screen.getByText("Active agents").closest(".card")! as HTMLElement);
+    expect(tile.getByText("3")).toBeTruthy();
+    expect(tile.getByText("last 30 min")).toBeTruthy();
+    const counts = tile.getByRole("list", { name: "Active agents by provider" });
+    expect(within(counts).getAllByRole("listitem").map(row => row.textContent)).toEqual([
+      "Claude Code 1", "Codex 2", "OpenCode 0",
+    ]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
+    expect(tile.getByText("3")).toBeTruthy();
+    expect(within(counts).getByText("2")).toBeTruthy();
+  });
+
+  it("shows zero active agents for empty and partial reports", () => {
+    const { rerender } = render(<ActiveAgents r={{ ...fixtureReport, active: [] }} />);
+    let tile = within(screen.getByText("Active agents").closest(".card")! as HTMLElement);
+    expect(tile.getAllByText("0").length).toBeGreaterThan(0);
+    expect(tile.getByText("last 30 min")).toBeTruthy();
+    expect(tile.getByRole("list", { name: "Active agents by provider" }).textContent).toContain("Codex 0");
+    rerender(<ActiveAgents r={{}} />);
+    tile = within(screen.getByText("Active agents").closest(".card")! as HTMLElement);
+    expect(tile.getByText("0")).toBeTruthy();
+  });
+
+  it("counts an additional provider without changing the card's provider list", () => {
+    // Simulate a report from an adapter added after this dashboard version.
+    const provider = "new-agent" as Report["active"][number]["source"];
+    render(<ActiveAgents r={{ active: [{ ...fixtureReport.active[0], source: provider }] }} />);
+    const tile = within(screen.getByText("Active agents").closest(".card")! as HTMLElement);
+    expect(tile.getByRole("listitem").textContent).toBe("new-agent 1");
+  });
+
+  it("renders the active-agent trend with exact seven-day and lifetime peaks", () => {
+    render(<ActiveAgents r={{ ...fixtureReport, agentActivity: {
+      timeline: [["2026-10-10T11:00:00Z", 1], ["2026-10-10T11:30:00Z", 3], ["2026-10-10T12:00:00Z", 2]],
+      peak7d: 7, peakLifetime: 12,
+    } }} />);
+    const tile = within(screen.getByText("Active agents").closest(".card")! as HTMLElement);
+    const chart = tile.getByRole("img", { name: "Active agents over the last 24 hours" });
+    expect(chart.querySelector("svg path")?.getAttribute("d")).toContain("L50.00,2.00");
+    expect(tile.getByText("7d peak").textContent).toBe("7d peak 7");
+    expect(tile.getByText("Lifetime peak").textContent).toBe("Lifetime peak 12");
+  });
+
+  it("keeps old report snapshots usable without activity history", () => {
+    render(<ActiveAgents r={{ active: [] }} />);
+    expect(screen.getByText("History unavailable")).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "Active agents over the last 24 hours" })).toBeNull();
   });
 
   it("marks a missed target with a red dot and a met target with a green dot", () => {
@@ -452,7 +548,7 @@ describe("context configuration repair", () => {
   });
 });
 
-it("selects and persists OpenCode independently for both dashboard charts", () => {
+it("selects and persists OpenCode independently for both dashboard charts", async () => {
   const report = { ...fixtureReport,
     burns: { ...fixtureReport.burns, opencode: { ...fixtureReport.burns.claude!, used: 63 } },
     timelines: { ...fixtureReport.timelines, opencode: fixtureReport.timelines!.claude },
@@ -465,6 +561,18 @@ it("selects and persists OpenCode independently for both dashboard charts", () =
   act(() => useUi.getState().togglePin("source", "opencode"));
   act(() => useUi.getState().togglePin("hourlySource", "opencode"));
   act(() => useUi.setState({ source: "claude", hourlySource: "all" }));
-  act(() => useUi.persist.rehydrate());
+  await act(async () => { await useUi.persist.rehydrate(); });
   expect(useUi.getState().source).toBe("opencode"); expect(useUi.getState().hourlySource).toBe("opencode");
+});
+
+
+it("tags a high-burn active session as critical without leak flags using its own provider", () => {
+  const session = { ...fixtureReport.active[0], source: "codex" as const, title: "Spike culprit", flags: [], rate: 201 };
+  const burns = { codex: { ...fixtureReport.burns.codex!, goal: 100 }, claude: { ...fixtureReport.burns.claude!, goal: 10000 } };
+  const view = render(<ActiveSessions sessions={[session]} burns={burns} />);
+  expect(screen.getByText("Critical").getAttribute("title")).toContain("Burn spike");
+  expect(screen.getByText("Needs attention (1)")).toBeTruthy();
+  view.rerender(<ActiveSessions sessions={[{ ...session, rate: 200 }]} burns={burns} />);
+  expect(screen.queryByText("Critical")).toBeNull();
+  expect(screen.getByText("Other active sessions (1)")).toBeTruthy();
 });

@@ -8,6 +8,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Report } from "../src/core/model";
+import { assistant } from "./fixtures/build";
 import { compose } from "../src/compose";
 import { notifyTick, startServer, type LiveServer } from "../src/server";
 import { forgetResets, parseFeed, resetsSnapshot, type ResetsFeed } from "../src/services/resets-client";
@@ -546,4 +548,72 @@ describe("the live server", () => {
 
 afterEach(() => {
   for (const root of roots.splice(0)) if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+});
+
+describe("session spike alerts", () => {
+  const session: Report["active"][number] = { source: "claude", project: "demo", id: "abcdefgh", fullId: "abcdefgh-1", title: "Culprit", share: 100, turns: 1, peak: 100, hours: 1, context: 100, idle: 1, flags: [], model: "sonnet", rate: 201, rateShare: 100 };
+  const report = (rate = 201): Pick<Report, "active" | "burns"> => ({ active: [{ ...session, rate }], burns: { claude: { goal: 100 } as Report["burns"]["claude"] } });
+  const settings = () => onSettings({ conditions: { ...defaultSettings().conditions, sessionSpike: true } });
+
+  it("persists opt-in settings while old settings default off", () => {
+    const env = tempEnv();
+    expect(loadSettings(env).conditions.sessionSpike).toBe(false);
+    const merged = mergeSettings(env, { conditions: { sessionSpike: true } }).settings;
+    saveSettings(env, merged);
+    expect(loadSettings(env).conditions.sessionSpike).toBe(true);
+    expect(publicSettings(merged).conditions.sessionSpike).toBe(true);
+  });
+
+  it("deduplicates across runs, rearms after recovery and keeps full identities separate", async () => {
+    const env = tempEnv();
+    const sent = recorder();
+    const tick = (value: Pick<Report, "active" | "burns">) => runAlerts(env, { now: NOW, feed: null, fresh: false, usage: {}, report: value, settings: settings(), send: sent.send });
+    await tick(report());
+    await tick(report());
+    expect(sent.calls).toHaveLength(1);
+    expect(sent.calls[0][1]).toContain("Culprit");
+    const two = report();
+    two.active.push({ ...session, fullId: "abcdefgh-2" });
+    await tick(two);
+    expect(sent.calls).toHaveLength(2);
+    await tick(report(200));
+    await tick(report());
+    expect(sent.calls).toHaveLength(3);
+    await tick({ ...report(), active: [] });
+    await tick(report());
+    expect(sent.calls).toHaveLength(4);
+  });
+
+  it("retries a failed channel only while critical and respects the opt-in", async () => {
+    const env = tempEnv();
+    const failed = recorder({ ntfy: { channel: "ntfy", ok: false, error: "offline" } });
+    const input = { now: NOW, feed: null, fresh: false, usage: {}, report: report(), settings: settings(), send: failed.send };
+    await runAlerts(env, input);
+    await runAlerts(env, input);
+    expect(failed.calls).toHaveLength(1);
+    await runAlerts(env, { ...input, now: new Date(NOW.getTime() + 120000) });
+    expect(failed.calls).toHaveLength(2);
+    await runAlerts(env, { ...input, report: report(100), now: new Date(NOW.getTime() + 600000) });
+    expect(failed.calls).toHaveLength(2);
+    await runAlerts(env, { ...input, settings: onSettings() });
+    expect(failed.calls).toHaveLength(2);
+  });
+
+  it("reaches session detection through a server tick without an open tab", async () => {
+    const env = tempEnv();
+    env.CLAUDE_CONFIG_DIR = join(env.HOME, "claude");
+    const dir = join(env.CLAUDE_CONFIG_DIR, "projects", "demo");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "spike.jsonl"), assistant(NOW, 100000, []) + "\n");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      schema_version: 1, generated_at: NOW.toISOString(), products: {},
+    }), { status: 200 })));
+    saveSettings(env, settings());
+    const app = compose(env);
+    const result = await notifyTick(app, false, 0.001);
+    expect(result.alerts).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Active session: critical burn spike" })]));
+    expect(result.delivered).toEqual([expect.objectContaining({ skipped: true })]);
+    const view = app.reports.getReport(7, "all", { now: NOW, weeklyBudget: 0.001 });
+    expect(view?.actions.some((action) => action.startsWith("Burn spike in"))).toBe(true);
+  });
 });

@@ -10,13 +10,28 @@ export function Modal({ open, onClose, title, description, children, footer, bus
   busy?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const descriptionId = useId();
 
   useEffect(() => {
-    if (open && !dialog.current?.open) dialog.current?.showModal();
+    if (open && !dialog.current?.open) {
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      dialog.current?.showModal();
+    }
     if (!open && dialog.current?.open) dialog.current.close();
   }, [open]);
+
+  useEffect(() => {
+    const element = dialog.current;
+    // Unmount cleanup runs after removal, when native focus restoration is already too late.
+    return () => {
+      if (element?.open) {
+        element.close();
+        opener.current?.focus();
+      }
+    };
+  }, []);
 
   return <dialog ref={dialog} aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined}
     onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}

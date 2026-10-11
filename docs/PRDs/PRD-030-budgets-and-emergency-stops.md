@@ -1,0 +1,153 @@
+# PRD-030 — Budgets and provider/model emergency stops
+
+**Status:** NOT STARTED
+**Priority:** P2 — Add enforceable usage pacing and emergency controls for every supported agent source.
+**Complexity:** 9 → HIGH; risk override: terminating agent work can interrupt writes and affect unrelated sessions.
+**Owner:** Codex
+**Depends on:** None
+**Progress:** 0/8 acceptance criteria; planning only, implementation not authorized by this request.
+
+## Context
+Token Furnace observes usage but cannot enforce a pace or stop running work. The existing Claude `PostToolUse` churn hook only adds advice. The user wants to prevent further agent spawning when a provider reaches a budget, plus a provider-wide or model-wide emergency stop. The main entry point must be a tab named **Budgets**. Budget enforcement is **Off by default**, with **Auto** and **Manual** modes.
+
+Current registry: Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`) in `src/core/providers.ts`. These are agent sources/harnesses, not interchangeable billing-provider identities. OpenCode already stores `providerID/modelID` in normalized `Turn.model`; its Go quota applies only to Go usage. A provider stop must also reach that provider's work through another harness.
+
+Inspected integration owners: `web/src/App.tsx` and `store.ts` for navigation; `src/server.ts` for loopback controllers and write protection; `src/compose.ts` for composition; `src/cli.ts` and `src/setup/agents.ts` for hooks/install/rollback; `src/services/usage-client.ts` and `src/sources/codex.ts` for quota readings; `src/core/model.ts`, source parsers and repositories for session/model identity. Existing activity counts infer activity from transcript timestamps: they are not proof that a process exists or has stopped.
+
+Complexity score: estimated 11+ implementation files (3), new control module (2), concurrent durable state (2), native session/process APIs (1), schema additions for identity/control state (1). No separate release boundary. Linux, macOS and Windows require qualification appropriate to their native process semantics.
+
+## Solution
+
+### Budgets tab
+
+Add `budgets` to the existing tab union, navigation and body mapping; deep link `#budgets`. Reuse Card, Modal, Toasts and existing form conventions. Render installed sources from the registry, not a second hardcoded three-source list. Providers with no current sessions still appear when installed; an uninstalled source shows its installation state without advertising working controls.
+
+Each provider/account meter shows mode (**Off / Auto / Manual**), current allowance, measured pace, allowed pace, reset/deadline, reading age, blocked-work count, and enforcement coverage. Models appear under their provider, with current sessions and model-specific controls. Distinguish **Watching**, **Enforcing**, **Budget blocked**, **Emergency stopped**, **Partial coverage**, and **Usage unavailable**; never label a saved setting as active enforcement.
+
+Emergency controls remain available while budgets are Off. Show separate **Stop provider** and **Stop model** actions. The confirmation names the exact scope, affected sessions, unverified sessions and any collateral work required by force termination. Saving a budget, changing mode, previewing a stop and cancelling a confirmation never terminate processes. Snapshot/file exports are read-only; disconnected dashboards disable writes and show the connection failure. Support keyboard navigation, labelled fields, modal focus restoration, and a 360px-wide viewport.
+
+### Modes and budget semantics
+
+| Mode | Behavior |
+| --- | --- |
+| Off (default) | Observe only. No budget denial, automatic cancellation, configuration installation or process signalling. Existing emergency latches still apply. |
+| Auto | Derive allowed pace from actual remaining quota and time until the meter resets; refresh when usage/reset changes. No arbitrary manual number is required. |
+| Manual | Enforce a positive user-supplied hourly pace, or a fixed allowance until a selected deadline. Keep the chosen unit visible. |
+
+Auto uses `max(0, 100 - usedPercentagePoints) / hoursUntilReset` for each valid subscription meter. Example: 72 percentage points remaining over 120 hours gives **0.6 percentage points/hour**. This is a fraction of the whole quota, not 0.6% of the remaining balance. The display may also show the equivalent 24-hour allowance. Use continuous elapsed time, not inferred working hours. Evaluate all available applicable windows independently: the most restrictive result wins; do not add percentages from different windows/accounts. Initially reuse weekly meters; extend existing usage readers to include shorter/monthly meters where the provider actually supplies them, preserving authentication and throttling.
+
+Auto requires an authoritative quota and reset. If unavailable for an API/custom provider, show **Auto unavailable** with a reason; offer Manual with normalized weighted tokens/hour or weighted-token allowance plus deadline. Do not synthesize a subscription percentage or dollars from an unknown model. Model-level Manual budgets use attributable weighted tokens; a model's share of a shared provider quota is an estimate, never a separate authoritative meter. Provider/account and model policies compose: any applicable denial wins. Model budgets default Off too.
+
+Manual percentage pace requires a valid matching provider meter. Fixed allowances count usage since activation until the explicit deadline; use absolute timestamps and display timezone. Expiry blocks further admissions until edited/disabled; it never silently grants a fresh allowance. Auto follows a confirmed provider reset. Editing/re-enabling a policy preserves already measured usage and outstanding reservations rather than granting free repeated bursts. Disabling a policy does not clear emergency stops; unlocking an emergency stop does not disable budgets.
+
+Use a trailing 60-minute usage window for hourly pacing; show when the next admission can be reconsidered. On activation, seed it from available recent usage, not zero. A fixed allowance is cumulative within its interval. Default pacing denies new consumption/expansion at supported request, turn, spawn and resume boundaries; it does not forcibly kill running jobs. A tool-only guard cannot stop pure reasoning or an already streaming request: expose that limitation as partial coverage. Never implement a retry loop that asks the model to keep retrying a denied action; return a short reason and next eligible time when known.
+
+### Shared policy, identity and concurrency
+
+Keep the transcript `AgentSource` contract read-only. Add a small control layer beside it, composed once in `src/compose.ts` and used by HTTP, CLI and installed hook/plugin adapters. Do not fork report calculations or notification settings into a second budget engine.
+
+Persist settings and emergency latches under the user configuration directory (same HOME/homedir/XDG conventions as notification settings), atomically and with user-only permissions. Keep usage checkpoints, admissions, session ownership and operation outcomes in a dedicated local SQLite control store under the user state directory; retain it independently of the disposable report cache and `--no-cache`. Use existing Node SQLite, with transactions and bounded busy handling; no new dependency or separate daemon. Hook processes can read a persisted latch even when the dashboard server is down. Missing first-run state defaults Off; malformed previously enabled policy/state must report an error and deny new matching admissions until repaired, rather than silently reverting Off.
+
+Control identity contains source/harness, configured upstream provider, account/quota key, canonical model ID, native session/agent/parent IDs, and verified runtime ownership. Retain original IDs and aliases. Resolve aliases from provider configuration/runtime metadata; never substring-match model names or infer a billing account solely from a model label. Preserve current reporting contracts unless an additive identity field is needed; invalidate parser caches if normalized fields change. Reindex from source data instead of writing to native transcript databases. Do not persist credentials, prompt bodies, complete process arguments or private tool inputs.
+
+Provider emergency scope is the selected upstream provider across all its local accounts and all three harnesses. Budget meters stay account/quota scoped; selecting an upstream provider does not merge unrelated paid subscriptions. Offer an explicit source-wide target (for example **All OpenCode**) separately: stopping Anthropic inside OpenCode is not stopping all OpenCode. Model targets are canonical upstream provider + model, across accounts/harnesses; explicit aliases resolve to that identity. Nested/mixed-model workers retain their own identity rather than inheriting the parent's model unconditionally.
+
+Serialize admission decisions across hook processes and server requests. Reserve a conservative estimated next-request/launch cost before admitting overlapping work; reconcile with deduplicated telemetry and release only after observed completion/cancellation or a verified abandoned admission. Do not treat mere creation of an agent as its total lifetime cost; later supported request/turn boundaries must recheck policy. Unknown estimated cost cannot imply zero. Use a bounded conservative estimate from valid recent attributable usage; when no usable estimate exists for an enabled policy, deny new admissions and explain why. Reservations prevent simultaneous workers consuming the same observed headroom; telemetry lag still prevents an exact provider billing guarantee.
+
+Every decision reads the latest durable policy revision. Once a stop transaction commits, later admissions in that scope must be denied; work admitted immediately before it is included in the cancellation sweep. Refresh and rediscover during the stop to catch racing launches. Meter snapshots carry their observation timestamp and reset/window identity. Readings older than five minutes, offline/errors, missing identity or expired unconfirmed meters deny new matching admissions while an applicable policy is enabled. Do not perform a network request on every tool hook. Preserve last readings for display only; account-wide unknown identity is shown as unresolved, not silently assigned to an account. Unknown-model work under an enabled model-specific policy requires resolution before new admission, without arbitrarily killing it.
+
+### Coverage for every supported source
+
+| Source | Budget/new-work gate | Running-work stop | Required qualification and limits |
+| --- | --- | --- | --- |
+| Claude Code | Synchronous `PreToolUse` denial on Agent/installed-version equivalents, resume/delegation paths and covered tool calls; `UserPromptSubmit` where supported for new turns. Resolve selected/inherited/custom-agent models before admission. | Native cancellation if the actual host exposes it; otherwise verified CLI process ownership for termination. In-process workers may require stopping their parent. | `SubagentStart` cannot prevent creation; do not use it as a gate. Test background workers, teams, resume, alternate CLI launches and hook trust/settings. Native CLI hooks alone do not intercept every model request. |
+| Codex | Synchronous `PreToolUse` denial for `spawn_agent`/`Agent`, namespaced/code-mode delegation and resume/follow-up paths on supported installed versions; prompt/turn admission where supported. | `turn/interrupt` through the owning accessible App Server; verified process fallback for CLI-only sessions. | Official docs describe local-function coverage but explicitly allow specialized paths to opt out. Prove namespaced Multi-Agent V2 and code-mode coverage; no success claim from matching the payload manually. `SubagentStart` is advisory. |
+| OpenCode | Installed plugin `tool.execute.before` for task/delegation and covered calls; supported session/request hooks for consumption; resolve `providerID/modelID` at each applicable boundary. | Native `POST /session/:id/abort` through the owning server; verified process fallback for exclusive ownership. | Test mixed upstream providers/models in one server, background task plugins, resume and model changes. Go quota never includes unrelated OpenCode providers; custom/local providers retain model/source stop support and Manual token budgets. |
+
+All three adapters must implement the same policy and result contract. Detect versions, hook/plugin installation and trust, connectivity, permission and actual path coverage. Installation is an explicit **Enable enforcement** step when first choosing Auto/Manual; preview the exact configuration edits, preserve unrelated hooks/plugins and backups, install a stable local command rather than fetching `npx -y` on every invocation, and support rollback. First run and Off do not install anything. Emergency-only protection may request the same installation, independently of a budget mode.
+
+If a version/path cannot gate native spawning, implement a supported wrapper/supervised launch route where it closes the gap, and mark unmanaged launches partial. Do not substitute AGENTS.md advice for blocking. A source cannot be marked fully enforcing until its real launch/resume paths are qualified. Raw CLI launches without installed hooks, remote/cloud sessions, detached jobs outside known ownership and upstream calls outside the controlled harnesses remain outside a hard boundary; count/list discoverable unmanaged work. This PRD covers the current machine only, not remote laptop/cloud orchestration or global provider-account revocation.
+
+### Emergency stop and recovery
+
+Persist a deny latch **before** signalling anything. A stop operation has an ID and per-target outcomes: requested, cancelled, terminated, unresolved, failed. Repeated stop calls are idempotent and preserve the latch. Attempt native cancellation immediately; after a five-second grace period expose survivors for a separately confirmed **Force stop**. Do not automatically escalate from a budget denial to termination. Unlock is a separate explicit action; restarts, quota resets, policy edits, changing mode to Off and closing the browser never unlock it. Unlock permits future work; it never restarts cancelled sessions.
+
+Discover running sessions through adapters and verified same-user process ownership, including sessions started before Token Furnace. A transcript timestamp, executable substring or PID alone is insufficient ownership. Revalidate executable/owner/start identity immediately before signalling to avoid PID reuse. Track real worker descendants, including detached workers where ownership can be established; do not kill a terminal/shell group containing unrelated work. Refuse targeting Token Furnace, its ancestors or unrelated utilities (for example CodexBar). Do not call blanket `pkill -f` or kill a shared server to stop one model.
+
+Prefer native session cancellation for model scope in mixed-model/mixed-provider hosts. If only whole-process termination is possible, show exactly which additional sessions would stop and require explicit widened-scope confirmation; otherwise leave them unresolved and report **Partial stop**. Never silently kill Sonnet to stop Opus. A force-provider stop covers every verified matching local runtime; ambiguous/unreachable work stays visible as unresolved, so the UI cannot claim all stopped. A confirmed exclusive process termination may include its tools; disclose that consequence before force confirmation. Cancellation is not rollback of file edits, external effects or provider-side requests already sent.
+
+Model/provider changes while a latch is active must be checked before the next supported admission. A blocked model cannot be resumed under an alias; an allowed model may continue when no provider/source latch applies. Do not automatically reroute to another paid provider/model. Budgets/stop state remain readable even if this dashboard's own agent session is a target; the separate Token Furnace server/control state is never a kill target.
+
+### Entry points and observable results
+
+| Consumer | Proposed contract | Observable result |
+| --- | --- | --- |
+| Budgets tab | `GET /api/budgets`; `POST /api/budgets` with validated policies and expected revision | Authoritative saved mode and coverage survive refresh/restart; stale writes return conflict. |
+| Stop preview/commit | `POST /api/budgets/stop-preview`; `POST /api/budgets/stop` with scope, confirmation and preview revision | Durable latch plus operation ID; changed collateral scope requires a fresh confirmation. Preview changes nothing. |
+| Outcome/recovery | `GET /api/budgets/operations/:id`; `POST /api/budgets/unlock` | Verified per-session outcomes and persistent latch, or explicit partial failure; unlock affects only the selected latch. |
+| Local automation | `token-furnace budgets status`; `budgets stop --provider <id>` or `--model <provider/model>`; `budgets unlock <scope>` | Same service/state as the tab; preview by default, explicit `--confirm` to stop/unlock, separate `--force --confirm` for escalation. |
+| Provider adapter | `token-furnace hook budget` (Claude/Codex); OpenCode local plugin | Shared decision translated into actual native denial, short reason and retry time; no network/package install in the hook path. |
+
+Keep the loopback Host/Origin protections and add a per-server unpredictable mutation token to every budget/control write; reject cross-site, invalid content types, unsupported selectors, stale revisions and replayed widened previews. Token goes only to the same-origin live dashboard or authenticated local CLI, never exported HTML. Escape external labels; never interpolate provider/model/session IDs into shell commands. Same-user agents that can rewrite configuration bypass user-owned hooks: this is a usage guardrail, not a hostile-agent security sandbox or an exact billing circuit breaker.
+
+Non-goals: provider credential revocation, firewalling the entire machine, remote-host control, automatic provider switching, undoing completed work, new billing integrations, scheduled work hours, notifications, and a general process manager. Preserve existing reports, resets, configuration repairs and notification behavior.
+
+## Acceptance Criteria
+
+Proof paths below are planned additions/extensions, not claims that those tests/scripts already exist. Each criterion has actor **implementing agent** unless stated otherwise. Evidence remains pending until implementation.
+
+- [ ] AC-1 [local; implementing agent]: Open `#budgets`, select Off/Auto/Manual and save; all three installed sources and their discovered models render with accessible controls and saved state, including Off on first run and disabled snapshot writes — proof: `npx vitest run web/src/budgets.test.tsx test/budgets-http.test.ts` — Evidence: pending.
+- [ ] AC-2 [local; implementing agent]: Auto computes 0.6 percentage points/hour from 72 remaining/120 hours and follows confirmed resets; Manual enforces the selected pace/allowance without granting extra credit on edits; unsupported meters stay explicit — proof: `npx vitest run test/budgets-policy.test.ts` with fake clock and real policy consumption through the budget service — Evidence: pending.
+- [ ] AC-3 [local; implementing agent]: Concurrent real hook processes share one admission/reservation state, reconcile usage once and deny enabled scopes on stale/malformed/unknown inputs; latched stops and reservations survive server restart/report-cache deletion — proof: `npx vitest run test/budgets-concurrency.test.ts` using a temporary real SQLite store — Evidence: pending.
+- [ ] AC-4 [local; implementing agent]: Claude Code, Codex and OpenCode each reject a real native covered spawn/resume when budget-blocked or latched, and allow it when eligible; nested/code-mode/mixed-model paths report their actual coverage — proof: `npm run qualify:budgets -- --sources claude,codex,opencode` (new harness; isolated homes/workspaces, pinned installed versions, dedicated minimal live requests) — Evidence: pending; mocked hook payloads alone do not satisfy this criterion.
+- [ ] AC-5 [local; implementing agent]: Confirm a provider stop through HTTP/CLI; verified matching sessions across harnesses stop, later admissions are denied until explicit unlock, and a failed cancellation is reported as partial with its latch retained — proof: `npx vitest run test/budgets-stop.test.ts` driving native cancellation against isolated servers and owned child processes, plus AC-4 qualification for real provider endpoints — Evidence: pending.
+- [ ] AC-6 [local; implementing agent]: Confirm a model stop in a mixed-model host; matching workers stop or remain explicitly unresolved, unrelated models survive, aliases cannot bypass the latch, and any collateral force termination requires widened confirmation — proof: `npx vitest run test/budgets-stop.test.ts web/src/budgets.test.tsx` with mixed-provider/model trees and AC-4 native qualification — Evidence: pending.
+- [ ] AC-7 [local; implementing agent]: Untrusted mutation requests and stale/replayed confirmations cannot change policy or signal a process; verified force termination never reaches PID-reused/unrelated/shared-group targets — proof: `npx vitest run test/budgets-http.test.ts test/budgets-stop.test.ts` with real non-target sibling processes and observable continued liveness — Evidence: pending.
+- [ ] AC-8 [shared; implementing agent triggers GitHub Actions]: Supported Node versions on Linux/macOS/Windows pass affected controls, native owned-process stop tests, existing regression suite and installed-package smoke; package serves the Budgets tab and installs its adapter assets — proof: extend existing `.github/workflows/ci.yml`, then `npm run typecheck`, `npm test`, `npm run smoke` in matrix jobs; record actual run URL/job results here — Evidence: pending. Native authenticated harness qualification is AC-4, not replaced by CI fixtures.
+
+## Execution constraints
+
+No human sign-off is required merely to finish this planning task. Implementation must first establish an isolated native qualification environment and credentials for each harness; do not assume personal sessions are safe targets. If any version/path or native runner cannot be qualified, record the concrete missing access/capability and unblocking actor under `## Blocked on`, leave affected acceptance pending and do not claim all-provider enforcement. Do not skip one source to close the PRD.
+
+CI credentials are not required for native child-process tests; dedicated provider authentication may be required for AC-4. Confirm available access before declaring it blocked. Long checks expected to exceed five minutes should use the laptop-offload skill when its status has capacity; native Windows/macOS properties still need their respective runners. No standalone evidence report: record concise results on the owning AC and link CI runs.
+
+## Integration Ledger
+
+| Capability | Reachable consumer/trigger | Replaces / disposition | Evidence |
+| --- | --- | --- | --- |
+| Budgets tab | `web/src/App.tsx` navigation/body → new Budgets component → `src/server.ts` controllers → composed budget service | Adds an independent control surface; existing report/notification tabs remain their owners | AC-1, AC-2, AC-8 |
+| All-source budget enforcement | `src/cli.ts` budget hook / installed OpenCode plugin → shared durable admission → native deny | Existing churn hook stays advisory and separate; no duplicate budget logic per adapter | AC-3, AC-4 |
+| Provider/model emergency stops | Budgets confirmation / CLI → control service latch → source runtime adapter → verified outcome | Adds ownership-aware cancellation; report activity is never used as termination evidence | AC-5, AC-6, AC-7 |
+| Enable/recover enforcement | Budgets enable/unlock → `src/setup/agents.ts` backed-up adapter installation / durable state | Extend current setup/rollback conventions without replacing unrelated user hooks/plugins | AC-1, AC-4, AC-8 |
+
+## Decisions
+
+- 2026-10-10 (João): Planning only using `prd-creator`; cover every currently supported source; add provider-wide and model-wide emergency stops.
+- 2026-10-10 (João): Main tab is **Budgets**; default **Off**, with **Auto** lasting until the quota reset and **Manual** enforcement.
+- 2026-10-10 (planning assumption): Auto uses continuous time until real reset; API/custom providers without quota support Manual weighted-token budgets. Budget exhaustion blocks new admissions without automatic process killing; emergency stop is separate and persistent.
+- 2026-10-10 (planning assumption): Current-machine scope, preserving underlying provider/account/model identity across harnesses. Source-wide controls are separately labelled; no remote/account credential revocation.
+
+## Execution Phases
+#### Phase 1: Budgets tab and shared policy
+**Status:** NOT STARTED
+**Files:** New `src/core/budgets.ts` (contracts/pure policy), `src/services/budget-service.ts` (durable settings/admissions), `web/src/components/budgets.tsx`; extend `src/compose.ts`, `src/server.ts`, `web/src/App.tsx`, `web/src/store.ts`; identity additions to source parsers/model/repositories only where required. New/extended tests named in AC-1–3 and AC-7.
+**Implementation:** Deliver `#budgets` → save → read-after-restart with Off default and real Auto/Manual calculations. Establish account/model identity, transactional revisions/reservations, meter freshness and independent durable stop state. Until adapters qualify, show Watching/Partial coverage rather than Enforcing. Secure mutation routes immediately; wire stop routes only when Phase 3 can execute them safely.
+**Verification:** AC-1–3 and mutation portion of AC-7; targeted Vitest files listed above plus `npm run typecheck`. Check positive, exhausted, reset, unknown model/provider, offline and racing policy-update cases. No native session termination in this phase.
+
+#### Phase 2: Enforcement across every supported source
+**Status:** NOT STARTED
+**Files:** New `src/services/agent-control.ts` and source-specific adapter assets under `src/setup/`/`src/control/` as needed; extend `src/cli.ts`, `src/setup/agents.ts`, usage readers, service composition and Budgets coverage display. Add the `qualify:budgets` script, fixtures and package inclusion where required; do not create unconsumed generic plugin infrastructure.
+**Implementation:** Wire all three actual native admission paths to the shared gate; enable/install with backup/trust verification/rollback. Register session/process ownership and current provider/model metadata; support switching/resuming/nesting and code-mode tools. Preserve native config and show discovered gaps. Resolve native capability gaps using supported supervised entry points rather than prose instructions. Reuse existing weighted-token/quota calculations; expose measured versus estimated data.
+**Verification:** AC-4 and installed-adapter parts of AC-8, using isolated native homes/workspaces and known pinned versions. Real native denial must prevent the child/request side effect; an eligible control must produce it. Cover all three sources independently. Extend existing source/setup/CLI tests only for changed contracts. Record incomplete remote/unmanaged coverage rather than inflating guarantees.
+
+#### Phase 3: Emergency stops and recovery
+**Status:** NOT STARTED
+**Files:** Extend agent-control and budget services, `src/server.ts`, `src/cli.ts`, Budgets component and existing Modal integration; add native platform signal handling only where ownership tests require it. Extend package smoke, `.github/workflows/ci.yml`, `README.md`, and tests named in AC-5–8.
+**Implementation:** Deliver provider/model preview → confirm → durable deny latch → native cancellation → verified outcomes. Add separately confirmed force escalation, identity revalidation, collateral preview, race rediscovery and explicit unlock. Display partial failures with exact remaining scope. Ensure nested/mixed-model hosts and pre-existing discoverable sessions are handled without targeting unrelated processes; preserve state when the server restarts or the report cache is cleared.
+**Verification:** AC-5–8 plus the already selected affected regressions; native test targets must be disposable owned children/sessions, never personal work. A second model/provider process remaining alive is required evidence for selective stops. Finish with one typecheck/build/regression/package-smoke pass and native CI matrix; record concise evidence here. Mark DONE/archive only after all eight criteria, including shared qualification, have attributable passing evidence.
+
+## References and verification limits
+
+Official sources checked 2026-10-10: [Claude Code hooks](https://code.claude.com/docs/en/hooks) documents pre-tool denial and non-blocking SubagentStart; [Codex hooks](https://learn.chatgpt.com/docs/hooks) documents local-function/spawn matching and specialized-path exceptions; [Codex App Server](https://learn.chatgpt.com/docs/app-server) documents turn interruption; [OpenCode plugins](https://opencode.ai/docs/plugins/) documents pre-tool blocking; [OpenCode server](https://opencode.ai/docs/server/) documents session abort. Treat these as capability discovery, not installed-version qualification.
+
+Planning checks: scope and entry points inspected; no implementation tests or live cancellations run. In-flight upstream requests can still be billed; local telemetry and weighted tokens cannot guarantee an exact subscription or monetary ceiling. Provider-wide stopping across unmanaged/remote hosts requires capabilities outside this PRD and must never be implied by the UI.

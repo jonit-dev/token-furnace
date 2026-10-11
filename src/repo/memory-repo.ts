@@ -1,5 +1,6 @@
 import type { SessionInput, SourceFile } from "../core/model";
 import type { SessionRepository } from "./session-repo";
+import { activityTurns } from "../core/analyze/agent-activity";
 
 /**
  * Turns in a Map, for tests and --no-cache. The file size rides along in the map so a file that
@@ -27,6 +28,10 @@ export class MemorySessionRepository implements SessionRepository {
     return [...this.sessions.values()].map((held) =>
       filtered ? { ...held.session, turns: held.session.turns.filter((turn) => turn.when.getTime() >= ms) } : held.session,
     );
+  }
+
+  activity() {
+    return activityTurns(this.all());
   }
 
   save(session: SessionInput, size: number): void {

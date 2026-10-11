@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import type { SessionInput, Source, SourceFile, Turn, Wake } from "../core/model";
+import type { ActivityTurn, SessionInput, Source, SourceFile, Turn, Wake } from "../core/model";
 import type { SessionRepository } from "./session-repo";
 import { PROVIDERS } from "../core/providers";
 
@@ -193,6 +193,17 @@ export class SqliteSessionRepository implements SessionRepository {
     }
 
     return out;
+  }
+
+  *activity(): Iterable<ActivityTurn> {
+    this.ensureDb();
+    if (!this.db) return;
+    const rows = this.db.prepare(`
+      SELECT files.source, turns.project, turns.session, turns.at
+      FROM turns JOIN files ON files.path = turns.path
+      WHERE base_in + cache_read + cache_write > 0 ORDER BY at
+    `).iterate();
+    for (const row of rows) yield row as unknown as ActivityTurn;
   }
 
   all(cutoff?: Date): SessionInput[] {

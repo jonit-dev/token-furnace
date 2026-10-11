@@ -1,5 +1,12 @@
 import { fixed } from "./format";
-import type { RawReport, Source } from "../model";
+import type { Burn, RawReport, Source } from "../model";
+
+/** Match critical burn severity using the session's contribution, not the provider total. */
+export function isSessionSpike(session: { rate: number }, burn?: Pick<Burn, "goal"> & Partial<Pick<Burn, "limit">>): boolean {
+  return !!burn && burn.goal !== null && Number.isFinite(session.rate) && Number.isFinite(burn.goal)
+    && (burn.goal > 0 || (burn.goal === 0 && (burn.limit ?? 0) > 0))
+    && session.rate > 2 * burn.goal;
+}
 
 /**
  * Cumulative (time, % of the weekly limit used, % if context were capped) per hour, from the

@@ -119,10 +119,27 @@ export interface ReportInput {
   /** Agents whose directory exists, in source order. */
   live: Source[];
   sessions: SessionInput[];
+  /** All available transcript activity, independent of the token-report window. */
+  activity?: Iterable<ActivityTurn>;
   config: ConfigInput;
   planWeek: Week | null;
   codexWeek: Week | null;
   opencodeWeek?: Week | null;
+}
+
+export interface ActivityTurn {
+  source: Source;
+  project: string;
+  session: string;
+  at: number;
+}
+
+export interface AgentActivity {
+  /** ISO sample time and concurrent active sessions, last 24 h. */
+  timeline: [string, number][];
+  peak7d: number;
+  /** Peak across available local transcripts, not deleted history. */
+  peakLifetime: number;
 }
 
 /** Aggregates for the last CHECK_HOURS, as one dict Python shares per source. */
@@ -270,6 +287,7 @@ export interface RawReport {
   /** [share %, worst models] */
   unpriced: [number, [string, number][]] | null;
   active: ActiveSession[];
+  agentActivity?: AgentActivity;
   /** [hour, [cool spend, hot spend]] */
   timeline: [Date, [number, number]][];
   project_count?: number;
@@ -301,6 +319,7 @@ export interface Report {
   actions: string[];
   issues: Issue[];
   active: ActiveSession[];
+  agentActivity?: AgentActivity;
   /** [hour end, actual, benchmark] */
   burndown: [string, number, number][];
   contextTargets: Record<Source, number>;
