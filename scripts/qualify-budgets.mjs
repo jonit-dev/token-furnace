@@ -33,6 +33,7 @@ let activeServerEnv;
 
 if (process.argv.includes("--self-test")) {
   const timedOut = finishNativeResult({ status: 1, signal: "SIGTERM" }, true, "", "contract", 0);
+  const successfulAuthNarrative = { status: 0, timedOut: false, signal: null, output: "authorizing via your claude.ai connector settings did not affect this task" };
   const claudeArgs = nativeArgs({ source: "claude" }, "/tmp", "prompt", {});
   const resumeArgs = nativeArgs({ source: "claude" }, "/tmp", "prompt", { resumeSessionId: "native-session" });
   const codexArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", { resumeSessionId: "thread" });
@@ -44,7 +45,9 @@ if (process.argv.includes("--self-test")) {
   const first = scenarioArtifacts("/tmp", "claude", "provider-stop", ["matching"]);
   const second = scenarioArtifacts("/tmp", "claude", "provider-stop", ["matching"]);
   const gated = delayedPrompt(first.matching, "MATCHING", first.barrier);
-  if (!timedOut.timedOut || !taskUnavailable(timedOut) || nativeAttemptPasses(timedOut) || claudeArgs.includes("--no-session-persistence") || !claudeArgs.includes("--output-format") || !resumeArgs.includes("--resume") || !codexArgs.includes("resume") || codexArgs.includes("-C") || !codexFreshArgs.includes("-C") || !codexArgs.includes("--json") || !openCodeArgs.includes("--session") || !openCodeArgs.includes("--format") || !ids.includes("native-session") || !codexIds.includes("thread") || !openCodeIds.includes("session") || first.matching === second.matching || !gated.includes(first.barrier) || !gated.toLowerCase().includes("only after")) {
+  const emptyControls = { querySelector: () => null };
+  const completeControls = { querySelector: () => ({}) };
+  if (!timedOut.timedOut || !taskUnavailable(timedOut) || taskUnavailable(successfulAuthNarrative) || nativeAttemptPasses(timedOut) || budgetControlsReady(emptyControls) || !budgetControlsReady(completeControls) || claudeArgs.includes("--no-session-persistence") || !claudeArgs.includes("--output-format") || !resumeArgs.includes("--resume") || !codexArgs.includes("resume") || codexArgs.includes("-C") || !codexFreshArgs.includes("-C") || !codexArgs.includes("--json") || !openCodeArgs.includes("--session") || !openCodeArgs.includes("--format") || !ids.includes("native-session") || !codexIds.includes("thread") || !openCodeIds.includes("session") || first.matching === second.matching || !gated.includes(first.barrier) || !gated.toLowerCase().includes("only after")) {
     console.error("qualification contract failed: native timeout, persistence, resume, identity, or barrier contract regressed");
     process.exitCode = 1;
   } else {
@@ -156,7 +159,9 @@ async function qualify() {
     }
     const sentinel = join(workspace, `${source}-warmup.sentinel`);
     const warmup = await runNative(target, workspace, `Create the file ${sentinel} containing exactly BUDGET_WARMUP and then stop.`, 120_000);
-    warmups.set(source, { ok: nativeAttemptPasses(warmup) && existsSync(sentinel) && nativeSessionEvidence(source, warmup), detail: safeTail(warmup.output) });
+    const warmupSideEffect = existsSync(sentinel);
+    const warmupRegistered = nativeSessionEvidence(source, warmup);
+    warmups.set(source, { ok: nativeAttemptPasses(warmup) && warmupSideEffect && warmupRegistered, detail: `${nativeDiagnostic(source, warmup, warmupRegistered, warmupSideEffect)} output=${safeTail(warmup.output)}` });
   }
   let server = await startServer(activeServerEnv);
   servers.push(server);
@@ -319,13 +324,20 @@ async function scenarioAdmission(source, workspace, url, warmup) {
   if (taskUnavailable(task)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task was unavailable: ${safeTail(task.output)}` };
   if (!nativeAttemptPasses(task)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task ran but did not complete: ${safeTail(task.output)}` };
   const allowed = decisionEvidence(source, task.requestId, task.startedAt, true);
-  if (!allowed || !nativeSessionEvidence(source, task) || !nativeChildEvidence(source, task) || !existsSync(artifacts.child) || !existsSync(artifacts.background)) {
-    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The eligible request lacked correlated native parent/child session evidence, durable allow evidence, or child side effects." };
+  const taskRegistered = nativeSessionEvidence(source, task);
+  const childSessions = nativeChildEvidence(source, task);
+  const childSideEffect = existsSync(artifacts.child);
+  const backgroundSideEffect = existsSync(artifacts.background);
+  if (!allowed || !taskRegistered || !childSessions || !childSideEffect || !backgroundSideEffect) {
+    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Eligible request evidence failed: ${nativeDiagnostic(source, task, taskRegistered, childSideEffect && backgroundSideEffect)} allowDecision=${Boolean(allowed)} childSessions=${childSessions} backgroundSideEffect=${backgroundSideEffect}` };
   }
   const resumed = await resumeNative(target, workspace, task.nativeSessionId, resumePrompt(source, artifacts.resume, "BUDGET_RESUMED"), 120_000, null);
   if (taskUnavailable(resumed)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The native session could not be resumed: ${safeTail(resumed.output)}` };
-  if (!nativeAttemptPasses(resumed) || !resumed.nativeSessionIds.includes(task.nativeSessionId) || !nativeSessionEvidence(source, resumed) || !existsSync(artifacts.resume)) {
-    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The eligible native session did not resume through the same observed session or create its resume side effect." };
+  const resumedRegistered = nativeSessionEvidence(source, resumed);
+  const resumedSideEffect = existsSync(artifacts.resume);
+  const resumedSameSession = resumed.nativeSessionIds.includes(task.nativeSessionId);
+  if (!nativeAttemptPasses(resumed) || !resumedSameSession || !resumedRegistered || !resumedSideEffect) {
+    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Resume evidence failed: ${nativeDiagnostic(source, resumed, resumedRegistered, resumedSideEffect)} sameSession=${resumedSameSession}` };
   }
   if (!hasMeasuredUsage(source, task.startedAt)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: "The eligible native task did not leave attributable measured usage in the shared budget store." };
   const exhausted = await setSourcePolicy(url, source, 1);
@@ -333,7 +345,10 @@ async function scenarioAdmission(source, workspace, url, warmup) {
   const blockedTask = await runNative(target, workspace, delegationPrompt(source, artifacts.blockedChild, artifacts.blockedBackground, artifacts.blockedResume, "BUDGET_BLOCKED"), 60_000, null);
   const denied = decisionEvidence(source, blockedTask.requestId, blockedTask.startedAt, false);
   if (taskUnavailable(blockedTask)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The exhausted native request was unavailable, not a denial: ${safeTail(blockedTask.output)}` };
-  if (!denied || !nativeSessionEvidence(source, blockedTask) || blockedTask.timedOut || blockedTask.signal || existsSync(artifacts.blockedChild) || existsSync(artifacts.blockedBackground)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The exhausted request lacked a correlated native deny decision or created a child side effect." };
+  const blockedRegistered = nativeSessionEvidence(source, blockedTask);
+  const blockedChildSideEffect = existsSync(artifacts.blockedChild);
+  const blockedBackgroundSideEffect = existsSync(artifacts.blockedBackground);
+  if (!denied || !blockedRegistered || blockedTask.timedOut || blockedTask.signal || blockedChildSideEffect || blockedBackgroundSideEffect) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `Blocked request evidence failed: ${nativeDiagnostic(source, blockedTask, blockedRegistered, blockedChildSideEffect || blockedBackgroundSideEffect)} denyDecision=${Boolean(denied)} childSideEffect=${blockedChildSideEffect} backgroundSideEffect=${blockedBackgroundSideEffect}` };
   return { status: "PASS", scenario: `budget-admission:${source}`, detail: "Native delegation, nested/background child sessions, same-session resume, measured usage exhaustion, correlated denial, and absent child side effects were observed." };
 }
 
@@ -498,7 +513,14 @@ async function restartQualificationServer() {
 }
 
 function taskUnavailable(result) {
-  return Boolean(result?.timedOut || result?.signal || /(?:login|auth|credential|not found|unknown option|unavailable|timed out)/i.test(result?.output ?? ""));
+  if (result?.timedOut || result?.signal) return true;
+  if (result?.status === 0) return false;
+  return /(?:\b(?:not found|unknown option|unavailable|timed out)\b|\b(?:login|auth(?:entication)?|credential(?:s)?)\b[\s\S]*?\b(?:fail(?:ed|ure)?|error|required|invalid|denied|missing|expired)\b)/i.test(result?.output ?? "");
+}
+
+function nativeDiagnostic(source, result, registered, sideEffect) {
+  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
+  return `${source} status=${result?.status ?? "unknown"} timedOut=${Boolean(result?.timedOut)} signal=${result?.signal ?? "none"} sessionSeen=${ids.length > 0} registered=${registered === undefined ? "unknown" : Boolean(registered)} sideEffect=${sideEffect === undefined ? "unknown" : Boolean(sideEffect)}`;
 }
 
 async function scenarioProviderStop(source, url, workspace, browser) {
@@ -606,8 +628,11 @@ async function scenarioModelStop(source, url, workspace, browser) {
   releaseBarrier(artifacts.unrelatedBarrier);
   const matchingResult = await matchingWorker.wait(8_000);
   const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  if (matchingResult.timedOut || matchingResult.signal || matchingWorker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) {
-    return { status: "FAIL", scenario: "model-stop", detail: "Selective model cancellation did not stop the matching worker while the original unrelated model advanced." };
+  const matchingRegistered = nativeSessionEvidence(source, matchingResult);
+  const unrelatedRegistered = nativeSessionEvidence(source, unrelatedOriginal);
+  const unrelatedSideEffect = existsSync(artifacts.unrelated);
+  if (matchingResult.timedOut || matchingResult.signal || matchingWorker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !unrelatedSideEffect) {
+    return { status: "FAIL", scenario: "model-stop", detail: `Selective model cancellation evidence failed: matching(${nativeDiagnostic(source, matchingResult, matchingRegistered, existsSync(artifacts.matching))}) unrelated(${nativeDiagnostic(source, unrelatedOriginal, unrelatedRegistered, unrelatedSideEffect)}) originalWasLive=${unrelatedWasLive}` };
   }
   const restarted = await restartQualificationServer();
   if (!restarted) return { status: "FAIL", scenario, detail: "Token Furnace could not restart before model latch persistence verification." };
@@ -785,6 +810,10 @@ async function postJson(url, token, body) {
   }
 }
 
+function budgetControlsReady(document) {
+  return ["Claude Code", "Codex", "OpenCode"].every((label) => document.querySelector(`select[aria-label="${label} budget mode"]`) && document.querySelector(`button[aria-label="Save ${label} budget"]`));
+}
+
 async function driveBudgetsBrowser(browser, url) {
   const userData = mkdtempSync(join(tmpdir(), "token-furnace-browser-"));
   temporary.push(userData);
@@ -800,7 +829,8 @@ async function driveBudgetsBrowser(browser, url) {
     if (!target) return { ok: false, ran: false, detail: "Browser page target was unavailable." };
     socket = await connectCdp(target.webSocketDebuggerUrl);
     await socket.command("Page.navigate", { url });
-    await waitFor(async () => Boolean(await socket.evaluate("document.body && document.body.innerText.includes('Budgets')")), 15_000);
+    const controlsReady = await waitFor(async () => Boolean(await socket.evaluate(`(${budgetControlsReady.toString()})(document)`)), 15_000);
+    if (!controlsReady) return { ok: false, ran: true, detail: "The real browser did not render all three source budget controls before the readiness deadline." };
     const result = await socket.evaluate(`(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const setValue = (element, value) => {
@@ -813,20 +843,22 @@ async function driveBudgetsBrowser(browser, url) {
       const autoReadings = [];
       for (const label of labels) {
         const mode = document.querySelector('select[aria-label="' + label + ' budget mode"]');
-        if (!mode) continue;
-        setValue(mode, "off"); await sleep(150); document.querySelector('button[aria-label="Save ' + label + ' budget"]')?.click(); await sleep(300);
+        const save = document.querySelector('button[aria-label="Save ' + label + ' budget"]');
+        if (!mode || !save) return { ok: false, detail: "The " + label + " budget controls disappeared after readiness." };
+        setValue(mode, "off"); await sleep(150); save.click(); await sleep(300);
         setValue(mode, "auto"); await sleep(150); document.querySelector('button[aria-label="Save ' + label + ' budget"]')?.click(); await sleep(400);
         const autoState = await (await fetch('/api/budgets', { cache: 'no-store' })).json();
         const autoSource = autoState.sources?.find((source) => source.label === label);
         if (autoSource) autoReadings.push(autoSource);
         setValue(mode, "manual"); await sleep(150);
         const limit = document.querySelector('input[aria-label="' + label + ' budget limit"]');
-        if (limit) setValue(limit, "1000");
-        await sleep(100); document.querySelector('button[aria-label="Save ' + label + ' budget"]')?.click(); await sleep(300);
+        if (!limit) return { ok: false, detail: "The " + label + " Manual budget limit did not render after selecting Manual." };
+        setValue(limit, "1000");
+        await sleep(100); save.click(); await sleep(300);
       }
-      return { budgets: document.body.innerText.includes("Budgets"), modes: document.querySelectorAll('select[aria-label$="budget mode"]').length, autoReadings };
+      return { ok: true, budgets: document.body.innerText.includes("Budgets"), modes: document.querySelectorAll('select[aria-label$="budget mode"]').length, autoReadings };
     })()`);
-    if (!result?.budgets || result.modes < 3) return { ok: false, ran: true, detail: "The real browser did not render all source mode controls." };
+    if (!result?.ok || !result.budgets || result.modes < 3) return { ok: false, ran: true, detail: result?.detail ?? "The real browser did not render all source mode controls." };
     return { ok: true, ran: true, detail: "browser controls exercised", autoReadings: result.autoReadings };
   } catch (error) {
     return { ok: false, ran: true, detail: `Browser scenario error: ${error instanceof Error ? error.message : String(error)}` };
@@ -851,7 +883,7 @@ async function driveStopBrowser(browser, url, selector, expectedText) {
     if (!target) return { ok: false, ran: true, detail: "Browser page target was unavailable for stop confirmation." };
     socket = await connectCdp(target.webSocketDebuggerUrl);
     await socket.command("Page.navigate", { url: `${url}/#budgets` });
-    if (!await waitFor(async () => Boolean(await socket.evaluate("document.body && document.body.innerText.includes('Budgets')")), 15_000)) return { ok: false, ran: true, detail: "Budgets tab did not load for stop confirmation." };
+    if (!await waitFor(async () => Boolean(await socket.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`)), 15_000)) return { ok: false, ran: true, detail: "The real Budgets tab did not render the requested stop control before the readiness deadline." };
     const result = await socket.evaluate(`(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const button = document.querySelector(${JSON.stringify(selector)});
