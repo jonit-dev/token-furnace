@@ -4,11 +4,13 @@
  * codes of burn.py main(): 1 with no data, 1 with leaks or a failing doctor, 0 otherwise.
  */
 
-import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { CONTEXT_TARGET_LABEL } from "./core/context";
+import { PROVIDERS } from "./core/providers";
+import { nativeUsageTokens, type BudgetScope } from "./core/budgets";
 import { compose, type App } from "./compose";
 import { topIssues } from "./core/analyze/issues";
 import { reportView } from "./core/analyze/view";
@@ -17,14 +19,24 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
+import { controlTargetProof, MANAGED_ENDPOINT_PREFIX, type ControlOutcome, type NativeTarget } from "./services/agent-control";
+import type { ActualUsageUnit } from "./services/budget-service";
+import { localQuotaAccount, refreshHookMeters } from "./services/budget-meters";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
-import { runFixConfig, runSetup } from "./setup/agents";
+import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
+import { claudeUpstreamProvider, runManagedNative } from "./services/native-host";
 
 const USAGE = `Usage: token-furnace [days] [options]
        token-furnace serve [--port 8765]
        token-furnace setup [--apply] [--rollback] [--aggressive] [--verify]
        token-furnace fix-config
        token-furnace hook churn
+       token-furnace hook budget [--source <source>]
+       token-furnace native run --source claude|codex --prompt <text> [--model <id>] [--provider <id>] [-- <native args>]
+       token-furnace budgets status
+       token-furnace budgets enable --confirm [--rollback]
+       token-furnace budgets stop --source <source> | --provider <id> | --model <provider/model> [--confirm] [--force --force-confirm]
+       token-furnace budgets unlock --source <source> | --provider <id> | --model <provider/model> --confirm
 
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
@@ -55,6 +67,16 @@ interface Options {
 }
 
 export async function main(argv: string[] = process.argv.slice(2), app?: App): Promise<number> {
+  if (argv[0] === "hook" && argv[1] === "budget") {
+    const ownsApp = !app;
+    const budgetApp = app ?? compose(process.env, { noCache: true });
+    const source = argv[2] === "--source" && (argv[3] === "claude" || argv[3] === "codex" || argv[3] === "opencode") ? argv[3] : undefined;
+    try {
+      const stdin = readStdin();
+      await refreshHookMeters(budgetApp, stdin, source); // a stale quota meter is refreshed once, throttled, before the decision
+      return runBudgetHook(stdin, budgetApp, source);
+    } finally { if (ownsApp) budgetApp.close(); }
+  }
   if (argv[0] === "hook" && argv[1] === "churn") {
     return runChurnHook(readStdin(), (app?.env ?? process.env), process.stdout);
   }
@@ -99,6 +121,18 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
     );
   }
 
+  if (argv[0] === "native" && argv[1] === "run") {
+    const ownsApp = !app;
+    const nativeApp = app ?? compose(process.env, { noCache: true });
+    try { return await runNative(argv.slice(2), nativeApp); } finally { if (ownsApp) nativeApp.close(); }
+  }
+
+  if (argv[0] === "budgets") {
+    const ownsApp = !app;
+    const budgetApp = app ?? compose(process.env, { noCache: true });
+    try { return await runBudgets(argv.slice(1), budgetApp); } finally { if (ownsApp) budgetApp.close(); }
+  }
+
   const parsed = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -122,9 +156,12 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
     return 0;
   }
 
+  const ownsApp = !app;
   if (!app) {
     app = compose(process.env, { noCache: Boolean(parsed.values["no-cache"]) });
   }
+  const commandApp = app;
+  try {
 
   const serveMode = parsed.positionals[0] === "serve";
   const positionals = serveMode ? parsed.positionals.slice(1) : parsed.positionals;
@@ -157,7 +194,7 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   };
 
   if (options.listSources) {
-    listSources(app);
+    listSources(commandApp);
     return 0;
   }
   if (serveMode) {
@@ -166,9 +203,9 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
 
   const now = app.now();
-  await app.reports.refresh(stderrProgress());
-  const [plan, goPlan] = await Promise.all([planWeek(app.env, now, options.planUsage), openCodeWeek(app.env, now, options.planUsage)]);
-  const report = app.reports.getRaw(options.days, options.source, {
+  await commandApp.reports.refresh(stderrProgress());
+  const [plan, goPlan] = await Promise.all([planWeek(commandApp.env, now, options.planUsage), openCodeWeek(commandApp.env, now, options.planUsage)]);
+  const report = commandApp.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: plan,
     opencodeWeek: goPlan,
@@ -194,6 +231,478 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
   process.stdout.write(printDoctor(report, htmlPath));
   return topIssues(report).length ? 1 : 0;
+  } finally {
+    if (ownsApp) commandApp.close();
+  }
+}
+
+async function runBudgets(argv: string[], app: App): Promise<number> {
+  const command = argv[0] ?? "status";
+  const parsed = parseArgs({
+    args: argv.slice(1), allowPositionals: true,
+    options: {
+      provider: { type: "string" }, model: { type: "string" }, source: { type: "string" },
+      confirm: { type: "boolean" }, rollback: { type: "boolean" }, force: { type: "boolean" }, "force-confirm": { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  if (parsed.values.help) {
+    process.stdout.write("Usage: token-furnace budgets status | enable --confirm [--rollback] | stop --source <source> | --provider <id> | --model <provider/model> [--confirm] | unlock --source <source> | --provider <id> | --model <provider/model> --confirm\n");
+    return 0;
+  }
+  const scope = budgetScope(parsed.values.provider, parsed.values.model, parsed.values.source);
+  if (command === "status") {
+    process.stdout.write(`${JSON.stringify(app.budgets.snapshot(budgetSources(app)))}\n`);
+    return 0;
+  }
+  if (command === "enable") {
+    if (!parsed.values.confirm) {
+      process.stderr.write("Refusing to enable enforcement without --confirm.\n");
+      return 2;
+    }
+    return installBudgetAdapters(app.env, { apply: true, rollback: Boolean(parsed.values.rollback) }, process.stdout);
+  }
+  if ((command !== "stop" && command !== "unlock") || !scope) {
+    process.stderr.write("Usage: token-furnace budgets stop|unlock --source <source> | --provider <id> | --model <provider/model>\n");
+    return 2;
+  }
+  if (command === "unlock") {
+    if (!parsed.values.confirm) {
+      process.stderr.write("Refusing unlock without --confirm.\n");
+      return 2;
+    }
+    const settingsError = app.budgets.unlock(scope);
+    process.stdout.write(`${JSON.stringify({ ok: true, scope, ...(settingsError ? { settingsError } : {}) })}\n`);
+    return 0;
+  }
+  const controlPreview = app.control.preview(scope);
+  const targets = controlPreview.targets;
+  const preview = app.budgets.previewStop(scope, targets.map((target) => target.id), controlTargetProof(targets));
+  const previewText = `${JSON.stringify({ action: "preview", ...preview, targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, account: target.account ?? null, model: target.model, pid: target.pid, processStartTime: target.processStartTime, ownerUid: target.ownerUid, executable: target.executable })), unverified: controlPreview.unverified, collateral: controlPreview.collateral })}\n`;
+  if (!parsed.values.confirm) {
+    process.stdout.write(previewText);
+    return 0;
+  }
+  process.stderr.write(previewText); // show targets, unverified and collateral before committing; stdout stays the final operation
+  if (parsed.values.force && !parsed.values["force-confirm"]) {
+    process.stderr.write("Force stop requires --force-confirm.\n");
+    return 2;
+  }
+  const currentTargets = app.control.preview(scope).targets;
+  const currentTargetIds = currentTargets.map((target) => target.id).sort();
+  if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds) || controlTargetProof(currentTargets) !== (preview.targetProof ?? controlTargetProof(currentTargets))) {
+    process.stderr.write("Stop preview targets changed; preview again.\n");
+    return 2;
+  }
+  const initial = preview.targetIds.map((targetId) => ({ targetId, status: "requested" as const }));
+  const operation = app.budgets.commitStop(preview.id, preview.fingerprint, initial);
+  let outcomes: ControlOutcome[];
+  try {
+    outcomes = await app.control.stop(scope, Boolean(parsed.values.force));
+  } catch (error) {
+    outcomes = preview.targetIds.map((targetId) => ({
+      targetId,
+      status: "failed" as const,
+      detail: error instanceof Error ? error.message : String(error),
+    }));
+  }
+  const updated = { ...(app.budgets.updateOperation(operation.id, outcomes) ?? operation), ...(operation.settingsError ? { settingsError: operation.settingsError } : {}) };
+  process.stdout.write(`${JSON.stringify(updated)}\n`);
+  return updated.status === "complete" ? 0 : 1;
+}
+
+const NATIVE_USAGE = "Usage: token-furnace native run --source claude|codex --prompt <text> [--model <id>] [--provider <id>] [--cwd <path>]\n" +
+  "         [--thread-prompt <text> --thread-model <id> [--thread-provider <id>]]... [-- <native CLI args>]\n";
+
+async function runNative(argv: string[], app: App): Promise<number> {
+  const parsed = parseArgs({
+    args: argv, allowPositionals: true,
+    options: {
+      source: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }, provider: { type: "string" }, cwd: { type: "string" },
+      "thread-prompt": { type: "string", multiple: true }, "thread-model": { type: "string", multiple: true }, "thread-provider": { type: "string", multiple: true },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  if (parsed.values.help) { process.stdout.write(NATIVE_USAGE); return 0; }
+  const { source, prompt } = parsed.values;
+  const threadPrompts = parsed.values["thread-prompt"] ?? [];
+  const threadModels = parsed.values["thread-model"] ?? [];
+  const threadProviders = parsed.values["thread-provider"] ?? [];
+  if ((source !== "claude" && source !== "codex") || !prompt || threadPrompts.length !== threadModels.length ||
+    threadProviders.length > threadPrompts.length || (source === "claude" && threadPrompts.length)) {
+    process.stderr.write(NATIVE_USAGE);
+    return 2;
+  }
+  try {
+    return await runManagedNative({
+      source, prompt, model: parsed.values.model, provider: parsed.values.provider, cwd: parsed.values.cwd,
+      threads: threadPrompts.map((text, index) => ({ prompt: text, model: threadModels[index], provider: threadProviders[index] })),
+      nativeArgs: parsed.positionals, env: app.env, control: app.control,
+    });
+  } catch (error) {
+    process.stderr.write(`Native host failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
+  const configuredSource = sourceOverride ?? sourceValue(app.env.TOKEN_FURNACE_SOURCE);
+  let event: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(stdin);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Budget hook input must be a JSON object.");
+    event = parsed as Record<string, unknown>;
+  } catch {
+    if (configuredSource === "claude" || configuredSource === "codex") {
+      // Exit 2 on a Stop-type event would tell Claude not to stop, so only a possible admission event fails closed.
+      return /"(?:hook_event_name|hookEventName|eventName)"\s*:\s*"(?:Stop|SubagentStop|SessionEnd)"/.test(stdin) ? 0 : 2;
+    }
+    process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Malformed budget hook input." }));
+    return 0;
+  }
+  const source = sourceOverride ?? sourceValue(event.source) ?? configuredSource;
+  const hintedProvider = stringValue(event.provider ?? event.providerID ?? event.provider_id);
+  const hintedModel = stringValue(event.model ?? event.modelID ?? event.model_id);
+  const hookEvent = stringValue(event.hook_event_name ?? event.hookEventName ?? event.eventName);
+  const phase = stringValue(event.phase ?? event.lifecycle) ?? (hookEvent === "PostToolUse" ? "complete" : hookEvent === "Stop" || hookEvent === "SessionEnd" ? "abandon" : "start");
+  const reservationId = stringValue(event.reservationId ?? event.reservation_id);
+  const reservationIds = Array.isArray(event.reservationIds)
+    ? event.reservationIds.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  const requestId = stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.turnId);
+  const correlationId = stringValue(app.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID);
+  const sessionId = stringValue(event.session_id ?? event.sessionId);
+  const metadata = source ? resolveNativeMetadata(app, event, source, hookEvent, hintedProvider, hintedModel) : null;
+  const provider = metadata?.provider ?? null;
+  const model = metadata?.model ?? null;
+  const account = source ? app.budgets.verifiedAccount(source, provider, metadata?.account ?? (app.budgets.quotaEnabled(source) ? localQuotaAccount(app.env, source, provider) : null)) : null;
+  const identity = source ? { source, provider, model, account } : null;
+  const enforcing = app.budgets.enforcing(); // Off with no latch: skip abandonment ownership scans
+  // An installed adapter registers its sessions even while budgets are Off: emergency stops stay available.
+  if (identity && (phase === "start" || nativeFromEvent(event, identity.source))) {
+    registerHookTarget(app, event, identity);
+  }
+  if ((reservationId || reservationIds.length || requestId || sessionId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
+    const eventUsage = usageAmount(event);
+    const amount = eventUsage ?? metadata?.usage ?? null;
+    if (amount !== null && (phase === "complete" || phase === "completed" || phase === "reconcile")) {
+      // Transcript usage belongs to one native message: key it by that id so later tool hooks do not charge it again.
+      const eventId = stringValue(event.eventId ?? event.event_id) ?? (eventUsage === null && source && metadata?.usageId ? `usage:${source}:${metadata.usageId}` : null) ?? `${reservationId ?? (reservationIds.length ? reservationIds.join(",") : null) ?? requestId ?? sessionId}:${phase}`;
+      const observedAt = eventObservedAt(event);
+      const actualUnit = nativeUsageUnit(event);
+      const reconciledReservationIds = source && reservationIds.length
+        ? app.budgets.reconcileReservations(source, reservationIds, amount, eventId, observedAt, actualUnit)
+        : reservationId
+          ? app.budgets.reconcile(reservationId, amount, eventId, observedAt, actualUnit, source ?? undefined)
+          : source && requestId
+            ? app.budgets.reconcileRequest(source, requestId, amount, eventId, observedAt, actualUnit)
+            : source && sessionId
+              ? app.budgets.reconcileSession(source, sessionId, amount, eventId, observedAt, actualUnit)
+              : [];
+      writeBudgetHookOutput(source, hookEvent, true, reconciledReservationIds.length ? "Reservation reconciled." : "Native usage was retained as unresolved for this reservation unit.", null, reservationId, reconciledReservationIds);
+      return 0;
+    } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
+      const sessionId = stringValue(event.session_id ?? event.sessionId);
+      if (!source || !sessionId || (enforcing && !app.control.ownsSession(source, sessionId))) {
+        writeBudgetHookOutput(source, hookEvent, false, "Native abandonment was not tied to a verified owned session.", null, reservationId);
+        return 0;
+      }
+      if (reservationId) app.budgets.release(reservationId);
+      else if (requestId) app.budgets.releaseRequest(source, requestId);
+      else app.budgets.releaseSession(source, sessionId);
+    } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || reservationIds.length || requestId || sessionId)) {
+      writeBudgetHookOutput(source, hookEvent, true, "Native completion observed; reservation retained until attributable usage or verified abandonment.", null, reservationId, []);
+      return 0;
+    } else {
+      writeBudgetHookOutput(source, hookEvent, false, "Completion has no attributable usage telemetry.", null, reservationId, []);
+      return 0;
+    }
+    writeBudgetHookOutput(source, hookEvent, true, "Reservation released.", null, reservationId);
+    return 0;
+  }
+  const state = app.budgets.snapshot();
+  const decision = source
+    ? app.budgets.admit({
+        identity: identity!,
+        estimatedCost: numberValue(event.estimatedCost ?? event.estimated_cost ?? event.cost) ?? undefined,
+        costUnit: event.costUnit === "percentage-per-hour" || event.costUnit === "tokens-per-hour" || event.costUnit === "tokens-total" ? event.costUnit : undefined,
+        requestId: requestId ?? undefined,
+        correlationId: correlationId ?? undefined,
+        sessionId: sessionId ?? undefined,
+      })
+    : state.policies.some((policy) => policy.mode !== "off") || state.stops.length > 0
+      ? { allowed: false, reason: "Budget hook input has no verified source.", retryAt: null, reservationId: null, matched: [] }
+      : { allowed: true, reason: "Budget enforcement is Off; source identity was not required.", retryAt: null, reservationId: null, matched: [] };
+  writeBudgetHookOutput(source, hookEvent, decision.allowed, decision.reason, decision.retryAt, decision.reservationId);
+  return 0;
+}
+
+function writeBudgetHookOutput(
+  source: Source | null,
+  hookEvent: string | null,
+  allowed: boolean,
+  reason: string,
+  retryAt: string | null,
+  reservationId: string | null,
+  reconciledReservationIds?: string[],
+): void {
+  if ((source === "claude" || source === "codex") && hookEvent) {
+    process.stdout.write(JSON.stringify(nativeBudgetHookOutput(source, hookEvent, allowed, reason)));
+    return;
+  }
+  process.stdout.write(JSON.stringify({
+    decision: allowed ? "allow" : "deny",
+    allow: allowed,
+    reason,
+    retryAt,
+    reservationId,
+    ...(reconciledReservationIds ? {
+      reconciled: reconciledReservationIds.length > 0,
+      reconciledReservationIds,
+    } : {}),
+  }));
+}
+
+function nativeBudgetHookOutput(source: "claude" | "codex", hookEvent: string | null, allowed: boolean, reason: string): Record<string, unknown> {
+  switch (hookEvent) {
+    case "PreToolUse":
+      if (allowed) return {};
+      return source === "claude"
+        ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }
+        : { decision: "block", reason };
+    case "UserPromptSubmit":
+      return allowed ? {} : { decision: "block", reason };
+    case "PostToolUse":
+    case "Stop":
+    case "SessionEnd":
+      return {};
+    default:
+      return {};
+  }
+}
+
+function registerHookTarget(app: App, event: Record<string, unknown>, identity: { source: Source; provider: string | null; model: string | null; account: string | null }): void {
+  const pid = numberValue(event.pid ?? event.processId ?? event.process_id) ?? process.ppid;
+  const expectedExecutable = stringValue(event.executable ?? event.executablePath ?? event.executable_path);
+  const observed = pid ? app.control.owningProcess(pid, identity.source, expectedExecutable) : null;
+  if (!observed || !Number.isFinite(observed.processStartTime) || (observed.ownerUid === null && !observed.ownerIdentity && !observed.ownerSid)) return;
+  const native = nativeFromEvent(event, identity.source);
+  const sessionId = stringValue(event.sessionId ?? event.session_id) ?? native?.sessionId ?? null;
+  app.control.register({
+    id: sessionId ?? `${identity.source}:${observed.pid}:${observed.processStartTime}`,
+    source: identity.source,
+    provider: identity.provider,
+    account: identity.account,
+    model: identity.model,
+    pid: observed.pid,
+    processStartTime: observed.processStartTime,
+    ownerUid: observed.ownerUid,
+    ownerIdentity: observed.ownerIdentity,
+    ownerSid: observed.ownerSid,
+    executable: observed.executable,
+    sessionId,
+    native: native ? { ...native, sessionId: native.sessionId ?? sessionId ?? undefined } : undefined,
+    // A hook payload can never grant exclusive process ownership; only a managed host owns its process.
+    exclusive: false,
+  });
+}
+
+function nativeFromEvent(event: Record<string, unknown>, source: Source): NativeTarget | undefined {
+  const value = event.native;
+  if (!value || typeof value !== "object") return undefined;
+  const native = value as Record<string, unknown>;
+  const endpoint = stringValue(native.endpoint);
+  // Claude cancellation exists only on a managed host's own stdio; a hook payload cannot claim it.
+  const expectedKind: NativeTarget["kind"] | null = source === "opencode" ? "opencode" : source === "codex" ? "codex" : null;
+  if (!endpoint || !expectedKind || native.kind !== expectedKind || endpoint.startsWith(MANAGED_ENDPOINT_PREFIX)) return undefined;
+  const transport = native.transport === "websocket" || native.transport === "unix" || native.transport === "stdio" || native.transport === "http" ? native.transport : undefined;
+  const rawAuth = native.auth;
+  const auth: NativeTarget["auth"] = rawAuth && typeof rawAuth === "object" ? (() => {
+    const value = rawAuth as Record<string, unknown>;
+    if (value.scheme !== "basic" && value.scheme !== "bearer") return undefined;
+    const envName = (candidate: unknown): string | undefined => typeof candidate === "string" && /^[A-Z_][A-Z0-9_]*$/.test(candidate) ? candidate : undefined;
+    return { scheme: value.scheme as "basic" | "bearer", tokenEnv: envName(value.tokenEnv), usernameEnv: envName(value.usernameEnv), passwordEnv: envName(value.passwordEnv) };
+  })() : undefined;
+  if (rawAuth && !auth) return undefined;
+  const sessionId = stringValue(native.sessionId ?? native.session_id);
+  const threadId = stringValue(native.threadId ?? native.thread_id);
+  const turnId = stringValue(native.turnId ?? native.turn_id);
+  if (expectedKind === "opencode" && !sessionId) return undefined;
+  return { kind: expectedKind, endpoint, transport, auth, sessionId: sessionId ?? undefined, threadId: threadId ?? undefined, turnId: turnId ?? undefined };
+}
+
+function usageAmount(event: Record<string, unknown>): number | null {
+  const direct = numberValue(event.actualCost ?? event.actual_cost ?? event.tokens ?? event.weightedTokens ?? event.weighted_tokens);
+  if (direct !== null && direct >= 0) return direct;
+  const usage = event.usage ?? (event.tool_response && typeof event.tool_response === "object" ? (event.tool_response as Record<string, unknown>).usage : null);
+  return usage && typeof usage === "object" ? nativeUsageTokens(usage as Record<string, unknown>) : null;
+}
+
+function nativeUsageUnit(event: Record<string, unknown>): ActualUsageUnit {
+  const value = stringValue(event.usageUnit ?? event.usage_unit);
+  if (value === "reservation" || value === "tokens" || value === "percentage-per-hour" || value === "tokens-per-hour" || value === "tokens-total") return value;
+  return "tokens";
+}
+
+function eventObservedAt(event: Record<string, unknown>): Date | undefined {
+  const value = event.timestamp ?? event.timestampMs ?? event.timestamp_ms ?? event.at ?? event.time;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date : undefined;
+  }
+  if (typeof value === "string") {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : undefined;
+  }
+  return undefined;
+}
+
+interface NativeMetadata {
+  provider: string | null;
+  model: string | null;
+  account: string | null;
+  usage: number | null;
+  usageId?: string | null;
+}
+
+function resolveNativeMetadata(app: App, event: Record<string, unknown>, source: Source, hookEvent: string | null, hintedProvider: string | null, hintedModel: string | null): NativeMetadata {
+  if (source === "claude") return resolveClaudeMetadata(app, event, hookEvent, hintedModel);
+  const transcriptPath = stringValue(event.transcript_path ?? event.transcriptPath);
+  const fromTranscript = transcriptPath ? readNativeTranscriptMetadata(app, source, transcriptPath) : null;
+  const nativePayload = Boolean(hookEvent && (hintedProvider || hintedModel));
+  let provider = fromTranscript?.provider ?? (nativePayload || event.identityVerified === true ? hintedProvider : null);
+  let model = fromTranscript?.model ?? (nativePayload || event.identityVerified === true ? hintedModel : null);
+  if (provider && model?.includes("/")) {
+    const slash = model.indexOf("/");
+    if (provider.toLowerCase() === model.slice(0, slash).toLowerCase()) model = model.slice(slash + 1);
+  }
+  return {
+    provider,
+    model,
+    account: fromTranscript?.account ?? ((nativePayload || event.identityVerified === true) ? stringValue(event.account ?? event.accountId ?? event.account_id) : null),
+    usage: fromTranscript?.usage ?? null,
+    usageId: fromTranscript?.usageId ?? null,
+  };
+}
+
+/**
+ * Claude transcripts carry no provider: it is the upstream configured for this Claude process
+ * (the hook inherits its environment). A subagent's tool call uses the subagent's own transcript;
+ * spawning a child resolves its model only from an explicit ID or configured alias, never the parent.
+ */
+function resolveClaudeMetadata(app: App, event: Record<string, unknown>, hookEvent: string | null, hintedModel: string | null): NativeMetadata {
+  const env = { ...process.env, ...app.env };
+  const provider = claudeUpstreamProvider(env);
+  const transcriptPath = stringValue(event.transcript_path ?? event.transcriptPath);
+  const sessionId = stringValue(event.session_id ?? event.sessionId);
+  const agentId = stringValue(event.agent_id ?? event.agentId);
+  const childPath = transcriptPath && sessionId && agentId && /^[A-Za-z0-9_-]+$/.test(agentId) && /^[A-Za-z0-9_-]+$/.test(sessionId)
+    ? join(dirname(transcriptPath), sessionId, "subagents", `agent-${agentId}.jsonl`)
+    : null;
+  const own = childPath ? readNativeTranscriptMetadata(app, "claude", childPath) : transcriptPath ? readNativeTranscriptMetadata(app, "claude", transcriptPath) : null;
+  const toolName = stringValue(event.tool_name ?? event.toolName);
+  let model = own?.model ?? (hookEvent === "SessionStart" ? hintedModel : null);
+  if (hookEvent === "PreToolUse" && (toolName === "Agent" || toolName === "Task")) {
+    const input = event.tool_input && typeof event.tool_input === "object" ? event.tool_input as Record<string, unknown> : {};
+    const requested = stringValue(input.model);
+    const alias = requested && /^(opus|sonnet|haiku)$/i.test(requested) ? env[`ANTHROPIC_DEFAULT_${requested.toUpperCase()}_MODEL`] ?? null : null;
+    model = alias || (requested && !/^(opus|sonnet|haiku|inherit)$/i.test(requested) ? requested : null);
+  }
+  return { provider, model, account: own?.account ?? null, usage: own?.usage ?? null, usageId: own?.usageId ?? null };
+}
+
+function readNativeTranscriptMetadata(app: App, source: Source, path: string): NativeMetadata | null {
+  if (!isAbsolute(path)) return null;
+  try {
+    const sourceRoot = app.sources.find((candidate) => candidate.name === source)?.base();
+    const transcript = realpathSync(path);
+    const root = sourceRoot ? realpathSync(sourceRoot) : null;
+    if (!root) return null;
+    const withinRoot = relative(root, transcript);
+    if (withinRoot === ".." || withinRoot.startsWith(`..${sep}`) || isAbsolute(withinRoot)) return null;
+    if (statSync(transcript).size > 2_000_000) return null;
+    const text = readFileSync(transcript, "utf8").slice(-512_000);
+    const metadata: NativeMetadata = { provider: null, model: null, account: null, usage: null };
+    for (const line of text.split(/\r?\n/)) {
+      try { collectNativeMetadata(JSON.parse(line) as unknown, metadata); } catch { /* native logs may contain non-JSON lines */ }
+    }
+    return metadata;
+  } catch { return null; }
+}
+
+function collectNativeMetadata(value: unknown, metadata: NativeMetadata, depth = 0): void {
+  if (!value || typeof value !== "object" || depth > 5) return;
+  const record = value as Record<string, unknown>;
+  metadata.provider = stringValue(record.model_provider) ?? stringValue(record.provider ?? record.providerID ?? record.provider_id) ?? metadata.provider;
+  metadata.model = stringValue(record.model ?? record.modelID ?? record.model_id) ?? metadata.model;
+  metadata.account = stringValue(record.account ?? record.accountId ?? record.account_id ?? record.subscription_id) ?? metadata.account;
+  const usage = record.usage ?? record.tokenUsage ?? record.token_usage ?? record.last_token_usage ?? record.lastTokenUsage ?? record.total_token_usage ?? record.totalTokenUsage;
+  if (usage && typeof usage === "object") {
+    const amount = nativeUsageTokens(usage as Record<string, unknown>);
+    if (amount !== null) { metadata.usage = amount; metadata.usageId = stringValue(record.id ?? record.message_id ?? record.messageId); }
+  }
+  for (const key of ["message", "response", "result", "turn", "info", "metadata", "data", "event", "payload", "usage", "tokens", "last_token_usage", "lastTokenUsage", "total_token_usage", "totalTokenUsage"]) {
+    const child = record[key];
+    if (child && typeof child === "object") {
+      if (Array.isArray(child)) for (const item of child) collectNativeMetadata(item, metadata, depth + 1);
+      else collectNativeMetadata(child, metadata, depth + 1);
+    }
+  }
+}
+
+function budgetScope(provider: string | undefined, model: string | undefined, source: string | undefined): BudgetScope | null {
+  if (model) {
+    const slash = model.indexOf("/");
+    if (slash <= 0 || slash === model.length - 1) return null;
+    return { kind: "model", provider: model.slice(0, slash), model: model.slice(slash + 1) };
+  }
+  if (provider?.trim()) return { kind: "provider", provider };
+  if (source === "claude" || source === "codex" || source === "opencode") return { kind: "source", source };
+  return null;
+}
+
+function budgetSources(app: App) {
+  const models = new Map<Source, Set<string>>();
+  const providers = new Map<Source, Set<string>>();
+  for (const session of app.repo.all()) {
+    const sourceModels = models.get(session.source) ?? new Set<string>();
+    const sourceProviders = providers.get(session.source) ?? new Set<string>();
+    for (const turn of session.turns) {
+      if (turn.model.trim()) sourceModels.add(turn.model.trim());
+      const slash = turn.model.indexOf("/");
+      if (slash > 0) sourceProviders.add(turn.model.slice(0, slash).trim().toLowerCase());
+    }
+    models.set(session.source, sourceModels);
+    providers.set(session.source, sourceProviders);
+  }
+  for (const target of app.control.registered()) {
+    if (!target.provider) continue;
+    const values = providers.get(target.source) ?? new Set<string>();
+    values.add(target.provider);
+    providers.set(target.source, values);
+  }
+  for (const [source, observed] of app.budgets.observedProviders()) {
+    const values = providers.get(source) ?? new Set<string>();
+    for (const provider of observed) values.add(provider);
+    providers.set(source, values);
+  }
+  return (Object.keys(PROVIDERS) as Source[]).map((source) => {
+    const adapter = app.sources.find((candidate) => candidate.name === source);
+    return { source, label: PROVIDERS[source].label, installed: Boolean(adapter && existsSync(adapter.root())), models: [...(models.get(source) ?? [])].sort(), providers: [...(providers.get(source) ?? [])].sort() };
+  });
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function sourceValue(value: unknown): Source | null {
+  return value === "claude" || value === "codex" || value === "opencode" ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && value.trim() && Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
 /** A redrawn `Scanning 3,412 / 7,700 files (44%)` line on a terminal's stderr. Nothing otherwise. */

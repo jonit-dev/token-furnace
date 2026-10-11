@@ -3,13 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import { SqliteSessionRepository } from "../src/repo/sqlite-repo";
-import { compose } from "../src/compose";
+import { compose, type App } from "../src/compose";
 import { OpenCodeSource } from "../src/sources/opencode";
 import { openCodeWeek } from "../src/services/usage-client";
 
 const roots: string[] = [];
+const apps: App[] = [];
 const now = new Date("2026-10-10T20:00:00Z");
+function appFor(env: NodeJS.ProcessEnv, opts?: { noCache?: boolean }): App {
+  const app = compose(env, opts);
+  apps.push(app);
+  return app;
+}
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "tf-opencode-")); roots.push(root);
   const base = join(root, "opencode"); mkdirSync(base);
@@ -28,7 +34,11 @@ function fixture() {
   const env = { HOME: root, OPENCODE_DATA_DIR: base, TOKEN_FURNACE_NOW: now.toISOString(), TOKEN_FURNACE_WORKERS: "0" };
   return { db, env, source: new OpenCodeSource(env) };
 }
-afterEach(() => { vi.unstubAllGlobals(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  for (const app of apps.splice(0)) app.close();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 it("normalizes assistant usage once, including reasoning, cache, tools and prompt wakes", () => {
   const { db, source } = fixture();
@@ -42,7 +52,7 @@ it("normalizes assistant usage once, including reasoning, cache, tools and promp
 });
 
 it("flows through reports and persistent cache, invalidates changed messages and deletes removed sessions", async () => {
-  const { db, env, source } = fixture(); const app = compose(env);
+  const { db, env, source } = fixture(); const app = appFor(env);
   await app.reports.refresh();
   const report = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 63 } });
   expect(report?.turns).toBe(1); expect(report?.burns.opencode?.used).toBe(63);
@@ -51,7 +61,7 @@ it("flows through reports and persistent cache, invalidates changed messages and
   expect(source.files()[0].mtimeMs).toBeGreaterThan(before.mtimeMs);
   db.exec("DELETE FROM session"); await app.reports.refresh();
   expect(app.reports.getReport(7, "opencode", { weeklyBudget: null, now })).toBeNull();
-  (app.repo as SqliteSessionRepository).close(); db.close();
+  app.close(); db.close();
 });
 
 it("handles absent installs without creating a database and respects XDG data paths", () => {
@@ -87,7 +97,7 @@ it("parses SQLite sessions through the built worker and serves OpenCode-filtered
   const reports = new ReportService([source], repo, env, { url: pathToFileURL(resolve("dist/scan-worker.js")), size: 2 });
   await reports.refresh();
   expect(reports.getReport(7, "opencode", { weeklyBudget: null, now })?.turns).toBe(1);
-  const app = compose(env, { noCache: true });
+  const app = appFor(env, { noCache: true });
   await app.reports.refresh();
   const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
   try {
@@ -100,7 +110,7 @@ it("parses SQLite sessions through the built worker and serves OpenCode-filtered
 });
 
 it("does not charge other OpenCode providers to the Go weekly quota", async () => {
-  const { db, env } = fixture(); const app = compose(env, { noCache: true });
+  const { db, env } = fixture(); const app = appFor(env, { noCache: true });
   const options = { weeklyBudget: null, now, opencodeWeek: { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 63 } };
   await app.reports.refresh();
   const before = app.reports.getReport(7, "opencode", options)!;

@@ -25,6 +25,43 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - name: Diagnose Windows ACL runtime
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          [ordered]@{
+            PowerShell = $PSVersionTable.PSVersion.ToString()
+            Edition = $PSVersionTable.PSEdition
+            PSHome = $PSHOME
+            PSModulePath = $env:PSModulePath
+            GetAclCommand = (Get-Command Get-Acl -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+          } | ConvertTo-Json -Compress
+          $module = Get-Module -ListAvailable Microsoft.PowerShell.Security | Select-Object Name, Version, Path
+          $module | ConvertTo-Json -Compress
+          try {
+            Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+            Write-Output 'Import-Module Microsoft.PowerShell.Security: success'
+          } catch {
+            Write-Output ('Import-Module Microsoft.PowerShell.Security: ' + $_.Exception.ToString())
+          }
+          try {
+            $env:TOKEN_FURNACE_PRIVATE_FILE_PATH = 'token-furnace-acl-argument-check'
+            $bound = & powershell.exe -NoProfile -NonInteractive -Command '$path = $env:TOKEN_FURNACE_PRIVATE_FILE_PATH; if([string]::IsNullOrWhiteSpace($path)){throw "ACL environment binding failed."}; [IO.Path]::GetFullPath([string]$path)'
+            Write-Output ('powershell.exe -Command environment binding: ' + ($bound -join ''))
+          } catch {
+            Write-Output ('powershell.exe -Command environment binding failed: ' + $_.Exception.ToString())
+          }
       - run: npm run typecheck
+      - name: Diagnose Windows native stop stages
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        continue-on-error: true
+        run: npx vitest run test/budgets-stop.test.ts -t "force-stops a real owned child" --testTimeout=60000 --reporter=verbose
       - run: npm test
       - run: npm run smoke
+      # Native qualification needs dedicated authenticated homes and must never use a CI user's session.
+      - name: Native budget qualification (dedicated runner only)
+        if: ${{ vars.TOKEN_FURNACE_NATIVE_QUALIFY == '1' }}
+        run: npm run qualify:budgets -- --sources claude,codex,opencode

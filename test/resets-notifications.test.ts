@@ -4,13 +4,15 @@
  */
 
 import { request } from "node:http";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Report } from "../src/core/model";
 import { assistant } from "./fixtures/build";
-import { compose } from "../src/compose";
+import { compose, type App } from "../src/compose";
+import { BudgetService } from "../src/services/budget-service";
 import { notifyTick, startServer, type LiveServer } from "../src/server";
 import { forgetResets, parseFeed, resetsSnapshot, type ResetsFeed } from "../src/services/resets-client";
 import {
@@ -20,6 +22,57 @@ import {
 
 const NOW = new Date("2026-10-10T12:00:00Z");
 const roots: string[] = [];
+const apps: App[] = [];
+
+function directApp(env: NodeJS.ProcessEnv): App {
+  const app = compose(env);
+  apps.push(app);
+  return app;
+}
+
+function closeApps(): void {
+  for (const app of apps.splice(0)) {
+    app.close();
+  }
+}
+
+function expectPrivateSettings(path: string): void {
+  if (process.platform === "win32") {
+    expect(statSync(path).isFile()).toBe(true);
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "if([string]::IsNullOrWhiteSpace($env:TOKEN_FURNACE_PRIVATE_FILE_PATH)){throw 'ACL path environment value is missing.'}",
+      "$path=[IO.Path]::GetFullPath([string]$env:TOKEN_FURNACE_PRIVATE_FILE_PATH)",
+      "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+      "if($null -eq $sid){throw 'Current Windows SID is unavailable.'}",
+      "$acl=$null; $extensions=$null",
+      "try{$acl=[IO.File]::GetAccessControl($path)}catch{Add-Type -AssemblyName System.IO.FileSystem.AccessControl; $extensions=[type]::GetType('System.Security.AccessControl.FileSystemAclExtensions, System.IO.FileSystem.AccessControl'); if($null -eq $extensions){throw}; $acl=$extensions.GetMethod('GetAccessControl',[type[]]@([IO.FileInfo])).Invoke($null,@([IO.FileInfo]::new($path)))}",
+      "$rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))",
+      "[pscustomobject]@{sid=$sid.Value; protected=$acl.AreAccessRulesProtected; rules=@($rules | ForEach-Object {[pscustomobject]@{identity=$_.IdentityReference.Value; inherited=$_.IsInherited; rights=$_.FileSystemRights.ToString(); type=$_.AccessControlType.ToString(); inheritance=$_.InheritanceFlags.ToString(); propagation=$_.PropagationFlags.ToString()}})} | ConvertTo-Json -Compress -Depth 6",
+    ].join("; ");
+    const acl = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, TOKEN_FURNACE_PRIVATE_FILE_PATH: path },
+    })) as {
+      sid?: string;
+      protected?: boolean;
+      rules?: Array<{ identity?: string; inherited?: boolean; rights?: string; type?: string; inheritance?: string; propagation?: string }>
+        | { identity?: string; inherited?: boolean; rights?: string; type?: string; inheritance?: string; propagation?: string };
+    };
+    const rules = Array.isArray(acl.rules) ? acl.rules : acl.rules ? [acl.rules] : [];
+    expect(acl.protected).toBe(true);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.identity).toBe(acl.sid);
+    expect(rules[0]?.inherited).toBe(false);
+    expect(rules[0]?.rights).toContain("FullControl");
+    expect(rules[0]?.type).toBe("Allow");
+    expect(rules[0]?.inheritance).toBe("None");
+    expect(rules[0]?.propagation).toBe("None");
+    return;
+  }
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+}
 
 function tempEnv(): NodeJS.ProcessEnv & Record<string, string> {
   const root = mkdtempSync(join(tmpdir(), "tf-notify-"));
@@ -81,6 +134,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  closeApps();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -135,10 +189,18 @@ describe("reset feed", () => {
 });
 
 describe("notification settings", () => {
+  it("passes Windows ACL verification a path containing spaces and shell metacharacters", () => {
+    if (process.platform !== "win32") return;
+    const env = tempEnv();
+    env.XDG_CONFIG_HOME = join(env.XDG_CONFIG_HOME, "config with spaces & $() 'quoted'");
+    saveSettings(env, onSettings());
+    expectPrivateSettings(settingsPath(env));
+  });
+
   it("keeps a saved secret when the field is blank, removes it on request, and never returns one", () => {
     const env = tempEnv();
     saveSettings(env, onSettings({ telegram: { enabled: true, botToken: "123456:AAaaBBbbCCccDDddEEeeFFffGGhhIIjjKKllMMnnOO", chatId: "-100123" } }));
-    expect((statSync(settingsPath(env)).mode & 0o777)).toBe(0o600);
+    expectPrivateSettings(settingsPath(env));
 
     const kept = mergeSettings(env, { enabled: true, telegram: { chatId: "-100123" } }).settings;
     expect(kept.telegram.botToken).toBe("123456:AAaaBBbbCCccDDddEEeeFFhhIIjjKKllMMnnOO".slice(0, 0) + kept.telegram.botToken);
@@ -455,7 +517,17 @@ describe("the live server", () => {
     expect(saved.body.ntfy.hasToken).toBe(true);
     const onDisk = JSON.parse(readFileSync(settingsPath(env), "utf8"));
     expect(onDisk.ntfy.token).toBe("tk_secret_value");
-    expect((statSync(settingsPath(env)).mode & 0o777)).toBe(0o600);
+    expectPrivateSettings(settingsPath(env));
+    const budgets = new BudgetService(env);
+    try {
+      budgets.savePolicies([{
+        scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 10,
+        deadline: "2099-10-11T12:00:00.000Z",
+      }], 0);
+      expectPrivateSettings(budgets.settingsPath);
+    } finally {
+      budgets.close();
+    }
 
     const read = await call(server, "/api/notifications");
     expect(JSON.stringify(read.body)).not.toContain("tk_secret_value");
@@ -481,7 +553,7 @@ describe("the live server", () => {
       }), { status: 200 });
     }));
     saveSettings(env, onSettings());
-    const app = compose(env);
+    const app = directApp(env);
     await boot(env);
 
     const result = await notifyTick(app);
@@ -503,7 +575,7 @@ describe("the live server", () => {
       }), { status: 200 });
     }));
     saveSettings(env, onSettings());
-    const app = compose(env);
+    const app = directApp(env);
     await notifyTick(app, false);
     expect(calls.some((url) => url.includes("agentresets.com"))).toBe(true);
     expect(calls.some((url) => url.includes("api.anthropic.com") || url.includes("opencode.ai"))).toBe(false);
@@ -525,7 +597,7 @@ describe("the live server", () => {
     }), { status: 200 })));
     saveSettings(env, onSettings({ conditions: { ...defaultSettings().conditions,
       usage: { enabled: true, percent: 80, provider: "opencode" } } }));
-    const app = compose(env);
+    const app = directApp(env);
     const first = await notifyTick(app, false);
     expect(first.alerts).toHaveLength(1); // the saved opencode week over threshold fires through the tick
     const second = await notifyTick(app, false);
@@ -547,6 +619,7 @@ describe("the live server", () => {
 });
 
 afterEach(() => {
+  closeApps();
   for (const root of roots.splice(0)) if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -609,7 +682,7 @@ describe("session spike alerts", () => {
       schema_version: 1, generated_at: NOW.toISOString(), products: {},
     }), { status: 200 })));
     saveSettings(env, settings());
-    const app = compose(env);
+    const app = directApp(env);
     const result = await notifyTick(app, false, 0.001);
     expect(result.alerts).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Active session: critical burn spike" })]));
     expect(result.delivered).toEqual([expect.objectContaining({ skipped: true })]);

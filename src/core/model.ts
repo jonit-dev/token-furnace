@@ -71,6 +71,11 @@ export interface Week {
   resets: Date;
   /** Percent of the weekly limit already spent. */
   used: number;
+  /** The observation metadata is optional for transcript-only readers. */
+  observedAt?: Date;
+  window?: string;
+  account?: string | null;
+  authoritative?: boolean;
 }
 
 /** One recommended setting, judged from the config on disk. burn.py:434 */

@@ -10,6 +10,7 @@ import { Checks, Leaks, Sessions } from "./components/tables";
 import { Tips } from "./components/tips";
 import { Resets } from "./components/resets";
 import { Notifications } from "./components/notifications";
+import { Budgets } from "./components/budgets";
 import { Toasts } from "./components/toasts";
 
 const TABS: [Tab, string][] = [
@@ -19,6 +20,7 @@ const TABS: [Tab, string][] = [
   ["tips", "Tips"],
   ["resets", "Resets"],
   ["notifications", "Notifications"],
+  ["budgets", "Budgets"],
 ];
 
 // Old hashes keep working.
@@ -63,6 +65,7 @@ export function App() {
     tips: <Tips />,
     resets: <Resets />,
     notifications: <Notifications />,
+    budgets: <Budgets />,
   };
   const filePage = location.protocol !== "http:" && location.protocol !== "https:";
   const linkClass = filePage
@@ -101,7 +104,7 @@ export function App() {
         </div>
       </header>
       <main className="mt-3">
-        {report || filePage ? bodies[tab] : <p className="text-sm text-muted py-6">Loading report…</p>}
+        {tab === "budgets" ? bodies[tab] : report || filePage ? bodies[tab] : <p className="text-sm text-muted py-6">Loading report…</p>}
       </main>
       <Toasts />
     </div>

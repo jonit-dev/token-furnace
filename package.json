@@ -13,6 +13,7 @@
   "files": [
     "dist",
     "native/ignored-output",
+    "scripts/qualify-budgets.mjs",
     "skills",
     "SKILL.md",
     "references",
@@ -22,6 +23,7 @@
     "build": "tsup && vite build --config web/vite.config.ts && node --input-type=module -e \"import { copyFileSync } from 'node:fs'; copyFileSync('dist/web/index.html', 'dist/dashboard.html')\"",
     "smoke": "node scripts/smoke.mjs",
     "test": "vitest run",
+    "qualify:budgets": "node scripts/qualify-budgets.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "pretest": "npm run build",
     "prepack": "npm run build 1>&2"

@@ -6,6 +6,8 @@ import { MemorySessionRepository } from "./repo/memory-repo";
 import { SqliteSessionRepository } from "./repo/sqlite-repo";
 import type { SessionRepository } from "./repo/session-repo";
 import { ReportService } from "./services/report-service";
+import { AgentControl } from "./services/agent-control";
+import { BudgetService } from "./services/budget-service";
 import { createSources } from "./sources";
 import type { AgentSource, Env } from "./sources/agent-source";
 
@@ -14,12 +16,15 @@ export interface App {
   sources: AgentSource[];
   repo: SessionRepository;
   reports: ReportService;
+  budgets: BudgetService;
+  control: AgentControl;
   /** The clock. TOKEN_FURNACE_NOW freezes it, so a test can compare two runs byte for byte. */
   now: () => Date;
+  close: () => void;
 }
 
 export function sqliteCachePath(env: Env): string {
-  const base = env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
+  const base = env.TOKEN_FURNACE_CACHE_HOME || env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
   return join(base, "token-furnace", "cache.sqlite");
 }
 
@@ -29,12 +34,25 @@ export function compose(env: Env = process.env, opts?: { noCache?: boolean }): A
   const effective: Env = { ...env, TOKEN_FURNACE_NO_CACHE: noCache ? "1" : "0" };
   const sources = createSources(effective);
   const repo = noCache ? new MemorySessionRepository() : new SqliteSessionRepository(sqliteCachePath(effective));
+  let budgets: BudgetService | undefined;
+  const control = new AgentControl({ env: effective });
   return {
     env: effective,
     sources,
     repo,
     reports: new ReportService(sources, repo, effective, workers(effective)),
+    get budgets() {
+      return budgets ??= new BudgetService(effective);
+    },
+    control,
     now: () => new Date(effective.TOKEN_FURNACE_NOW || Date.now()),
+    close: () => {
+      try { budgets?.close(); }
+      finally {
+        try { control.close(); }
+        finally { repo.close(); }
+      }
+    },
   };
 }
 

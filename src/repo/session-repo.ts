@@ -2,7 +2,7 @@ import type { ActivityTurn, SessionInput, SourceFile } from "../core/model";
 
 /**
  * Where parsed turns live between runs. PRD-003 ships the memory map only; PRD-004 adds
- * SqliteSessionRepository over node:sqlite with the same three methods.
+ * SqliteSessionRepository over node:sqlite with the same repository contract.
  */
 export interface SessionRepository {
   /**
@@ -19,4 +19,6 @@ export interface SessionRepository {
   activity(): Iterable<ActivityTurn>;
   /** Store one parsed file, with its size: the two fields that say when to reparse it. */
   save(session: SessionInput, size: number): void;
+  /** Release any persistent backing store owned by this repository. */
+  close(): void;
 }

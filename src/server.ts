@@ -4,17 +4,24 @@
  */
 
 import type { Server } from "node:http";
+import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import "reflect-metadata";
 import express, { type Request, type Response } from "express";
-import { Controller, Get, Post, Middleware, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
+import { Controller, Get, Post, Middleware, Param, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
 import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
+import { PROVIDERS } from "./core/providers";
+import { weightedBudgetTokens, type BudgetScope } from "./core/budgets";
+import type { StopTargetOutcome } from "./services/budget-service";
+import { controlTargetProof } from "./services/agent-control";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
-import { pendingRepairs, runFixConfig } from "./setup/agents";
-import { openCodeWeek, planWeek } from "./services/usage-client";
+import { installBudgetAdapters, pendingRepairs, runFixConfig } from "./setup/agents";
+import { openCodeWeek, planReading, planWeek } from "./services/usage-client";
+import { refreshBudgetMeters } from "./services/budget-meters";
 import { resetsSnapshot } from "./services/resets-client";
 import {
   deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
@@ -38,6 +45,7 @@ export interface LiveServer {
 
 /** The refresh that runs on its own, without a browser tab asking for it. */
 const TICK_MS = 60_000;
+const METER_REFRESH_MS = 60_000;
 
 /** Serve until the process is stopped. Ctrl-C ends it. */
 export async function serve(app: App, options: ServeOptions): Promise<void> {
@@ -53,7 +61,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   web.disable("x-powered-by");
   web.use(express.json({ limit: "16kb" }));
   useExpressServer(web, {
-    controllers: [reportController(app, options, loadPage())],
+    controllers: [reportController(app, options, loadPage(), randomBytes(24).toString("base64url"))],
     middlewares: [LoopbackHostOnly],
     defaultErrorHandler: true,
     classTransformer: false,
@@ -74,12 +82,21 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     notifyTick(app, options.planUsage, options.weeklyBudget).catch(() => {}).finally(() => { ticker.running = false; });
   }, TICK_MS);
   timer.unref();
+  // Quota meters stay fresh without a dashboard open while an Auto (or percentage-per-hour Manual) policy is on.
+  const meterTicker = { running: false };
+  const meterTimer = setInterval(() => {
+    if (meterTicker.running || !app.budgets.quotaEnabled()) return;
+    meterTicker.running = true;
+    refreshBudgetMeters(app, options.planUsage).catch(() => {}).finally(() => { meterTicker.running = false; });
+  }, METER_REFRESH_MS);
+  meterTimer.unref();
   return {
     url: `http://127.0.0.1:${port}`,
     port,
     close: () => new Promise((done) => {
       clearInterval(timer);
-      http.close(() => done());
+      clearInterval(meterTimer);
+      http.close(() => { app.close(); done(); });
     }),
   };
 }
@@ -142,7 +159,7 @@ function sameOrigin(req: Request): boolean {
 }
 
 /** The routes, closed over the app they serve. The catch-all page is declared last. */
-function reportController(app: App, options: ServeOptions, page: string) {
+function reportController(app: App, options: ServeOptions, page: string, mutationToken: string) {
   // The last quota reading this server saw. It lives in memory, so a no-cache server still shows
   // real utilization without a disk write, and it expires when its week resets.
   let quota: Week | null = null;
@@ -182,6 +199,122 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   @Controller()
   class ReportController {
+    @Get("/api/budgets")
+    async budgets(@Res() res: Response) {
+      await refreshBudgetMeters(app, options.planUsage);
+      return res.set("Cache-Control", "no-store").json({
+        ...app.budgets.snapshot(budgetSources(app)),
+        mutationToken,
+      });
+    }
+
+    @Post("/api/budgets")
+    saveBudgets(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      const expectedRevision = req.body?.expectedRevision;
+      const policies = req.body?.policies;
+      if (!Number.isInteger(expectedRevision) || !Array.isArray(policies)) {
+        return res.status(400).json({ error: "Expected a revision and a policy list." });
+      }
+      try {
+        const saved = app.budgets.savePolicies(policies, expectedRevision);
+        seedBudgetUsage(app);
+        return res.json(saved);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return res.status(/revision|stale/i.test(message) ? 409 : 400).json({ error: message });
+      }
+    }
+
+    @Post("/api/budgets/enable")
+    enableBudgets(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      if (req.body?.confirm !== true) return res.status(400).json({ error: "Enable enforcement requires explicit confirmation." });
+      let output = "";
+      const code = installBudgetAdapters(app.env, { apply: true }, { write: (text) => { output += text; } });
+      return res.status(code === 0 ? 200 : 500).json({ ok: code === 0, output });
+    }
+
+    @Post("/api/budgets/enable-preview")
+    previewBudgetAdapters(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      let output = "";
+      const code = installBudgetAdapters(app.env, { apply: false }, { write: (text) => { output += text; } });
+      return res.status(code === 0 ? 200 : 500).json({ ok: code === 0, output });
+    }
+
+    @Post("/api/budgets/stop-preview")
+    stopPreview(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      try {
+        const scope = stopScope(req.body?.scope);
+        const control = app.control.preview(scope);
+        return res.json({
+          ...app.budgets.previewStop(scope, control.targets.map((target) => target.id), controlTargetProof(control.targets)),
+          targets: control.targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, account: target.account ?? null, model: target.model, pid: target.pid, processStartTime: target.processStartTime, ownerUid: target.ownerUid, executable: target.executable })),
+          unverified: control.unverified,
+          collateral: control.collateral,
+        });
+      } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    @Post("/api/budgets/stop")
+    async stop(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      const preview = app.budgets.preview(req.body?.previewId);
+      if (!preview || preview.fingerprint !== req.body?.fingerprint) return res.status(409).json({ error: "Stop preview is stale or already used." });
+      if (req.body?.force && req.body?.forceConfirm !== true) return res.status(400).json({ error: "Force stop requires a fresh explicit confirmation." });
+      const currentControl = app.control.preview(preview.scope);
+      const currentTargetIds = currentControl.targets.map((target) => target.id).sort();
+      if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds) || controlTargetProof(currentControl.targets) !== (preview.targetProof ?? controlTargetProof(currentControl.targets))) {
+        return res.status(409).json({ error: "Stop preview targets changed; preview again." });
+      }
+      const initial: StopTargetOutcome[] = preview.targetIds.map((targetId) => ({ targetId, status: "requested" }));
+      try {
+        const operation = app.budgets.commitStop(preview.id, preview.fingerprint, initial);
+        let outcomes: StopTargetOutcome[];
+        try {
+          outcomes = await app.control.stop(preview.scope, Boolean(req.body?.force));
+        } catch (error) {
+          outcomes = preview.targetIds.map((targetId) => ({
+            targetId,
+            status: "failed",
+            detail: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        const updated = { ...(app.budgets.updateOperation(operation.id, outcomes) ?? operation), ...(operation.settingsError ? { settingsError: operation.settingsError } : {}) };
+        return res.json(updated);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return res.status(/stale|expired|used/i.test(message) ? 409 : 400).json({ error: message });
+      }
+    }
+
+    @Get("/api/budgets/operations/:id")
+    operation(@Param("id") id: string, @Res() res: Response) {
+      const operation = app.budgets.operation(id);
+      return operation ? res.set("Cache-Control", "no-store").json(operation) : res.status(404).json({ error: "Operation not found." });
+    }
+
+    @Post("/api/budgets/unlock")
+    unlock(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      try {
+        const settingsError = app.budgets.unlock(stopScope(req.body?.scope));
+        return res.json({ ok: true, ...(settingsError ? { settingsError } : {}) });
+      } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     @Get("/api/fix-config")
     pendingFixes(@Res() res: Response) {
       const live = app.reports.live("all"); // repairs for agents that are not installed are not offered
@@ -275,10 +408,102 @@ function reportController(app: App, options: ServeOptions, page: string) {
         return res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
       }
       const report = await build(req.query);
-      return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
+      // A fresh install has no report yet, but the control surface is still useful.
+      return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : page);
     }
   }
   return ReportController;
+}
+
+function budgetSources(app: App) {
+  const models = new Map<Source, Set<string>>();
+  const providers = new Map<Source, Set<string>>();
+  const scopes = new Map<Source, Map<string, { provider: string; model: string }>>();
+  const addScope = (source: Source, provider: string, model: string) => {
+    const values = scopes.get(source) ?? new Map<string, { provider: string; model: string }>();
+    values.set(`${provider}/${model}`, { provider, model });
+    scopes.set(source, values);
+  };
+  for (const session of app.repo.all()) {
+    const sourceModels = models.get(session.source) ?? new Set<string>();
+    const sourceProviders = providers.get(session.source) ?? new Set<string>();
+    for (const turn of session.turns) {
+      const model = turn.model.trim();
+      if (!model) continue;
+      sourceModels.add(model);
+      // Only OpenCode records providerID/modelID; other transcripts' slashes are part of the model ID.
+      const slash = model.indexOf("/");
+      if (session.source === "opencode" && slash > 0 && slash < model.length - 1) {
+        const provider = model.slice(0, slash).trim().toLowerCase();
+        sourceProviders.add(provider);
+        addScope(session.source, provider, model.slice(slash + 1).trim());
+      }
+    }
+    models.set(session.source, sourceModels);
+    providers.set(session.source, sourceProviders);
+  }
+  for (const target of app.control.registered()) {
+    if (target.provider) {
+      const values = providers.get(target.source) ?? new Set<string>();
+      values.add(target.provider);
+      providers.set(target.source, values);
+      if (target.model) addScope(target.source, target.provider, target.model);
+    }
+  }
+  for (const [source, observed] of app.budgets.observedProviders()) {
+    const values = providers.get(source) ?? new Set<string>();
+    for (const provider of observed) values.add(provider);
+    providers.set(source, values);
+  }
+  return (Object.keys(PROVIDERS) as Source[]).map((source) => {
+    const adapter = app.sources.find((candidate) => candidate.name === source);
+    return {
+      source,
+      label: PROVIDERS[source].label,
+      installed: Boolean(adapter && existsSync(adapter.root())),
+      models: [...(models.get(source) ?? [])].sort(),
+      providers: [...(providers.get(source) ?? [])].sort(),
+      modelScopes: [...(scopes.get(source)?.values() ?? [])].sort((a, b) => `${a.provider}/${a.model}`.localeCompare(`${b.provider}/${b.model}`)),
+    };
+  });
+}
+
+function seedBudgetUsage(app: App): void {
+  const events: Array<{ scope: BudgetScope; amount: number; eventId: string; at: Date }> = [];
+  for (const session of app.repo.all()) {
+    for (const [index, turn] of session.turns.entries()) {
+      const amount = weightedBudgetTokens({ input: turn.baseIn, cacheRead: turn.cacheRead, cacheWrite: turn.cacheWrite, output: turn.output });
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      const eventId = `transcript:${session.path}:${index}:${turn.when.getTime()}`;
+      events.push({ scope: { kind: "source", source: session.source }, amount, eventId, at: turn.when });
+      // Only OpenCode records providerID/modelID; a slash in other sources' model IDs is not a provider.
+      const slash = session.source === "opencode" ? turn.model.indexOf("/") : -1;
+      if (slash > 0 && slash < turn.model.length - 1) {
+        const provider = turn.model.slice(0, slash);
+        const model = turn.model.slice(slash + 1);
+        events.push({ scope: { kind: "provider", provider }, amount, eventId: `${eventId}:provider`, at: turn.when });
+        events.push({ scope: { kind: "model", provider, model }, amount, eventId: `${eventId}:model`, at: turn.when });
+      }
+    }
+  }
+  if (events.length) app.budgets.seedRecentUsage(events);
+}
+
+function budgetWriteError(req: Request, mutationToken: string): { status: number; message: string } | null {
+  if (!sameOrigin(req)) return { status: 403, message: "Save from this dashboard." };
+  if (req.headers["x-token-furnace-mutation"] !== mutationToken) return { status: 403, message: "Missing or invalid mutation token." };
+  const contentType = String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") return { status: 415, message: "Budget writes require application/json." };
+  return null;
+}
+
+function stopScope(value: unknown): BudgetScope {
+  if (!value || typeof value !== "object") throw new Error("Stop scope is required.");
+  const scope = value as Record<string, unknown>;
+  if (scope.kind === "source" && (scope.source === "claude" || scope.source === "codex" || scope.source === "opencode")) return { kind: "source", source: scope.source };
+  if (scope.kind === "provider" && typeof scope.provider === "string" && scope.provider.trim()) return { kind: "provider", provider: scope.provider };
+  if (scope.kind === "model" && typeof scope.provider === "string" && typeof scope.model === "string" && scope.provider.trim() && scope.model.trim()) return { kind: "model", provider: scope.provider, model: scope.model };
+  throw new Error("Stop scope is unsupported.");
 }
 
 /** Start or join the scan without waiting. A failed scan is logged, not an unhandled rejection. */

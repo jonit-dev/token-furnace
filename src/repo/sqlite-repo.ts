@@ -202,7 +202,7 @@ export class SqliteSessionRepository implements SessionRepository {
       SELECT files.source, turns.project, turns.session, turns.at
       FROM turns JOIN files ON files.path = turns.path
       WHERE base_in + cache_read + cache_write > 0 ORDER BY at
-    `).iterate();
+    `).all() as unknown as ActivityTurn[];
     for (const row of rows) yield row as unknown as ActivityTurn;
   }
 
@@ -288,11 +288,7 @@ export class SqliteSessionRepository implements SessionRepository {
 
   close(): void {
     if (this.db) {
-      try {
-        this.db.close();
-      } catch {
-        // ignore
-      }
+      this.db.close();
       this.db = null;
     }
   }

@@ -16,6 +16,8 @@ export interface AgentSource {
   readFile(name: string): string | null;
   /** The agent's 7-day usage window from local data, when it logs one. */
   week?(now: Date): Week | null;
+  /** The same window with the source's real observation timestamp and identity. */
+  weekReading?(now: Date): Week | null;
   /** MEMORY.md indexes the agent loads, with their line counts. Claude only. */
   memoryIndexes?(): { path: string; lines: number }[];
   /** Map of full session ID to native thread/session title, if the agent stores an index. */

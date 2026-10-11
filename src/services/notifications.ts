@@ -10,13 +10,14 @@
  * returned message never carries the destination URL or the token.
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Report, Source } from "../core/model";
 import { isSessionSpike } from "../core/analyze/burn";
 import { eventKey, type ResetsFeed, type ResetEvent } from "./resets-client";
 import { usageCachePath } from "./usage-client";
+import { writePrivateFile } from "./private-file";
 import type { Env } from "../sources/agent-source";
 
 export const LEAD_MIN = 1;
@@ -196,12 +197,7 @@ const object = (value: unknown): Record<string, unknown> | null =>
 
 /** Write through a temporary file in the same directory, then rename. Mode 0600, never world readable. */
 export function saveSettings(env: Env, settings: NotificationSettings): void {
-  const path = settingsPath(env);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
-  chmodSync(path, 0o600);
+  writePrivateFile(settingsPath(env), `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 export interface DeliveryResult {

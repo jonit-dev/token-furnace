@@ -37,4 +37,8 @@ export class MemorySessionRepository implements SessionRepository {
   save(session: SessionInput, size: number): void {
     this.sessions.set(session.path, { session, size });
   }
+
+  close(): void {
+    // Memory repositories own no external handles.
+  }
 }

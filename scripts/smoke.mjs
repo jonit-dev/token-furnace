@@ -243,9 +243,9 @@ try {
   if (!existsSync(tarball)) throw new Error(`npm pack produced no tarball for ${info.filename}`);
   console.log(`ok   npm pack produced a tarball (${info.filename})`);
 
-  const required = ["dist/cli.js", "dist/scan-worker.js", "dist/dashboard.html", "README.md", "SKILL.md"];
+  const required = ["dist/cli.js", "dist/scan-worker.js", "dist/dashboard.html", "README.md", "SKILL.md", "scripts/qualify-budgets.mjs"];
   const missing = required.filter((path) => !manifest.includes(path));
-  check(missing.length === 0, "tarball includes dist entrypoints, README and SKILL", missing.join(", "));
+  check(missing.length === 0, "tarball includes package entrypoints, README, SKILL and qualification harness", missing.join(", "));
   if (missing.length) throw new Error(`tarball is missing packaged assets: ${missing.join(", ")}`);
 
   const forbidden = manifest.filter(
@@ -299,8 +299,26 @@ try {
   const dashboard = await get(`${base}/dashboard.html`);
   const dashboardBody = await dashboard.text();
   check(
-    dashboard.status === 200 && /text\/html/.test(dashboard.headers.get("content-type") ?? "") && dashboardBody.length > 500,
-    "serve serves dashboard.html",
+    dashboard.status === 200 && /text\/html/.test(dashboard.headers.get("content-type") ?? "") && dashboardBody.length > 500 && dashboardBody.includes("Budgets"),
+    "serve serves dashboard.html with the Budgets tab",
+  );
+
+  const budgets = await get(`${base}/api/budgets`);
+  const budgetBody = await budgets.json();
+  check(
+    budgets.status === 200 && budgetBody.revision === 0 && budgetBody.sources?.length === 3 && typeof budgetBody.mutationToken === "string",
+    "serve exposes all-source budget controls",
+  );
+  const enabled = run(npx.cmd, [...npx.args, "--no-install", "token-furnace", "budgets", "enable", "--confirm"], { cwd: project, env });
+  const codexHooksPath = join(env.CODEX_HOME, "hooks.json");
+  let codexHooks = null;
+  try { codexHooks = JSON.parse(readFileSync(codexHooksPath, "utf8")); } catch { /* the check below reports the missing/malformed asset */ }
+  const codexCommand = "token-furnace hook budget --source codex";
+  const codexEvents = ["PreToolUse", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"];
+  const codexHooksOk = codexEvents.every((eventName) => Array.isArray(codexHooks?.hooks?.[eventName]) && codexHooks.hooks[eventName].some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook) => hook?.command === codexCommand)));
+  check(
+    enabled.includes("Claude") && enabled.includes("Codex") && existsSync(join(env.CLAUDE_CONFIG_DIR, "settings.json")) && codexHooksOk && existsSync(join(env.HOME, ".config", "opencode", "plugins", "token-furnace-budget.ts")),
+    "installed CLI writes isolated adapter assets",
   );
 
   const served = await waitReport(base);
