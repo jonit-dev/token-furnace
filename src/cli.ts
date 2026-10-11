@@ -64,9 +64,10 @@ interface Options {
 
 export async function main(argv: string[] = process.argv.slice(2), app?: App): Promise<number> {
   if (argv[0] === "hook" && argv[1] === "budget") {
+    const ownsApp = !app;
     const budgetApp = app ?? compose(process.env, { noCache: true });
     const source = argv[2] === "--source" && (argv[3] === "claude" || argv[3] === "codex" || argv[3] === "opencode") ? argv[3] : undefined;
-    return runBudgetHook(readStdin(), budgetApp, source);
+    try { return runBudgetHook(readStdin(), budgetApp, source); } finally { if (ownsApp) budgetApp.close(); }
   }
   if (argv[0] === "hook" && argv[1] === "churn") {
     return runChurnHook(readStdin(), (app?.env ?? process.env), process.stdout);
@@ -113,8 +114,9 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
 
   if (argv[0] === "budgets") {
+    const ownsApp = !app;
     const budgetApp = app ?? compose(process.env, { noCache: true });
-    return runBudgets(argv.slice(1), budgetApp);
+    try { return await runBudgets(argv.slice(1), budgetApp); } finally { if (ownsApp) budgetApp.close(); }
   }
 
   const parsed = parseArgs({
@@ -140,9 +142,12 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
     return 0;
   }
 
+  const ownsApp = !app;
   if (!app) {
     app = compose(process.env, { noCache: Boolean(parsed.values["no-cache"]) });
   }
+  const commandApp = app;
+  try {
 
   const serveMode = parsed.positionals[0] === "serve";
   const positionals = serveMode ? parsed.positionals.slice(1) : parsed.positionals;
@@ -175,7 +180,7 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   };
 
   if (options.listSources) {
-    listSources(app);
+    listSources(commandApp);
     return 0;
   }
   if (serveMode) {
@@ -184,9 +189,9 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
 
   const now = app.now();
-  await app.reports.refresh(stderrProgress());
-  const [plan, goPlan] = await Promise.all([planWeek(app.env, now, options.planUsage), openCodeWeek(app.env, now, options.planUsage)]);
-  const report = app.reports.getRaw(options.days, options.source, {
+  await commandApp.reports.refresh(stderrProgress());
+  const [plan, goPlan] = await Promise.all([planWeek(commandApp.env, now, options.planUsage), openCodeWeek(commandApp.env, now, options.planUsage)]);
+  const report = commandApp.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: plan,
     opencodeWeek: goPlan,
@@ -212,6 +217,9 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
   process.stdout.write(printDoctor(report, htmlPath));
   return topIssues(report).length ? 1 : 0;
+  } finally {
+    if (ownsApp) commandApp.close();
+  }
 }
 
 async function runBudgets(argv: string[], app: App): Promise<number> {

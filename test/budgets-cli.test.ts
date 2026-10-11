@@ -25,7 +25,7 @@ async function run(argv: string[]) {
   } finally {
     process.stdout.write = original;
     process.stderr.write = originalError;
-    app.budgets.close();
+    app.close();
   }
 }
 

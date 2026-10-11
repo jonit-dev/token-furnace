@@ -15,13 +15,18 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli";
-import { compose } from "../src/compose";
+import { compose, type App } from "../src/compose";
 import { runSetup } from "../src/setup/agents";
 
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, writeFileSync: vi.fn(fs.writeFileSync) };
 });
+
+const apps: App[] = [];
+function closeApps(): void {
+  for (const app of apps.splice(0)) app.close();
+}
 
 describe("token-furnace setup", () => {
   let testHome: string;
@@ -34,14 +39,17 @@ describe("token-furnace setup", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    closeApps();
     rmSync(testHome, { recursive: true, force: true });
   });
 
   function appFor(env: Record<string, string | undefined> = {}) {
-    return compose({
+    const app = compose({
       HOME: testHome,
       ...env,
     }, { noCache: true });
+    apps.push(app);
+    return app;
   }
 
   it.each([false, true])("uses the OS home without HOME and respects custom directories (%s)", async (custom) => {
@@ -228,8 +236,10 @@ describe("token-furnace setup", () => {
 
   it("Defect 2: restores cleanly with hostile HOME containing spaces, apostrophe, $(), and backticks", async () => {
     const hostileRoot = mkdtempSync(join(tmpdir(), "tf-test 'with space' $(echo evil) `touch marker`-"));
+    let app: App | undefined;
     try {
-      const app = compose({ HOME: hostileRoot }, { noCache: true });
+      app = compose({ HOME: hostileRoot }, { noCache: true });
+      apps.push(app);
       const claudeSettings = join(hostileRoot, ".claude", "settings.json");
       mkdirSync(join(hostileRoot, ".claude"), { recursive: true });
       const initialClaudeBytes = JSON.stringify({ safe: true });
@@ -250,6 +260,7 @@ describe("token-furnace setup", () => {
       expect(rbCode).toBe(0);
       expect(readFileSync(claudeSettings, "utf8")).toBe(initialClaudeBytes);
     } finally {
+      app?.close();
       rmSync(hostileRoot, { recursive: true, force: true });
     }
   });
@@ -506,7 +517,7 @@ describe("token-furnace setup", () => {
 describe("token-furnace fix-config", () => {
   let testHome: string;
   beforeEach(() => { testHome = mkdtempSync(join(tmpdir(), "tf-fix-config-")); });
-  afterEach(() => { rmSync(testHome, { recursive: true, force: true }); });
+  afterEach(() => { closeApps(); rmSync(testHome, { recursive: true, force: true }); });
 
   it("repairs both custom config paths, backs up original bytes, and is idempotent", async () => {
     const claudeDir = join(testHome, "claude-custom");
@@ -518,6 +529,7 @@ describe("token-furnace fix-config", () => {
     const codexBytes = '# keep comment\n"model_auto_compact_token_limit" = 160000\n[agents]\nmax_depth = 2\n';
     writeFileSync(claudePath, claudeBytes); writeFileSync(codexPath, codexBytes);
     const app = compose({ HOME: testHome, CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexDir }, { noCache: true });
+    apps.push(app);
     expect(await main(["fix-config"], app)).toBe(0);
     expect(readFileSync(`${claudePath}.token-furnace-backup`, "utf8")).toBe(claudeBytes);
     expect(readFileSync(`${codexPath}.token-furnace-backup`, "utf8")).toBe(codexBytes);
@@ -534,13 +546,17 @@ describe("token-furnace fix-config", () => {
     const path = join(testHome, ".claude", "settings.json");
     writeFileSync(path, '{}');
     vi.mocked(writeFileSync).mockImplementationOnce(() => { throw new Error("backup refused"); });
-    expect(await main(["fix-config"], compose({ HOME: testHome }, { noCache: true }))).toBe(1);
+    const app = compose({ HOME: testHome }, { noCache: true });
+    apps.push(app);
+    expect(await main(["fix-config"], app)).toBe(1);
     expect(readFileSync(path, "utf8")).toBe('{}');
     expect(existsSync(join(testHome, ".codex", "config.toml"))).toBe(false);
   });
 
   it("creates missing configuration with the requested targets", async () => {
-    expect(await main(["fix-config"], compose({ HOME: testHome }, { noCache: true }))).toBe(0);
+    const app = compose({ HOME: testHome }, { noCache: true });
+    apps.push(app);
+    expect(await main(["fix-config"], app)).toBe(0);
     expect(JSON.parse(readFileSync(join(testHome, ".claude", "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
     expect(parseToml(readFileSync(join(testHome, ".codex", "config.toml"), "utf8")).model_auto_compact_token_limit).toBe(300000);
   });
@@ -553,6 +569,7 @@ describe("token-furnace fix-config", () => {
     writeFileSync(claudePath, JSON.stringify({ autoCompactWindow: 400000, env }));
     writeFileSync(codexPath, 'model_auto_compact_token_limit = 300000\n[agents]\nmax_concurrent_threads_per_session = 2\ndefault_subagent_reasoning_effort = "low"\nmax_depth = 4\n');
     const app = compose({ HOME: testHome }, { noCache: true });
+    apps.push(app);
     expect(await main(["fix-config"], app)).toBe(0);
     expect(JSON.parse(readFileSync(claudePath, "utf8")).env).toEqual(env);
     expect(await main(["fix-config", "--include-depth"], app)).toBe(0);
@@ -566,6 +583,7 @@ describe("token-furnace fix-config", () => {
     const codexPath = join(testHome, ".codex", "config.toml");
     writeFileSync(claudePath, '{}'); writeFileSync(codexPath, 'broken = "');
     const app = compose({ HOME: testHome }, { noCache: true });
+    apps.push(app);
     expect(await main(["fix-config"], app)).toBe(1);
     expect(readFileSync(claudePath, "utf8")).toBe('{}');
     expect(readdirSync(join(testHome, ".claude"))).toHaveLength(1);

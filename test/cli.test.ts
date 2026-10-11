@@ -65,15 +65,17 @@ function mask(text: string, root: string): string {
 async function run(argv: string[], root: string): Promise<{ code: number; out: string; err: string }> {
   const out: string[] = [];
   const err: string[] = [];
+  const app = compose(env(root), { noCache: argv.includes("--no-cache") });
   const stdout = process.stdout.write.bind(process.stdout);
   const stderr = process.stderr.write.bind(process.stderr);
   process.stdout.write = ((chunk: unknown) => (out.push(String(chunk)), true)) as typeof process.stdout.write;
   process.stderr.write = ((chunk: unknown) => (err.push(String(chunk)), true)) as typeof process.stderr.write;
   try {
-    return { code: await main(argv, compose(env(root), { noCache: argv.includes("--no-cache") })), out: out.join(""), err: err.join("") };
+    return { code: await main(argv, app), out: out.join(""), err: err.join("") };
   } finally {
     process.stdout.write = stdout;
     process.stderr.write = stderr;
+    app.close();
   }
 }
 

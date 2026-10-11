@@ -20,6 +20,7 @@ export interface App {
   control: AgentControl;
   /** The clock. TOKEN_FURNACE_NOW freezes it, so a test can compare two runs byte for byte. */
   now: () => Date;
+  close: () => void;
 }
 
 export function sqliteCachePath(env: Env): string {
@@ -34,6 +35,7 @@ export function compose(env: Env = process.env, opts?: { noCache?: boolean }): A
   const sources = createSources(effective);
   const repo = noCache ? new MemorySessionRepository() : new SqliteSessionRepository(sqliteCachePath(effective));
   let budgets: BudgetService | undefined;
+  const control = new AgentControl({ env: effective });
   return {
     env: effective,
     sources,
@@ -42,8 +44,11 @@ export function compose(env: Env = process.env, opts?: { noCache?: boolean }): A
     get budgets() {
       return budgets ??= new BudgetService(effective);
     },
-    control: new AgentControl({ env: effective }),
+    control,
     now: () => new Date(effective.TOKEN_FURNACE_NOW || Date.now()),
+    close: () => {
+      try { budgets?.close(); } finally { control.close(); }
+    },
   };
 }
 

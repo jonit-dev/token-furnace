@@ -102,6 +102,7 @@ export interface AgentControlOptions {
   storePath?: string;
   inspect?: (pid: number) => ProcessIdentity | null;
   listProcesses?: () => ProcessIdentity[];
+  listNativeProcesses?: () => ProcessIdentity[];
   signal?: (pid: number, signal: NodeJS.Signals) => void;
   currentUid?: number | null;
   currentOwner?: string | null;
@@ -124,6 +125,7 @@ export class AgentControl {
   private readonly store: ControlStore | null;
   private readonly discoverRuntime?: () => ControlTarget[];
   private readonly listProcesses: () => ProcessIdentity[];
+  private readonly listNativeProcesses: () => ProcessIdentity[];
   private readonly graceMs: number;
   private readonly adapters = new Map<string, { cancel?: () => Promise<boolean>; state?: () => Promise<boolean> }>();
   private runtimeUnverified: ControlPreview["unverified"] = [];
@@ -149,6 +151,7 @@ export class AgentControl {
     }
     this.discoverRuntime = options.discoverRuntime;
     this.listProcesses = options.listProcesses ?? listProcessIdentities;
+    this.listNativeProcesses = options.listNativeProcesses ?? options.listProcesses ?? listNativeProcessIdentities;
     this.graceMs = Math.max(0, options.graceMs ?? 5_000);
   }
 
@@ -327,7 +330,7 @@ export class AgentControl {
   }
 
   private discoverNativeProcesses(): ControlTarget[] {
-    const discovered = discoverNativeProcesses(this.listProcesses, this.inspectProcess, this.currentPid);
+    const discovered = discoverNativeProcesses(this.listNativeProcesses, this.inspectProcess, this.currentPid);
     this.runtimeUnverified = discovered.unverified;
     return discovered.targets;
   }
@@ -471,38 +474,40 @@ class ControlStore {
   constructor(private readonly path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA busy_timeout = 2500;
-      CREATE TABLE IF NOT EXISTS targets (
-        id TEXT PRIMARY KEY,
-        source TEXT NOT NULL,
-        provider TEXT,
-        account TEXT,
-        model TEXT,
-        pid INTEGER NOT NULL,
-        process_start_time INTEGER NOT NULL,
-        owner_uid INTEGER,
-        owner_identity TEXT,
-        owner_sid TEXT,
-        executable TEXT,
-        session_id TEXT,
-        native_json TEXT,
-        exclusive INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS outcomes (
-        target_id TEXT PRIMARY KEY,
-        status TEXT NOT NULL,
-        detail TEXT,
-        updated_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS targets_source ON targets(source);
-      CREATE INDEX IF NOT EXISTS targets_identity ON targets(provider, model);
-    `);
-    const columns = this.db.prepare("PRAGMA table_info(targets)").all() as Array<{ name?: string }>;
-    if (!columns.some((column) => column.name === "owner_sid")) this.db.exec("ALTER TABLE targets ADD COLUMN owner_sid TEXT");
+    this.db.exec("PRAGMA busy_timeout = 2500;");
+    retrySqliteInitialization(() => {
+      this.db.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        CREATE TABLE IF NOT EXISTS targets (
+          id TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          provider TEXT,
+          account TEXT,
+          model TEXT,
+          pid INTEGER NOT NULL,
+          process_start_time INTEGER NOT NULL,
+          owner_uid INTEGER,
+          owner_identity TEXT,
+          owner_sid TEXT,
+          executable TEXT,
+          session_id TEXT,
+          native_json TEXT,
+          exclusive INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS outcomes (
+          target_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          detail TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS targets_source ON targets(source);
+        CREATE INDEX IF NOT EXISTS targets_identity ON targets(provider, model);
+      `);
+      const columns = this.db.prepare("PRAGMA table_info(targets)").all() as Array<{ name?: string }>;
+      if (!columns.some((column) => column.name === "owner_sid")) addSqliteColumn(this.db, "ALTER TABLE targets ADD COLUMN owner_sid TEXT");
+    });
   }
 
   upsertTarget(target: ControlTarget): boolean {
@@ -1100,11 +1105,16 @@ function inspectProcess(pid: number): ProcessIdentity | null {
 }
 
 function listProcessIdentities(): ProcessIdentity[] {
-  if (process.platform === "win32") return listWindowsProcesses();
+  if (process.platform === "win32") return listWindowsProcesses(false);
   if (process.platform === "darwin") return listPsProcesses();
   try {
     return readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).map(Number).map(inspectProcess).filter((value): value is ProcessIdentity => value !== null);
   } catch { return []; }
+}
+
+function listNativeProcessIdentities(): ProcessIdentity[] {
+  if (process.platform === "win32") return listWindowsProcesses(true);
+  return listProcessIdentities();
 }
 
 function inspectPsProcess(pid: number): ProcessIdentity | null {
@@ -1118,9 +1128,15 @@ function inspectPsProcess(pid: number): ProcessIdentity | null {
 
 function listPsProcesses(): ProcessIdentity[] {
   try {
-    const output = execFileSync("ps", ["-axo", "pid=,ppid=,uid=,lstart=,comm="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return output.split(/\r?\n/).map((line) => parsePsLine(line.trim())).filter((value): value is ProcessIdentity => value !== null).map((identity) => {
-      try { identity.commandLine = execFileSync("ps", ["-p", String(identity.pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { /* process may exit between list and inspect */ }
+    const identityOutput = execFileSync("ps", ["-axo", "pid=,ppid=,uid=,lstart=,comm="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const commandOutput = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const commands = new Map<number, string>();
+    for (const line of commandOutput.split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+      if (match) commands.set(Number(match[1]), match[2].trim());
+    }
+    return identityOutput.split(/\r?\n/).map((line) => parsePsLine(line.trim())).filter((value): value is ProcessIdentity => value !== null).map((identity) => {
+      identity.commandLine = commands.get(identity.pid) ?? null;
       return identity;
     });
   } catch { return []; }
@@ -1142,16 +1158,17 @@ function inspectWindowsProcess(pid: number): ProcessIdentity | null {
   } catch { return null; }
 }
 
-function listWindowsProcesses(): ProcessIdentity[] {
+function listWindowsProcesses(nativeOnly: boolean): ProcessIdentity[] {
   try {
-    const script = windowsProcessScript("Get-CimInstance Win32_Process");
+    const script = windowsProcessScript("Get-CimInstance Win32_Process", nativeOnly);
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     return parseWindowsOutput(output);
   } catch { return []; }
 }
 
-function windowsProcessScript(query: string): string {
-  return `$rows=@(${query} | ForEach-Object { try { $owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ return }; [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } } catch { } }); $rows | ConvertTo-Json -Compress`;
+function windowsProcessScript(query: string, nativeOnly = false): string {
+  const filter = nativeOnly ? " | Where-Object { $_.ExecutablePath -match '(?i)claude|codex|opencode' -or $_.CommandLine -match '(?i)claude|codex|opencode' }" : "";
+  return `$rows=@(${query}${filter} | ForEach-Object { try { $owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ return }; [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } } catch { } }); $rows | ConvertTo-Json -Compress`;
 }
 
 function parseWindowsOutput(output: string): ProcessIdentity[] {
@@ -1191,6 +1208,30 @@ function parseWindowsRecord(row: WindowsProcessRecord): ProcessIdentity | null {
     executable: typeof row.ExecutablePath === "string" ? row.ExecutablePath : null,
     commandLine: typeof row.CommandLine === "string" ? row.CommandLine : null,
   };
+}
+
+function retrySqliteInitialization<T>(fn: () => T): T {
+  for (let attempt = 0; ; attempt++) {
+    try { return fn(); } catch (error) {
+      if (attempt >= 5 || !sqliteBusy(error)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (2 ** attempt));
+    }
+  }
+}
+
+function addSqliteColumn(db: DatabaseSync, statement: string): void {
+  try { db.exec(statement); } catch (error) {
+    if (!/duplicate column name|already exists/i.test(sqliteErrorText(error))) throw error;
+  }
+}
+
+function sqliteBusy(error: unknown): boolean {
+  return /SQLITE_BUSY|SQLITE_LOCKED|database is locked|database table is locked/i.test(sqliteErrorText(error));
+}
+
+function sqliteErrorText(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  return `${code} ${error instanceof Error ? error.message : String(error)}`;
 }
 
 function terminateProcess(pid: number, signal: NodeJS.Signals): void {

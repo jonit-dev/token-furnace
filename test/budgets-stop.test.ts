@@ -215,6 +215,52 @@ describe("AgentControl", () => {
     }
   });
 
+  it("force-stops a real owned child tree while an unrelated sibling remains live", async () => {
+    const tree = spawn(process.execPath, ["-e", "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); process.stdout.write(String(child.pid)); setInterval(()=>{},1000)"], { stdio: ["ignore", "pipe", "ignore"] });
+    const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const control = makeControl({ currentUid: typeof process.getuid === "function" ? process.getuid() : null, graceMs: 1_000, storePath: testStore() });
+    let grandchildPid: number | null = null;
+    try {
+      grandchildPid = await new Promise<number>((resolve, reject) => {
+        let output = "";
+        const timeout = setTimeout(() => reject(new Error("real grandchild PID was not reported")), 2_000);
+        tree.stdout?.on("data", (chunk: Buffer) => {
+          output += chunk.toString();
+          const pid = Number(output.trim());
+          if (Number.isInteger(pid) && pid > 0) { clearTimeout(timeout); resolve(pid); }
+        });
+        tree.on("error", (error) => { clearTimeout(timeout); reject(error); });
+      });
+      const identity = await new Promise<ProcessIdentity>((resolve, reject) => {
+        const deadline = Date.now() + 2_000;
+        const poll = () => {
+          const current = tree.pid ? control.processIdentity(tree.pid) : null;
+          if (current) return resolve(current);
+          if (Date.now() >= deadline) return reject(new Error("real tree identity was not discoverable"));
+          setTimeout(poll, 25);
+        };
+        poll();
+      });
+      expect(tree.pid).toBeDefined();
+      expect(unrelated.pid).toBeDefined();
+      expect(grandchildPid).toBeDefined();
+      expect(control.register({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
+      const outcome = await control.cancel({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
+      expect(outcome.status).toBe("terminated");
+      await waitForExit(tree);
+      expect(control.processIdentity(grandchildPid!)).toBeNull();
+      expect(unrelated.exitCode).toBeNull();
+    } finally {
+      control.close();
+      if (tree.exitCode === null) tree.kill("SIGKILL");
+      if (unrelated.exitCode === null) unrelated.kill("SIGTERM");
+      await Promise.all([waitForExit(tree), waitForExit(unrelated)]);
+      if (grandchildPid !== null) {
+        try { process.kill(grandchildPid, "SIGKILL"); } catch { /* already exited */ }
+      }
+    }
+  }, 20_000);
+
   it("reloads durable owned registrations for a later preview", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-control-"));
     try {
@@ -302,6 +348,46 @@ describe("AgentControl", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("initializes cold shared budget and control stores for concurrent hook processes", async () => {
+    const cliPath = join(process.cwd(), "dist", "cli.js");
+    expect(existsSync(cliPath)).toBe(true);
+    for (let batch = 0; batch < 5; batch++) {
+      const root = mkdtempSync(join(tmpdir(), "tf-control-cold-hooks-"));
+      const state = join(root, "state");
+      const config = join(root, "config");
+      const cache = join(root, "cache");
+      const environment = { ...process.env, HOME: root, TOKEN_FURNACE_STATE_HOME: state, TOKEN_FURNACE_CONFIG_HOME: config, TOKEN_FURNACE_CACHE_HOME: cache };
+      const nativeWorkers = [
+        spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "claude"], { env: environment, stdio: "ignore" }),
+        spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "claude"], { env: environment, stdio: "ignore" }),
+      ];
+      try {
+        const pids = nativeWorkers.map((worker) => worker.pid);
+        expect(pids.every((pid): pid is number => typeof pid === "number")).toBe(true);
+        const runHook = (pid: number, sessionId: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+          const hook = spawn(process.execPath, [cliPath, "hook", "budget", "--source", "claude"], { env: environment, stdio: ["pipe", "pipe", "pipe"] });
+          let stdout = "";
+          let stderr = "";
+          const timeout = setTimeout(() => { hook.kill("SIGTERM"); reject(new Error(`cold hook timed out: ${sessionId}`)); }, 10_000);
+          hook.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+          hook.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+          hook.on("error", (error) => { clearTimeout(timeout); reject(error); });
+          hook.on("close", (code) => { clearTimeout(timeout); resolve({ code, stdout, stderr }); });
+          hook.stdin?.end(JSON.stringify({ provider: "anthropic", model: "claude-opus", pid, session_id: sessionId, exclusive: true }));
+        });
+        const results = await Promise.all(pids.map((pid, index) => runHook(pid!, `cold-hook-${batch}-${index}`)));
+        const failures = results.filter((result) => result.code !== 0 || !/"allow":true/.test(result.stdout));
+        if (failures.length) {
+          throw new Error(failures.map((failure) => `cold hook failed: exit=${failure.code} stdout=${failure.stdout} stderr=${failure.stderr}`).join("\n"));
+        }
+      } finally {
+        for (const worker of nativeWorkers) if (worker.exitCode === null) worker.kill("SIGKILL");
+        await Promise.all(nativeWorkers.map(waitForExit));
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
 
   it("reports same-user unmanaged native executables as unresolved instead of signalling them", () => {
     const identity: ProcessIdentity = { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: "/usr/local/bin/claude" };

@@ -85,7 +85,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     port,
     close: () => new Promise((done) => {
       clearInterval(timer);
-      http.close(() => { app.budgets.close(); app.control.close(); done(); });
+      http.close(() => { app.close(); done(); });
     }),
   };
 }

@@ -204,15 +204,18 @@ export class BudgetService {
     mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 });
     mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(this.dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 2500;");
-    this.db.exec(DDL);
-    try { this.db.exec("ALTER TABLE meters ADD COLUMN window TEXT"); } catch { /* existing v1 database already has it */ }
-    try { this.db.exec("ALTER TABLE reservations ADD COLUMN request_id TEXT"); } catch { /* existing database already has it */ }
-    try { this.db.exec("ALTER TABLE stop_previews ADD COLUMN target_proof TEXT NOT NULL DEFAULT ''"); } catch { /* existing database already has it */ }
-    for (const column of ["provider TEXT", "account TEXT", "model TEXT", "request_id TEXT"]) {
-      try { this.db.exec(`ALTER TABLE admission_decisions ADD COLUMN ${column}`); } catch { /* existing database already has it */ }
-    }
-    this.db.exec("CREATE INDEX IF NOT EXISTS reservation_request_status ON reservations(request_id, status)");
+    this.db.exec("PRAGMA busy_timeout = 2500;");
+    retrySqliteInitialization(() => {
+      this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+      this.db.exec(DDL);
+      addSqliteColumn(this.db, "ALTER TABLE meters ADD COLUMN window TEXT");
+      addSqliteColumn(this.db, "ALTER TABLE reservations ADD COLUMN request_id TEXT");
+      addSqliteColumn(this.db, "ALTER TABLE stop_previews ADD COLUMN target_proof TEXT NOT NULL DEFAULT ''");
+      for (const column of ["provider TEXT", "account TEXT", "model TEXT", "request_id TEXT"]) {
+        addSqliteColumn(this.db, `ALTER TABLE admission_decisions ADD COLUMN ${column}`);
+      }
+      this.db.exec("CREATE INDEX IF NOT EXISTS reservation_request_status ON reservations(request_id, status)");
+    });
     try { chmodSync(this.dbPath, 0o600); } catch { /* best effort on Windows */ }
   }
 
@@ -664,4 +667,28 @@ function stopMatches(scope: StopScope, identity: BudgetIdentity): boolean {
   if (scope.kind === "provider") return Boolean(identity.provider) && canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider);
   return Boolean(identity.provider && identity.model) &&
     (canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider) && canonicalIdentity(scope.model) === canonicalIdentity(identity.model));
+}
+
+function retrySqliteInitialization<T>(fn: () => T): T {
+  for (let attempt = 0; ; attempt++) {
+    try { return fn(); } catch (error) {
+      if (attempt >= 5 || !sqliteBusy(error)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (2 ** attempt));
+    }
+  }
+}
+
+function addSqliteColumn(db: DatabaseSync, statement: string): void {
+  try { db.exec(statement); } catch (error) {
+    if (!/duplicate column name|already exists/i.test(sqliteErrorText(error))) throw error;
+  }
+}
+
+function sqliteBusy(error: unknown): boolean {
+  return /SQLITE_BUSY|SQLITE_LOCKED|database is locked|database table is locked/i.test(sqliteErrorText(error));
+}
+
+function sqliteErrorText(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  return `${code} ${error instanceof Error ? error.message : String(error)}`;
 }
