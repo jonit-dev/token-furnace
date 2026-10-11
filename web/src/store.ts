@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { Source } from "../../src/core/model";
 
-export type Tab = "dashboard" | "checkup" | "sessions" | "tips" | "resets" | "notifications";
+export type Tab = "dashboard" | "checkup" | "sessions" | "tips" | "resets" | "notifications" | "budgets";
 
 export const sessionKey = (s: { source: Source; fullId?: string; id: string }) => `${s.source}:${s.fullId || s.id}`;
 

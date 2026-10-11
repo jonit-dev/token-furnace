@@ -834,3 +834,99 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
     return 1;
   }
 }
+
+/** Install only the native adapters that can be edited without replacing user-owned config. */
+export function installBudgetAdapters(
+  env: Env = process.env,
+  options: { apply?: boolean } = {},
+  out: { write(text: string): unknown } = process.stdout,
+): number {
+  const apply = Boolean(options.apply);
+  const home = env.HOME || homedir();
+  const claudeDir = env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+  const settingsPath = join(claudeDir, "settings.json");
+  const budgetCommand = "token-furnace hook budget --source claude";
+  let settings: Record<string, any> = {};
+  let original: string | null = null;
+  if (existsSync(settingsPath)) {
+    original = readFileSync(settingsPath, "utf8");
+    try {
+      const parsed = JSON.parse(original);
+      if (!isPlainObject(parsed) || (parsed.hooks !== undefined && !isPlainObject(parsed.hooks))) throw new Error("expected an object with an optional hooks object");
+      settings = parsed;
+    } catch (error) {
+      out.write(`Budget adapters: ${settingsPath} is malformed — left untouched (${error instanceof Error ? error.message : String(error)}).\n`);
+      return 1;
+    }
+  }
+  const hooks = (settings.hooks ??= {}) as Record<string, any>;
+  if (hooks.PreToolUse !== undefined && !Array.isArray(hooks.PreToolUse)) {
+    out.write(`Budget adapters: ${settingsPath} has a non-array PreToolUse hook list — left untouched.\n`);
+    return 1;
+  }
+  const preToolUse = (hooks.PreToolUse ??= []) as any[];
+  const already = preToolUse.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook: any) => hook?.command === budgetCommand));
+  if (!already) {
+    preToolUse.push({ matcher: "Agent|Task|Subagent", hooks: [{ type: "command", command: budgetCommand }] });
+    const after = JSON.stringify(settings, null, 2) + "\n";
+    if (apply) {
+      mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 });
+      if (original !== null && !existsSync(`${settingsPath}.token-furnace-budget-backup`)) {
+        writeFileSync(`${settingsPath}.token-furnace-budget-backup`, original, { mode: 0o600 });
+      }
+      writeFileSync(settingsPath, after, { mode: 0o600 });
+      try { chmodSync(settingsPath, 0o600); } catch { /* best effort on Windows */ }
+      out.write(`Budget adapters: Claude PreToolUse wired to ${budgetCommand}.\n`);
+    } else {
+      out.write(`Budget adapters: would wire Claude PreToolUse to ${budgetCommand}.\n`);
+    }
+  } else {
+    out.write("Budget adapters: Claude PreToolUse already wired.\n");
+  }
+
+  const openCodeConfig = env.OPENCODE_CONFIG_DIR || join(home, ".config", "opencode");
+  const pluginPath = join(openCodeConfig, "plugins", "token-furnace-budget.ts");
+  if (existsSync(pluginPath)) {
+    out.write("Budget adapters: OpenCode plugin already present.\n");
+  } else if (apply) {
+    mkdirSync(dirname(pluginPath), { recursive: true, mode: 0o700 });
+    writeFileSync(pluginPath, openCodePlugin(), { mode: 0o600 });
+    out.write("Budget adapters: OpenCode tool.execute.before plugin installed.\n");
+  } else {
+    out.write("Budget adapters: would install the OpenCode tool.execute.before plugin.\n");
+  }
+  out.write("Budget adapters: Partial coverage — Codex installed-version hook wiring needs qualification.\n");
+  return 0;
+}
+
+function openCodePlugin(): string {
+  return `// Token Furnace budget gate. Kept local so hooks never download a package.
+const modelBySession = new Map();
+async function modelFor(ctx, sessionID) {
+  const cached = modelBySession.get(sessionID);
+  try {
+    const messages = await ctx.client.session.messages({ path: { id: sessionID }, query: { limit: 10 } });
+    const latest = [...(messages.data ?? [])].reverse().find((item) => item.info?.role === "assistant");
+    if (latest?.info?.providerID && latest?.info?.modelID) {
+      const model = { provider: latest.info.providerID, model: latest.info.modelID };
+      modelBySession.set(sessionID, model);
+      return model;
+    }
+    return cached ?? {};
+  } catch {
+    return cached ?? {};
+  }
+}
+export const TokenFurnaceBudget = async (ctx) => ({
+  "tool.execute.before": async (input) => {
+    const identity = await modelFor(ctx, input.sessionID);
+    const event = { source: "opencode", ...identity, estimatedCost: 1, costUnit: "tokens-per-hour", requestId: input.callID };
+    const result = Bun.spawnSync(["token-furnace", "hook", "budget"], { stdin: new Blob([JSON.stringify(event)]) });
+    if (result.exitCode !== 0) throw new Error("Token Furnace budget hook failed.");
+    const decision = JSON.parse(new TextDecoder().decode(result.stdout));
+    if (!decision.allow) throw new Error(decision.reason);
+  },
+});
+export default TokenFurnaceBudget;
+`;
+}

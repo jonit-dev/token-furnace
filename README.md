@@ -72,6 +72,10 @@ npm install -g token-furnace
 | `token-furnace setup [--apply] [--verify] [--rollback] [--aggressive]` | Installer. Dry run unless `--apply`. |
 | `token-furnace fix-config` | Repairs context and worker settings; backs up changed files first. Optional `--include-depth`. |
 | `token-furnace hook churn` | Claude Code PostToolUse churn hook. Reads the payload on stdin. Never blocks. |
+| `token-furnace budgets status` | Prints the shared budget and emergency-stop state used by the dashboard and hooks. |
+| `token-furnace budgets stop --provider <id>` | Previews a provider stop. Add `--confirm`; add `--force --force-confirm` only after reviewing collateral scope. |
+| `token-furnace budgets unlock --provider <id> --confirm` | Unlocks one exact provider, model, or source latch. It does not restart old work. |
+| `token-furnace budgets enable --confirm` | Installs backed-up local budget adapters where the installed source supports a safe configuration path. |
 
 Options:
 
@@ -141,6 +145,25 @@ subagents still spawn after any Claude Code upgrade.
 `token-furnace hook churn` is the PostToolUse hook. It counts edits per file per session and
 injects an escalation prompt at the 4th, 7th, and 10th edit.
 
+## Budgets and emergency stops
+
+Open the live dashboard's **Budgets** tab at `#budgets`. New installs start **Off**, which only
+observes usage. **Auto** derives percentage-points per hour from an authoritative quota and its
+reset; **Manual** accepts a positive weighted-token pace. Saving a policy does not clear measured
+usage, reservations, or emergency latches. Use **Enable enforcement** only after reviewing the
+adapter preview; unsupported native paths stay labelled **Partial coverage**.
+
+Provider and model stops are separate from budgets. A stop writes its durable latch before asking a
+verified same-user adapter to cancel work. Preview, confirmation, native outcome, force escalation,
+and unlock all use the same state as the CLI. The control database lives under
+`$XDG_STATE_HOME/token-furnace/` (or `$HOME/.local/state/token-furnace/`); policy settings live under
+`$XDG_CONFIG_HOME/token-furnace/` (or `$HOME/.config/token-furnace/`).
+
+Native qualification must use dedicated disposable homes and authenticated upstreams. Run
+`npm run qualify:budgets -- --sources claude,codex,opencode` only with those homes configured via
+`TOKEN_FURNACE_QUALIFY_CLAUDE_HOME`, `TOKEN_FURNACE_QUALIFY_CODEX_HOME`, and
+`TOKEN_FURNACE_QUALIFY_OPENCODE_DATA_DIR`; missing access is reported as **BLOCKED**, never PASS.
+
 ## Privacy
 
 - Transcript data stays on this machine. The tool sends no telemetry.
@@ -174,6 +197,7 @@ main thread, or a positive number to set the worker count.
 - `0` — no leaks found. The `--json` and `--full` reports also exit 0 when leaks are present.
 - `1` — leaks found, or no transcripts found.
 - `2` — a rejected value for `days`, `--source`, or `--port`.
+- `75` — native budget qualification is blocked because a dedicated authenticated target is unavailable.
 
 An unknown option does not exit 2. `node:util` `parseArgs` throws, so that run exits 1 with a stack
 trace.

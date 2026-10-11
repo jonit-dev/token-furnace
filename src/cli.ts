@@ -4,11 +4,13 @@
  * codes of burn.py main(): 1 with no data, 1 with leaks or a failing doctor, 0 otherwise.
  */
 
-import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { CONTEXT_TARGET_LABEL } from "./core/context";
+import { PROVIDERS } from "./core/providers";
+import type { BudgetScope } from "./core/budgets";
 import { compose, type App } from "./compose";
 import { topIssues } from "./core/analyze/issues";
 import { reportView } from "./core/analyze/view";
@@ -17,14 +19,20 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
+import type { ControlOutcome } from "./services/agent-control";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
-import { runFixConfig, runSetup } from "./setup/agents";
+import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
 
 const USAGE = `Usage: token-furnace [days] [options]
        token-furnace serve [--port 8765]
        token-furnace setup [--apply] [--rollback] [--aggressive] [--verify]
        token-furnace fix-config
        token-furnace hook churn
+       token-furnace hook budget [--source <source>]
+       token-furnace budgets status
+       token-furnace budgets stop --provider <id> [--confirm] [--force --force-confirm]
+       token-furnace budgets stop --model <provider/model> [--confirm] [--force --force-confirm]
+       token-furnace budgets unlock --provider <id> --confirm
 
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
@@ -55,6 +63,11 @@ interface Options {
 }
 
 export async function main(argv: string[] = process.argv.slice(2), app?: App): Promise<number> {
+  if (argv[0] === "hook" && argv[1] === "budget") {
+    const budgetApp = app ?? compose(process.env, { noCache: true });
+    const source = argv[2] === "--source" && (argv[3] === "claude" || argv[3] === "codex" || argv[3] === "opencode") ? argv[3] : undefined;
+    return runBudgetHook(readStdin(), budgetApp, source);
+  }
   if (argv[0] === "hook" && argv[1] === "churn") {
     return runChurnHook(readStdin(), (app?.env ?? process.env), process.stdout);
   }
@@ -97,6 +110,11 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
       app?.env ?? process.env,
       process.stdout,
     );
+  }
+
+  if (argv[0] === "budgets") {
+    const budgetApp = app ?? compose(process.env, { noCache: true });
+    return runBudgets(argv.slice(1), budgetApp);
   }
 
   const parsed = parseArgs({
@@ -194,6 +212,136 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
   process.stdout.write(printDoctor(report, htmlPath));
   return topIssues(report).length ? 1 : 0;
+}
+
+async function runBudgets(argv: string[], app: App): Promise<number> {
+  const command = argv[0] ?? "status";
+  const parsed = parseArgs({
+    args: argv.slice(1), allowPositionals: true,
+    options: {
+      provider: { type: "string" }, model: { type: "string" }, source: { type: "string" },
+      confirm: { type: "boolean" }, force: { type: "boolean" }, "force-confirm": { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  if (parsed.values.help) {
+    process.stdout.write("Usage: token-furnace budgets status | enable --confirm | stop --provider <id> [--confirm] | stop --model <provider/model> [--confirm] | unlock --provider <id> --confirm\n");
+    return 0;
+  }
+  const scope = budgetScope(parsed.values.provider, parsed.values.model, parsed.values.source);
+  if (command === "status") {
+    process.stdout.write(`${JSON.stringify(app.budgets.snapshot(budgetSources(app)))}\n`);
+    return 0;
+  }
+  if (command === "enable") {
+    if (!parsed.values.confirm) {
+      process.stderr.write("Refusing to enable enforcement without --confirm.\n");
+      return 2;
+    }
+    return installBudgetAdapters(app.env, { apply: true }, process.stdout);
+  }
+  if ((command !== "stop" && command !== "unlock") || !scope) {
+    process.stderr.write("Usage: token-furnace budgets stop|unlock --provider <id> | --model <provider/model>\n");
+    return 2;
+  }
+  if (command === "unlock") {
+    if (!parsed.values.confirm) {
+      process.stderr.write("Refusing unlock without --confirm.\n");
+      return 2;
+    }
+    app.budgets.unlock(scope);
+    process.stdout.write(`${JSON.stringify({ ok: true, scope })}\n`);
+    return 0;
+  }
+  const targets = app.control.discover(scope);
+  const preview = app.budgets.previewStop(scope, targets.map((target) => target.id));
+  if (!parsed.values.confirm) {
+    process.stdout.write(`${JSON.stringify({ action: "preview", ...preview, targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, model: target.model })) })}\n`);
+    return 0;
+  }
+  if (parsed.values.force && !parsed.values["force-confirm"]) {
+    process.stderr.write("Force stop requires --force-confirm.\n");
+    return 2;
+  }
+  const currentTargetIds = app.control.discover(scope).map((target) => target.id).sort();
+  if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds)) {
+    process.stderr.write("Stop preview targets changed; preview again.\n");
+    return 2;
+  }
+  const initial = preview.targetIds.map((targetId) => ({ targetId, status: "requested" as const }));
+  const operation = app.budgets.commitStop(preview.id, preview.fingerprint, initial);
+  let outcomes: ControlOutcome[];
+  try {
+    outcomes = await app.control.stop(scope, Boolean(parsed.values.force));
+  } catch (error) {
+    outcomes = preview.targetIds.map((targetId) => ({
+      targetId,
+      status: "failed" as const,
+      detail: error instanceof Error ? error.message : String(error),
+    }));
+  }
+  const updated = app.budgets.updateOperation(operation.id, outcomes) ?? operation;
+  process.stdout.write(`${JSON.stringify(updated)}\n`);
+  return updated.status === "complete" ? 0 : 1;
+}
+
+function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
+  let event: Record<string, unknown> = {};
+  try { event = JSON.parse(stdin) as Record<string, unknown>; } catch {
+    process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Malformed budget hook input." }));
+    return 0;
+  }
+  const source = sourceOverride ?? (event.source === "claude" || event.source === "codex" || event.source === "opencode"
+    ? event.source
+    : app.env.TOKEN_FURNACE_SOURCE === "claude" || app.env.TOKEN_FURNACE_SOURCE === "codex" || app.env.TOKEN_FURNACE_SOURCE === "opencode" ? app.env.TOKEN_FURNACE_SOURCE : null);
+  const provider = stringValue(event.provider ?? event.providerID ?? event.provider_id);
+  const model = stringValue(event.model ?? event.modelID ?? event.model_id);
+  const state = app.budgets.snapshot();
+  const decision = source
+    ? app.budgets.admit({
+        identity: { source, provider, model },
+        estimatedCost: numberValue(event.estimatedCost ?? event.estimated_cost ?? event.cost) ?? 1,
+        costUnit: event.costUnit === "percentage-per-hour" || event.costUnit === "tokens-per-hour" || event.costUnit === "tokens-total" ? event.costUnit : undefined,
+        requestId: stringValue(event.requestId ?? event.request_id) ?? undefined,
+      })
+    : state.policies.some((policy) => policy.mode !== "off") || state.stops.length > 0
+      ? { allowed: false, reason: "Budget hook input has no verified source.", retryAt: null, reservationId: null, matched: [] }
+      : { allowed: true, reason: "Budget enforcement is Off; source identity was not required.", retryAt: null, reservationId: null, matched: [] };
+  const body = {
+    decision: decision.allowed ? "allow" : "deny",
+    allow: decision.allowed,
+    reason: decision.reason,
+    retryAt: decision.retryAt,
+    ...(decision.allowed ? {} : { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } }),
+  };
+  process.stdout.write(JSON.stringify(body));
+  return 0;
+}
+
+function budgetScope(provider: string | undefined, model: string | undefined, source: string | undefined): BudgetScope | null {
+  if (model) {
+    const slash = model.indexOf("/");
+    if (slash <= 0 || slash === model.length - 1) return null;
+    return { kind: "model", provider: model.slice(0, slash), model: model.slice(slash + 1) };
+  }
+  if (provider?.trim()) return { kind: "provider", provider };
+  if (source === "claude" || source === "codex" || source === "opencode") return { kind: "source", source };
+  return null;
+}
+
+function budgetSources(app: App) {
+  return (Object.keys(PROVIDERS) as Source[]).map((source) => {
+    const adapter = app.sources.find((candidate) => candidate.name === source);
+    return { source, label: PROVIDERS[source].label, installed: Boolean(adapter && existsSync(adapter.root())), models: [] };
+  });
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && value.trim() && Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
 /** A redrawn `Scanning 3,412 / 7,700 files (44%)` line on a terminal's stderr. Nothing otherwise. */

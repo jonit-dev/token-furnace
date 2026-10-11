@@ -28,3 +28,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run smoke
+      # Native qualification needs dedicated authenticated homes and must never use a CI user's session.
+      - name: Native budget qualification (dedicated runner only)
+        if: ${{ vars.TOKEN_FURNACE_NATIVE_QUALIFY == '1' }}
+        run: npm run qualify:budgets -- --sources claude,codex,opencode

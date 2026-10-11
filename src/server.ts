@@ -4,16 +4,21 @@
  */
 
 import type { Server } from "node:http";
+import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import "reflect-metadata";
 import express, { type Request, type Response } from "express";
-import { Controller, Get, Post, Middleware, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
+import { Controller, Get, Post, Middleware, Param, Req, Res, useExpressServer, type ExpressMiddlewareInterface } from "routing-controllers";
 import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
+import { PROVIDERS } from "./core/providers";
+import type { BudgetScope } from "./core/budgets";
+import type { StopTargetOutcome } from "./services/budget-service";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
-import { pendingRepairs, runFixConfig } from "./setup/agents";
+import { installBudgetAdapters, pendingRepairs, runFixConfig } from "./setup/agents";
 import { openCodeWeek, planWeek } from "./services/usage-client";
 import { resetsSnapshot } from "./services/resets-client";
 import {
@@ -53,7 +58,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
   web.disable("x-powered-by");
   web.use(express.json({ limit: "16kb" }));
   useExpressServer(web, {
-    controllers: [reportController(app, options, loadPage())],
+    controllers: [reportController(app, options, loadPage(), randomBytes(24).toString("base64url"))],
     middlewares: [LoopbackHostOnly],
     defaultErrorHandler: true,
     classTransformer: false,
@@ -79,7 +84,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     port,
     close: () => new Promise((done) => {
       clearInterval(timer);
-      http.close(() => done());
+      http.close(() => { app.budgets.close(); done(); });
     }),
   };
 }
@@ -142,7 +147,7 @@ function sameOrigin(req: Request): boolean {
 }
 
 /** The routes, closed over the app they serve. The catch-all page is declared last. */
-function reportController(app: App, options: ServeOptions, page: string) {
+function reportController(app: App, options: ServeOptions, page: string, mutationToken: string) {
   // The last quota reading this server saw. It lives in memory, so a no-cache server still shows
   // real utilization without a disk write, and it expires when its week resets.
   let quota: Week | null = null;
@@ -182,6 +187,110 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   @Controller()
   class ReportController {
+    @Get("/api/budgets")
+    async budgets(@Res() res: Response) {
+      await refreshBudgetMeters(app, options.planUsage);
+      return res.set("Cache-Control", "no-store").json({
+        ...app.budgets.snapshot(budgetSources(app)),
+        mutationToken,
+      });
+    }
+
+    @Post("/api/budgets")
+    saveBudgets(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      const expectedRevision = req.body?.expectedRevision;
+      const policies = req.body?.policies;
+      if (!Number.isInteger(expectedRevision) || !Array.isArray(policies)) {
+        return res.status(400).json({ error: "Expected a revision and a policy list." });
+      }
+      try {
+        return res.json(app.budgets.savePolicies(policies, expectedRevision));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return res.status(/revision|stale/i.test(message) ? 409 : 400).json({ error: message });
+      }
+    }
+
+    @Post("/api/budgets/enable")
+    enableBudgets(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      if (req.body?.confirm !== true) return res.status(400).json({ error: "Enable enforcement requires explicit confirmation." });
+      let output = "";
+      const code = installBudgetAdapters(app.env, { apply: true }, { write: (text) => { output += text; } });
+      return res.status(code === 0 ? 200 : 500).json({ ok: code === 0, output });
+    }
+
+    @Post("/api/budgets/stop-preview")
+    stopPreview(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      try {
+        const scope = stopScope(req.body?.scope);
+        const targets = app.control.discover(scope);
+        return res.json({
+          ...app.budgets.previewStop(scope, targets.map((target) => target.id)),
+          targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, model: target.model })),
+          unverified: [],
+          collateral: [],
+        });
+      } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    @Post("/api/budgets/stop")
+    async stop(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      const preview = app.budgets.preview(req.body?.previewId);
+      if (!preview || preview.fingerprint !== req.body?.fingerprint) return res.status(409).json({ error: "Stop preview is stale or already used." });
+      if (req.body?.force && req.body?.forceConfirm !== true) return res.status(400).json({ error: "Force stop requires a fresh explicit confirmation." });
+      const currentTargetIds = app.control.discover(preview.scope).map((target) => target.id).sort();
+      if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds)) {
+        return res.status(409).json({ error: "Stop preview targets changed; preview again." });
+      }
+      const initial: StopTargetOutcome[] = preview.targetIds.map((targetId) => ({ targetId, status: "requested" }));
+      try {
+        const operation = app.budgets.commitStop(preview.id, preview.fingerprint, initial);
+        let outcomes: StopTargetOutcome[];
+        try {
+          outcomes = await app.control.stop(preview.scope, Boolean(req.body?.force));
+        } catch (error) {
+          outcomes = preview.targetIds.map((targetId) => ({
+            targetId,
+            status: "failed",
+            detail: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        const updated = app.budgets.updateOperation(operation.id, outcomes) ?? operation;
+        return res.json(updated);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return res.status(/stale|expired|used/i.test(message) ? 409 : 400).json({ error: message });
+      }
+    }
+
+    @Get("/api/budgets/operations/:id")
+    operation(@Param("id") id: string, @Res() res: Response) {
+      const operation = app.budgets.operation(id);
+      return operation ? res.set("Cache-Control", "no-store").json(operation) : res.status(404).json({ error: "Operation not found." });
+    }
+
+    @Post("/api/budgets/unlock")
+    unlock(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      try {
+        app.budgets.unlock(stopScope(req.body?.scope));
+        return res.json({ ok: true });
+      } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     @Get("/api/fix-config")
     pendingFixes(@Res() res: Response) {
       const live = app.reports.live("all"); // repairs for agents that are not installed are not offered
@@ -279,6 +388,51 @@ function reportController(app: App, options: ServeOptions, page: string) {
     }
   }
   return ReportController;
+}
+
+function budgetSources(app: App) {
+  const models = new Map<Source, Set<string>>();
+  for (const session of app.repo.all()) {
+    const sourceModels = models.get(session.source) ?? new Set<string>();
+    for (const turn of session.turns) if (turn.model.trim()) sourceModels.add(turn.model.trim());
+    models.set(session.source, sourceModels);
+  }
+  return (Object.keys(PROVIDERS) as Source[]).map((source) => {
+    const adapter = app.sources.find((candidate) => candidate.name === source);
+    return { source, label: PROVIDERS[source].label, installed: Boolean(adapter && existsSync(adapter.root())), models: [...(models.get(source) ?? [])].sort() };
+  });
+}
+
+async function refreshBudgetMeters(app: App, network: boolean): Promise<void> {
+  const now = app.now();
+  const [plan, open] = await Promise.all([
+    planWeek(app.env, now, network),
+    openCodeWeek(app.env, now, network),
+  ]);
+  const codex = app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
+  const meters = [
+    plan ? { id: "anthropic:weekly", source: "claude" as const, provider: "anthropic", account: null, usedPercentagePoints: plan.used, resetAt: plan.resets, observedAt: now, authoritative: true } : null,
+    codex ? { id: "openai:weekly", source: "codex" as const, provider: "openai", account: null, usedPercentagePoints: codex.used, resetAt: codex.resets, observedAt: now, authoritative: true } : null,
+    open ? { id: "opencode-go:weekly", source: "opencode" as const, provider: "opencode-go", account: null, usedPercentagePoints: open.used, resetAt: open.resets, observedAt: now, authoritative: true } : null,
+  ].filter((meter): meter is NonNullable<typeof meter> => meter !== null);
+  if (meters.length) app.budgets.setMeters(meters);
+}
+
+function budgetWriteError(req: Request, mutationToken: string): { status: number; message: string } | null {
+  if (!sameOrigin(req)) return { status: 403, message: "Save from this dashboard." };
+  if (req.headers["x-token-furnace-mutation"] !== mutationToken) return { status: 403, message: "Missing or invalid mutation token." };
+  const contentType = String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") return { status: 415, message: "Budget writes require application/json." };
+  return null;
+}
+
+function stopScope(value: unknown): BudgetScope {
+  if (!value || typeof value !== "object") throw new Error("Stop scope is required.");
+  const scope = value as Record<string, unknown>;
+  if (scope.kind === "source" && (scope.source === "claude" || scope.source === "codex" || scope.source === "opencode")) return { kind: "source", source: scope.source };
+  if (scope.kind === "provider" && typeof scope.provider === "string" && scope.provider.trim()) return { kind: "provider", provider: scope.provider };
+  if (scope.kind === "model" && typeof scope.provider === "string" && typeof scope.model === "string" && scope.provider.trim() && scope.model.trim()) return { kind: "model", provider: scope.provider, model: scope.model };
+  throw new Error("Stop scope is unsupported.");
 }
 
 /** Start or join the scan without waiting. A failed scan is logged, not an unhandled rejection. */
