@@ -99,6 +99,7 @@ export function reportView(report: RawReport, now: Date): Report {
       ratePct: week ? week.rate_pct : null,
       idealPct: week ? week.ideal_pct : null,
       start: week ? iso(week.start) : null,
+      pending: burn.pending ? { used: burn.pending.used, resets: iso(burn.pending.resets) } : null,
       weekBurndown: week ? week.burndown.map(([t, a, b]) => [iso(t), a, b] as [string, number, number]) : null,
       projection: week
         ? {

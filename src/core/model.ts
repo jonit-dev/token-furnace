@@ -189,7 +189,18 @@ export interface SessionRow {
   flags: string[];
 }
 
+export interface SessionAgent {
+  id: string;
+  parentId: string | null;
+  name?: string;
+  role: "parent" | "subagent" | "unknown";
+  model: string | null;
+  lastSeen: string | null;
+  active: boolean;
+}
+
 export interface ActiveSession {
+  agents?: { members: SessionAgent[]; activeCount: number; complete: boolean };
   source: Source;
   project: string;
   id: string;
@@ -237,6 +248,8 @@ export interface RawBurn {
   rate: number;
   total: number;
   week: RawWeek | null;
+  /** The plan reported a week below 1% used: too little to calibrate the plan limit. */
+  pending?: { used: number; resets: Date };
 }
 
 export interface RawPerSource {
@@ -383,4 +396,5 @@ export interface Burn {
   start: string | null;
   weekBurndown: [string, number, number][] | null;
   projection: { ratePct: number; hoursToEmpty: number | null; runsOut: string | null } | null;
+  pending?: { used: number; resets: string } | null;
 }

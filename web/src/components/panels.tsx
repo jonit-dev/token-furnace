@@ -142,12 +142,12 @@ function SessionTable({
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onOpen(s); }}
                     aria-label={`${n ? `${n} ${n === 1 ? "fix" : "fixes"}` : "Details"} for ${title}`}
+                    title="View session and agents"
                     className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
                       n ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-chip text-muted"
-                    } hover:border-accent`}
+                    } hover:border-accent focus-visible:outline focus-visible:outline-accent`}
                   >
-                    {n ? <Icon name="TriangleAlert" size={11} /> : null}
-                    {n ? n : "View"}
+                    {n ? <><Icon name="TriangleAlert" size={11} />{n}</> : <Icon name="Eye" size={14} />}
                   </button>
                 </td>
               </tr>
@@ -243,6 +243,24 @@ function SessionModal({
     >
       {s ? (
         <div className="space-y-4 text-xs">
+          <section aria-label="Recorded agents" className="space-y-2">
+            <h3 className="text-[10px] uppercase tracking-wide text-muted">Agents{s.agents ? ` (${s.agents.members.length} recorded · ${s.agents.activeCount} recently active)` : ""}</h3>
+            <p className="text-muted">Activity means recorded assistant usage within 30 minutes, not running processes. Models are the last recorded model for each agent.</p>
+            {!s.agents || !s.agents.complete ? <p className="text-muted">Agent relationships are partially unavailable. Counts include only detected agents.</p> : null}
+            {s.agents ? <ul className="space-y-2">
+              {s.agents.members.map(agent => <li key={agent.id} className="rounded-lg border border-line p-2.5 space-y-1">
+                <div className="flex flex-wrap justify-between gap-2">
+                  <strong>{agent.role === "parent" ? "Parent session" : agent.role === "subagent" ? "Subagent" : "Relationship unknown"}{agent.name ? ` · ${agent.name}` : ""}</strong>
+                  <span className={agent.active ? "text-accent" : "text-muted"}>{agent.active ? "Active within 30 min" : "No recent recorded usage"}</span>
+                </div>
+                <div>{agent.model || "Model unknown"}</div>
+                <div className="break-all text-muted">ID: {agent.id}</div>
+                {agent.parentId ? <div className="break-all text-muted">Parent: {agent.parentId}</div> : null}
+                {agent.lastSeen ? <div className="text-muted">Last usage: {dayTime(toDate(agent.lastSeen))}</div> : null}
+              </li>)}
+            </ul> : null}
+            <p className="text-muted">Only available local transcripts are included. Codex descendants follow the selected date range. Deleted transcripts may be missing.</p>
+          </section>
           <SessionNameEditor key={sessionKey(s)} session={s} onCancel={onClose} />
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
             {stats.map(([k, v]) => (
@@ -363,6 +381,9 @@ export function ActiveAgents({ r }: { r: Partial<Report> }) {
   </Card>;
 }
 
+// Chart height inside a KPI tile: shorter in the one-column phone rows.
+const TILE_SPARK = "h-7 sm:h-9";
+
 export function KpiStrip({
   r,
   burn,
@@ -395,7 +416,6 @@ export function KpiStrip({
         <p>Ideal pace spreads the remaining budget over the time until reset. Above that pace, you are spending faster than the remaining budget can sustain.</p>
         <p>The line shows recent hourly spend. The dashed line marks the ideal pace. Weighted tokens adjust usage for model cost, caching, and generated output; they are an estimate of relative cost.</p>
       </>}
-      icon="Flame"
       value={
         inPct ? (
           <>
@@ -410,7 +430,7 @@ export function KpiStrip({
       tip={goal ? `${(rate / goal).toFixed(1)}× the ideal pace of ${unit(goal)} · ${fmt(rate)} tokens/h` : "no ideal pace yet"}
       state={goal ? (overBurn ? "over" : "ok") : null}
     >
-      <Spark values={inPct ? hourly.map((v) => (100 * v) / pctLimit) : hourly} target={inPct ? idealPct : goal || null} over={overBurn} />
+      <Spark values={inPct ? hourly.map((v) => (100 * v) / pctLimit) : hourly} target={inPct ? idealPct : goal || null} over={overBurn} className={TILE_SPARK} />
     </Tile>,
   );
   if (used != null && left != null) {
@@ -438,7 +458,6 @@ export function KpiStrip({
           <p>The percentage of the selected provider’s weekly quota already used, from its latest subscription reading or local usage estimate.</p>
           <p>The smaller number shows the estimated percentage-point increase over the named period. The bar shows quota used; the marker shows how far through the week you are. Spending ahead of that marker means you are ahead of an even weekly pace.</p>
         </>}
-        icon="CalendarDays"
         value={Math.round(used) + "%"}
         line={(key ? gain(key)?.replace(/ \(.*/, "") : null) ?? "no recent spend"}
         tip={(gains.join(" · ") || "no recent spend") + ` · even pace ${Math.round(elapsed)}% of the week gone`}
@@ -458,7 +477,6 @@ export function KpiStrip({
           <p>“Never” means this forecast lasts until the next reset. It is a pace estimate: changing your usage changes the prediction.</p>
           <p>The upper bar compares time until the quota runs out with the lower bar’s time until reset. Red means the quota is expected to run out before reset.</p>
         </>}
-        icon="Clock"
         value={crit ? hoursLabel(dry) : "never"}
         line={crit && empty ? "~" + dayTime(empty) : "no run-out"}
         tip={`At the last-24 h pace: ${crit && empty ? "empty ~" + dayTime(empty) : "budget lasts the week"} · reset in ${hoursLabel(left)}${reset ? " · " + dayTime(reset) : ""}`}
@@ -472,7 +490,7 @@ export function KpiStrip({
     );
   } else {
     tiles.push(
-      <Tile key="week" label="Weekly limit" icon="CalendarDays" value="—" line="no subscription reading yet" state={null}
+      <Tile key="week" label="Weekly limit" value="—" line="no subscription reading yet" state={null}
         help={<p>This card shows the percentage of the selected provider’s weekly quota already used. There is no subscription reading yet, so usage against the weekly limit is unknown. A dash means unavailable data.</p>} />,
     );
   }
@@ -490,7 +508,6 @@ export function KpiStrip({
           <p>The whole turn’s spend counts toward this percentage, including output; it does not count only the input beyond the target. Weighted tokens adjust usage for model cost and caching. The smaller {fmt(total)} number is total weighted spend over {days} days.</p>
           <p>The line shows the above-target spend share for each of the last 24 recorded hourly buckets. The dashed line marks the {max}% goal. Lower is better: compact a long conversation or start a fresh session when its accumulated context is no longer useful.</p>
         </>}
-        icon="TrendingUp"
         value={Math.round(over) + "%"}
         line={fmt(total) + " · " + days + " d"}
         tip={tip}
@@ -500,6 +517,7 @@ export function KpiStrip({
           values={rows.slice(-24).map((t) => (100 * (t[2] ?? 0)) / (((t[1] ?? 0) + (t[2] ?? 0)) || 1))}
           target={max}
           over={over > max}
+          className={TILE_SPARK}
         />
       </Tile>
     );
@@ -542,13 +560,12 @@ export function KpiStrip({
             : `The goal is at most ${kpiFmt(k, k.target)}. ${k.name === "Caller reads per tool call" ? "Delegate bounded file-reading tasks when their results can be summarized, to reduce context accumulated by the main agent." : "Compact long conversations or start fresh sessions to reduce large-context turns."}`}</p>
           <p>The line shows successive recorded three-hour blocks; gaps without recorded activity are omitted. The dashed line marks the target. Lower is better. A red dot means the latest value exceeds the target.</p>
         </>}
-        icon="Activity"
         tip={k.name + " · latest 3 h block" + (k.target != null ? " · target " + kpiFmt(k, k.target) : "")}
         value={last == null ? "—" : kpiFmt(k, last)}
         line={k.target != null ? "target " + kpiFmt(k, k.target) : ""}
         state={k.target == null || last == null ? null : isOver ? "over" : "ok"}
       >
-        <Spark values={vals} target={k.target ?? null} over={isOver} />
+        <Spark values={vals} target={k.target ?? null} over={isOver} className={TILE_SPARK} />
       </Tile>,
     );
   }
@@ -567,7 +584,7 @@ export function KpiStrip({
       ),
     );
   }
-  return <div className="grid items-start gap-3 grid-cols-2 sm:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">{tiles}</div>;
+  return <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">{tiles}</div>;
 }
 
 export function Dashboard({

@@ -169,13 +169,13 @@ export function Spark({
 // A missed target is red, a met target is green.
 const DOT: Record<string, string> = { crit: "bg-hot", over: "bg-hot", ok: "bg-ok" };
 
-export function MetricInfo({ label, children }: { label: ReactNode; children: ReactNode }) {
+export function MetricInfo({ label, children, warn }: { label: ReactNode; children: ReactNode; warn?: boolean }) {
   const [open, setOpen] = useState(false);
   return <>
     <button type="button" aria-label={`About ${String(label)}`} aria-haspopup="dialog"
       onClick={() => setOpen(true)} title={`Explain ${String(label)}`}
-      className="flex size-6 items-center justify-center rounded text-muted hover:bg-chip hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
-      <Icon name="Info" size={12} />
+      className={`flex size-6 items-center justify-center rounded hover:bg-chip focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${warn ? "text-accent" : "text-muted hover:text-ink"}`}>
+      <Icon name={warn ? "TriangleAlert" : "Info"} size={12} />
     </button>
     {open && <Modal open onClose={() => setOpen(false)} title={label}
       footer={<button type="button" onClick={() => setOpen(false)} className="rounded-lg border border-line bg-chip px-4 py-2 text-sm hover:border-accent">Got it</button>}>
@@ -184,13 +184,15 @@ export function MetricInfo({ label, children }: { label: ReactNode; children: Re
   </>;
 }
 
+// Title row (full width, so a title wraps only when the card is narrow), then value and chart side by side.
+// The value block has a fixed minimum width so the charts start at the same x in every card of a row.
+// Phones show the subtitle beside the value to keep the one-column rows short.
 export function Tile({
   label,
   value,
   line,
   tip,
   state,
-  icon,
   children,
   help,
 }: {
@@ -199,31 +201,31 @@ export function Tile({
   line?: ReactNode;
   tip?: string | null;
   state?: "crit" | "over" | "ok" | null;
-  icon?: string;
   children?: ReactNode;
   help: ReactNode;
 }) {
   return (
-    <div className="card px-3 py-3 flex flex-col gap-1 min-w-0 h-full" title={tip || String(label)}>
-      <div className="relative flex items-start gap-1.5 min-w-0 min-h-10 pr-5">
-        {icon ? <Icon name={icon} size={13} className="text-accent shrink-0 mt-0.5" /> : null}
-        {state ? <span className={`size-1.5 shrink-0 rounded-full mt-1 ${DOT[state]}`} /> : null}
-        <span className="text-xs leading-4 font-medium text-ink/80" title={String(label)}>
+    <div className="card flex min-w-0 flex-col gap-1 px-3 py-2.5" title={tip || String(label)}>
+      <div className="flex items-start gap-1.5">
+        {state ? <span className={`mt-[5px] size-1.5 shrink-0 rounded-full ${DOT[state]}`} /> : null}
+        <span className="min-w-0 flex-1 text-balance text-xs font-medium leading-4 text-ink/80" title={String(label)}>
           {label}
         </span>
-        <div className="absolute -right-1 -top-1"><MetricInfo label={label}>{help}</MetricInfo></div>
+        <div className="-my-1 -mr-1.5 shrink-0"><MetricInfo label={label}>{help}</MetricInfo></div>
       </div>
-      <div className="flex flex-col min-w-0">
-        <span className={`text-lg leading-6 font-semibold shrink-0 ${state === "crit" ? "text-hot" : ""}`}>
-          {value}
-        </span>
-        {line ? (
-          <span className="text-[11px] leading-4 text-muted" title={String(line)}>
-            {line}
+      <div className="mt-auto flex items-start gap-3">
+        <div className="flex min-h-7 min-w-40 shrink-0 flex-wrap items-baseline gap-x-2 sm:block sm:min-h-11 sm:min-w-24">
+          <span className={`block text-xl font-semibold leading-7 ${state === "crit" ? "text-hot" : ""}`}>
+            {value}
           </span>
-        ) : null}
+          {line ? (
+            <span className="block text-[11px] leading-4 text-muted" title={String(line)}>
+              {line}
+            </span>
+          ) : null}
+        </div>
+        {children ? <div className="min-w-0 flex-1 self-center">{children}</div> : null}
       </div>
-      <div className="mt-auto pt-1 min-h-6 flex flex-col justify-end">{children}</div>
     </div>
   );
 }

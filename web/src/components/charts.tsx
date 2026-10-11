@@ -1,13 +1,23 @@
 import { CONTEXT_TARGET, CONTEXT_TARGET_LABEL } from "../../../src/core/context";
 import type { Burn, Report, Source } from "../../../src/core/model";
 import { clock, dayLabel, fmt, quota, sourceLabel, toDate } from "./format";
-import { useSize } from "./ui";
+import { MetricInfo, useSize } from "./ui";
 
 const WEEK_MS = 7 * 24 * 3600e3;
 
 // Burn gauge. The dial runs from 0 to max(2x goal, 1.25x rate). Green up to the goal, coral past it.
 const GAUGE_TIP =
   "Quota points per hour, calibrated each time the weekly reading refreshes (every 5 min while the status line runs).";
+
+function NewQuotaWarning({ used, resets }: { used: number; resets: string }) {
+  return (
+    <MetricInfo warn label="Why there is no quota reading">
+      <p>Your Claude plan reports the weekly quota as {used}% used. The week resets {dayLabel(toDate(resets))}.</p>
+      <p>Token Furnace learns the size of your plan by dividing the tokens you spent this week by the percentage used. The plan reports whole percentages. At 0% the division has no answer, so the size is unknown.</p>
+      <p>The gauge shows tokens per hour against your 7-day average until the plan reports 1% or more. This usually happens within a few hours of normal use. No action is needed.</p>
+    </MetricInfo>
+  );
+}
 
 export function Gauge({ burn }: { burn?: Burn }) {
   if (!burn?.goal) {
@@ -76,7 +86,10 @@ export function Gauge({ burn }: { burn?: Burn }) {
       <div className="text-center">
         <div className="text-3xl font-semibold leading-8">{pctMode ? quota(rate) : fmt(rate) + "/h"}</div>
         <div className="text-xs text-muted">ideal {pctMode ? quota(goal) : fmt(goal) + "/h"}</div>
-        <div className="text-[11px] text-muted">{pctMode ? fmt(burn.rate) + " tokens/h" : "no quota reading"}</div>
+        <div className="text-[11px] text-muted">
+          {pctMode ? fmt(burn.rate) + " tokens/h" : "no quota reading"}
+          {burn.pending ? <span className="ml-1 inline-block align-middle"><NewQuotaWarning used={burn.pending.used} resets={burn.pending.resets} /></span> : null}
+        </div>
         <div
           className={`mt-2 text-xs font-medium px-2.5 py-1 rounded-full inline-block ${
             over ? "bg-accent/10 text-accent" : "bg-ok/10 text-ok"

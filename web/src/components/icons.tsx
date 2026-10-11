@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 // The legacy page drew these from the Lucide UMD bundle. Inlined here (lucide-static v0.460.0
 // paths) so the built page carries no CDN script and adds no dependency.
 const ICONS: Record<string, ReactNode> = {
+  Eye: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
   Info: <><circle cx="12" cy="12" r="10" /><path d="M12 11v6" /><path d="M12 7h.01" /></>,
   Pencil: <><path d="m16 3 5 5-13 13H3v-5L16 3z" /><path d="m14 5 5 5" /></>,
   Flame: (

@@ -235,7 +235,7 @@ describe("CodexSource integration", () => {
     expect(parsed.turns[0].tools).toEqual(["shell"]);
     expect(parsed.turns[0].reads).toBe(1);
     expect(parsed.turns[0].project).toBe("api");
-    expect(parsed.turns[0].session).toBe("0a1b2c3d");
+    expect(parsed.turns[0].session).toBe("0a1b2c3d4e5f");
     expect(parsed.turns[0].model).toBe("gpt-5.5");
     expect(parsed.turns[0].baseIn).toBe(600);
     expect(parsed.turns[0].output).toBe(200);

@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Burn } from "../../src/core/model";
-import { WeeklyQuota } from "./components/charts";
+import { Gauge, WeeklyQuota } from "./components/charts";
 import { Dashboard } from "./components/panels";
 
 const hour = 3600000;
@@ -20,6 +20,8 @@ beforeEach(() => {
     observe() { this.cb([{ contentRect: { width: 600, height: 200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); }
     disconnect() {}
   });
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -73,4 +75,10 @@ it("draws OpenCode alongside Claude and Codex with a distinct quota color", () =
   const { container } = render(<WeeklyQuota burns={{ claude: burn(), codex: burn(), opencode: burn(24, 63) }} />);
   expect(container.querySelectorAll("g[data-provider]")).toHaveLength(3);
   expect(container.querySelector('[data-provider="opencode"] [data-series="used"]')?.getAttribute("stroke")).toBe("#a78bfa");
+});
+
+it("explains a new quota that reads under 1% behind a warning button", () => {
+  render(<Gauge burn={{ ...burn(), ratePct: null, idealPct: null, pending: { used: 0, resets: iso(168) } }} />);
+  fireEvent.click(screen.getByRole("button", { name: /Why there is no quota reading/ }));
+  expect(screen.getByText(/reports the weekly quota as 0% used/)).toBeTruthy();
 });

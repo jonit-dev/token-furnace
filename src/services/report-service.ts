@@ -3,6 +3,7 @@ import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
 import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week } from "../core/model";
 import type { SessionRepository } from "../repo/session-repo";
+import { SessionAgents } from "./session-agents";
 import { ParsePool } from "./parse-pool";
 import type { AgentSource, Env } from "../sources/agent-source";
 
@@ -22,6 +23,7 @@ export interface ReportOptions {
  * and report_view, split at the I/O boundary.
  */
 export class ReportService {
+  private readonly sessionAgents = new SessionAgents();
   constructor(
     private readonly sources: AgentSource[],
     private readonly repo: SessionRepository,
@@ -156,7 +158,7 @@ export class ReportService {
       return title ? { ...s, title } : s;
     });
 
-    return buildReport({
+    const report = buildReport({
       now,
       days,
       weeklyBudget: opts.weeklyBudget,
@@ -168,6 +170,8 @@ export class ReportService {
       opencodeWeek: opts.opencodeWeek ?? null,
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
     });
+    if (report) this.sessionAgents.enrich(report.active, sessions, this.sources, now);
+    return report;
   }
 
   /** The Report JSON: /api/report, --json and the inlined --html page all read this. */
@@ -196,9 +200,8 @@ const UUID_ONLY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 /**
- * The full session UUID for a native index lookup. The parser keeps a short eight-character id in
- * turns, so the full id comes from the rollout filename; a turn id is used only when it is already
- * a full UUID. A short prefix never matches.
+ * The full session UUID for a native index lookup. Older cache entries may contain a short ID,
+ * so the rollout filename remains a fallback. A short prefix never matches.
  */
 function fullSessionId(session: SessionInput): string | null {
   const turn = session.turns[0]?.session ?? "";

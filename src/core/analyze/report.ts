@@ -455,6 +455,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       };
       burn.week = rawWeek;
     }
+    else if (week) burn.pending = { used: week.used, resets: week.resets };
     report.burns[src] = burn;
   }
   return report;

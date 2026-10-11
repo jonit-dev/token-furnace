@@ -53,7 +53,10 @@ export function burnGoal(report: RawReport, source: Source): [number, string] {
   }
   return [
     burn.total / (report.days * 24),
-    `your ${report.days}-day average; the subscription usage was unavailable`,
+    `your ${report.days}-day average; ` +
+      (burn.pending
+        ? "the weekly quota is new and reads under 1%"
+        : "the subscription usage was unavailable"),
   ];
 }
 

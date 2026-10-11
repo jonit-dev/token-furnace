@@ -103,7 +103,7 @@ export class CodexSource implements AgentSource {
 
       if (kind === "session_meta") {
         project = basename(String(payload.cwd || "").replace(/\/+$/, "")) || project;
-        session = String(payload.id || session).slice(0, 8);
+        session = String(payload.id || session);
         continue;
       }
       if (kind === "turn_context") {

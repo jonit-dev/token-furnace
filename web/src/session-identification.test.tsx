@@ -19,6 +19,34 @@ describe("ActiveSessions and Sessions UI improvements", () => {
     cleanup();
   });
 
+  it("opens the eye button with agent counts, full models and parent/subagent details", () => {
+    const session: ActiveSession = {
+      source: "codex", project: "demo", id: "parent", title: "Inspect agents", share: 1,
+      turns: 1, peak: 1000, hours: 0.1, context: 1000, idle: 0, flags: [],
+      model: "gpt-6.1-sol", rate: 1000, rateShare: 1,
+      agents: { activeCount: 2, complete: true, members: [
+        { id: "parent", parentId: null, role: "parent", model: "gpt-6.1-sol", lastSeen: null, active: true },
+        { id: "child", parentId: "parent", role: "subagent", name: "Worker", model: "gpt-6-luna", lastSeen: null, active: true },
+        { id: "old", parentId: "parent", role: "subagent", model: null, lastSeen: null, active: false },
+      ] },
+    };
+    const { rerender } = render(<ActiveSessions sessions={[session]} />);
+    const eye = screen.getByRole("button", { name: "Details for Inspect agents" });
+    expect(eye.querySelector("svg")).toBeTruthy();
+    expect(eye.textContent).not.toContain("View");
+    fireEvent.click(eye);
+    expect(screen.getByText("Agents (3 recorded · 2 recently active)")).toBeTruthy();
+    const agents = within(screen.getByRole("region", { name: "Recorded agents" }));
+    expect(agents.getByText("Parent session")).toBeTruthy();
+    expect(agents.getByText("Subagent · Worker")).toBeTruthy();
+    expect(agents.getByText("gpt-6.1-sol")).toBeTruthy();
+    expect(agents.getByText("gpt-6-luna")).toBeTruthy();
+    expect(agents.getByText("Model unknown")).toBeTruthy();
+    expect(agents.getByText("No recent recorded usage")).toBeTruthy();
+    rerender(<ActiveSessions sessions={[{ ...session, agents: undefined }]} />);
+    expect(screen.getByText(/Agent relationships are partially unavailable/)).toBeTruthy();
+  });
+
   it("groups active sessions into Needs attention and Other active sessions", () => {
     const sessions: ActiveSession[] = [
       {

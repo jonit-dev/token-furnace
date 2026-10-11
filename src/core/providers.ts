@@ -20,7 +20,7 @@ export const PROVIDERS = {
     label: "Codex",
     rules: "AGENTS.md",
     cacheWrites: false,
-    parserVersion: 4,
+    parserVersion: 5,
     compaction: `model_auto_compact_token_limit = ${CONTEXT_TARGET.codex} in ~/.codex/config.toml`,
   },
 } as const;

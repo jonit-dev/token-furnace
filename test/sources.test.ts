@@ -50,7 +50,7 @@ const CODEX_TURNS = [
   {
     source: "codex",
     project: "api",
-    session: "0a1b2c3d",
+    session: "0a1b2c3d4e5f67890abc",
     model: "gpt-5.5",
     when: "2026-10-01T09:00:30.000Z",
     baseIn: 600,
@@ -64,7 +64,7 @@ const CODEX_TURNS = [
   {
     source: "codex",
     project: "api",
-    session: "0a1b2c3d",
+    session: "0a1b2c3d4e5f67890abc",
     model: "gpt-5.5",
     when: "2026-10-01T09:00:45.000Z",
     baseIn: 400,

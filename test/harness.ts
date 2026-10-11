@@ -15,6 +15,7 @@ import type {
   Source,
   Week,
 } from "../src/core/model";
+import { SessionAgents } from "../src/services/session-agents";
 import { ClaudeSource } from "../src/sources/claude";
 import { CodexSource } from "../src/sources/codex";
 
@@ -139,7 +140,9 @@ export function tsReport(
   budget: number | null,
   source: string,
 ): Report | null {
-  const raw = buildReport(reportInput(env, now, days, budget, source));
+  const input = reportInput(env, now, days, budget, source);
+  const raw = buildReport(input);
+  if (raw) new SessionAgents().enrich(raw.active, input.sessions, [new ClaudeSource(env), new CodexSource(env)], now);
   return raw ? reportView(raw, now) : null;
 }
 
