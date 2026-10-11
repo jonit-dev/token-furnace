@@ -1,13 +1,14 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentControl, parsePsProcesses, type ControlTarget, type ProcessIdentity } from "../src/services/agent-control";
 
 const testStoreRoot = mkdtempSync(join(tmpdir(), "tf-control-tests-"));
+const TEST_EXECUTABLE = "/usr/bin/token-furnace-test-agent";
 let testStoreNumber = 0;
 const controls: AgentControl[] = [];
 afterAll(() => rmSync(testStoreRoot, { recursive: true, force: true }));
@@ -37,6 +38,7 @@ function target(overrides: Partial<ControlTarget> = {}): ControlTarget {
     pid: 4321,
     processStartTime: 10,
     ownerUid: 7,
+    executable: TEST_EXECUTABLE,
     ...overrides,
   };
 }
@@ -64,7 +66,7 @@ function emitWindowsStopTiming(timing: WindowsStopTiming): void {
 
 describe("AgentControl", () => {
   it("does not spawn a POSIX owner-SID lookup while constructing the controller", () => {
-    const inspect = vi.fn(() => ({ pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }));
+    const inspect = vi.fn(() => ({ pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }));
     const control = makeControl({ inspect, currentUid: 7, currentPid: 9000, storePath: testStore() });
     if (process.platform !== "win32") expect(inspect).not.toHaveBeenCalled();
     control.close();
@@ -72,16 +74,94 @@ describe("AgentControl", () => {
 
   it("does not signal a PID whose start identity changed", async () => {
     const signal = vi.fn();
-    const inspect = vi.fn((): ProcessIdentity => ({ pid: 4321, processStartTime: 11, ownerUid: 7, parentPid: 1 }));
+    const inspect = vi.fn((): ProcessIdentity => ({ pid: 4321, processStartTime: 11, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }));
     const control = makeControl({ inspect, signal, currentUid: 7, storePath: testStore() });
     const outcome = await control.cancel(target(), true);
     expect(outcome.status).toBe("unresolved");
     expect(signal).not.toHaveBeenCalled();
   });
 
+  it("keeps stop unresolved when either executable identity is missing", async () => {
+    for (const [expectedExecutable, observedExecutable] of [[null, TEST_EXECUTABLE], [TEST_EXECUTABLE, null]] as const) {
+      const signal = vi.fn();
+      const control = makeControl({
+        inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: observedExecutable }),
+        currentUid: 7,
+        signal,
+        storePath: testStore(),
+      });
+      const outcome = await control.cancel(target({ executable: expectedExecutable, exclusive: true }), true);
+      expect(outcome.status).toBe("unresolved");
+      expect(outcome.detail).toMatch(/executable identity/i);
+      expect(signal).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not signal a descendant after its image changes in place", async () => {
+    const graph: ProcessIdentity[] = [
+      { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
+      { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
+      { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321, executable: "/usr/bin/token-furnace-tool" },
+    ];
+    const fresh = new Map(graph.map((identity) => [identity.pid, identity]));
+    const signal = vi.fn((pid: number) => {
+      if (pid === 4321) fresh.set(4322, { ...fresh.get(4322)!, executable: "/tmp/replaced-tool" });
+    });
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => fresh.get(pid) ?? null,
+      listProcesses: () => graph,
+      signal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ pid: 4321, exclusive: true }), true);
+    expect(outcome.status).toBe("unresolved");
+    expect(signal.mock.calls.map(([pid]) => pid)).toEqual([4321]);
+  });
+
+  it("rejects deceptive executable suffixes but accepts exact and resolved images", async () => {
+    const deceptive = new Map<number, ProcessIdentity>([
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
+      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: "/tmp/evil/usr/bin/claude" }],
+    ]);
+    const rejectedSignal = vi.fn();
+    const rejected = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => deceptive.get(pid) ?? null,
+      listProcesses: () => [...deceptive.values()],
+      signal: rejectedSignal,
+      storePath: testStore(),
+    });
+    const rejectedOutcome = await rejected.cancel(target({ pid: 4321, executable: "/usr/bin/claude", exclusive: true }), true);
+    expect(rejectedOutcome.status).toBe("unresolved");
+    expect(rejectedSignal).not.toHaveBeenCalled();
+
+    const resolvedExecutable = realpathSync(process.execPath);
+    const exact = new Map<number, ProcessIdentity>([
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: resolvedExecutable }],
+      [4322, { pid: 4322, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: process.execPath }],
+    ]);
+    const acceptedSignal = vi.fn((pid: number) => exact.delete(pid));
+    const accepted = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      inspect: (pid) => exact.get(pid) ?? null,
+      listProcesses: () => [...exact.values()],
+      signal: acceptedSignal,
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const acceptedOutcome = await accepted.cancel(target({ pid: 4322, executable: resolvedExecutable, exclusive: true }), true);
+    expect(acceptedOutcome.status).toBe("terminated");
+    expect(acceptedSignal).toHaveBeenCalledWith(4322, "SIGKILL");
+  });
+
   it("matches canonical provider/model identity without substring aliases", () => {
     const control = makeControl({
-      inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1 }),
+      inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }),
       currentUid: 7,
       signal: vi.fn(),
       storePath: testStore(),
@@ -94,7 +174,7 @@ describe("AgentControl", () => {
   it("refuses Token Furnace itself even when the PID is otherwise owned", async () => {
     const signal = vi.fn();
     const control = makeControl({
-      inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1 }),
+      inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }),
       currentUid: 7,
       signal,
       storePath: testStore(),
@@ -108,9 +188,9 @@ describe("AgentControl", () => {
     const signal = vi.fn();
     const currentPid = 9000;
     const identities = new Map<number, ProcessIdentity>([
-      [currentPid, { pid: currentPid, processStartTime: 3, ownerUid: 7, parentPid: 8000 }],
-      [8000, { pid: 8000, processStartTime: 2, ownerUid: 7, parentPid: 1 }],
-      [7000, { pid: 7000, processStartTime: 4, ownerUid: 7, parentPid: currentPid }],
+      [currentPid, { pid: currentPid, processStartTime: 3, ownerUid: 7, parentPid: 8000, executable: TEST_EXECUTABLE }],
+      [8000, { pid: 8000, processStartTime: 2, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
+      [7000, { pid: 7000, processStartTime: 4, ownerUid: 7, parentPid: currentPid, executable: TEST_EXECUTABLE }],
     ]);
     const control = makeControl({ currentPid, currentUid: 7, signal, graceMs: 0, inspect: (pid) => identities.get(pid) ?? null, storePath: testStore() });
     const ancestor = await control.cancel(target({ id: "ancestor", pid: 8000, processStartTime: 2, exclusive: true }), true);
@@ -123,8 +203,8 @@ describe("AgentControl", () => {
 
   it("treats a successfully absent ancestor as the end of the protection chain", async () => {
     const identities = new Map<number, ProcessIdentity>([
-      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 8000 }],
-      [7000, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: 1 }],
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 8000, executable: TEST_EXECUTABLE }],
+      [7000, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
     ]);
     const signal = vi.fn((pid: number) => identities.delete(pid));
     const control = makeControl({
@@ -142,16 +222,16 @@ describe("AgentControl", () => {
   });
 
   it("keeps an ancestor lookup failure unresolved", async () => {
-    const identity: ProcessIdentity = { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 8000 };
+    const identity: ProcessIdentity = { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 8000, executable: TEST_EXECUTABLE };
     const signal = vi.fn();
     const control = makeControl({
       currentPid: 9000,
       currentUid: 7,
       inspect: (pid) => {
         if (pid === 8000) throw new Error("ancestor query denied");
-        return pid === 9000 ? identity : { pid, processStartTime: 3, ownerUid: 7, parentPid: 1 };
+        return pid === 9000 ? identity : { pid, processStartTime: 3, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE };
       },
-      listProcesses: () => [identity, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: 1 }],
+      listProcesses: () => [identity, { pid: 7000, processStartTime: 3, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
       signal,
       graceMs: 0,
       storePath: testStore(),
@@ -164,9 +244,9 @@ describe("AgentControl", () => {
 
   it("rejects a parent PID reused by a newer process generation", async () => {
     const graph: ProcessIdentity[] = [
-      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000 },
-      { pid: 8000, processStartTime: 20, ownerUid: 7, parentPid: 1 },
-      { pid: 7000, processStartTime: 30, ownerUid: 7, parentPid: 1 },
+      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000, executable: TEST_EXECUTABLE },
+      { pid: 8000, processStartTime: 20, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
+      { pid: 7000, processStartTime: 30, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
     ];
     const signal = vi.fn();
     const byPid = new Map(graph.map((item) => [item.pid, item]));
@@ -187,10 +267,10 @@ describe("AgentControl", () => {
 
   it("uses one metadata graph for ancestry instead of owner queries per parent", async () => {
     const graph: ProcessIdentity[] = [
-      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000 },
-      { pid: 8000, processStartTime: 9, ownerUid: 7, parentPid: 7000 },
-      { pid: 7000, processStartTime: 8, ownerUid: 7, parentPid: 1 },
-      { pid: 4321, processStartTime: 30, ownerUid: 7, parentPid: 1 },
+      { pid: 9000, processStartTime: 10, ownerUid: 7, parentPid: 8000, executable: TEST_EXECUTABLE },
+      { pid: 8000, processStartTime: 9, ownerUid: 7, parentPid: 7000, executable: TEST_EXECUTABLE },
+      { pid: 7000, processStartTime: 8, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
+      { pid: 4321, processStartTime: 30, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
     ];
     const byPid = new Map(graph.map((item) => [item.pid, item]));
     const inspect = vi.fn((pid: number) => byPid.get(pid) ?? null);
@@ -213,7 +293,7 @@ describe("AgentControl", () => {
 
   it("revalidates ownerless descendant metadata before signalling", async () => {
     const graph: ProcessIdentity[] = [
-      { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 },
+      { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
       { pid: 4321, processStartTime: 10, ownerUid: null, parentPid: 1, executable: "C:\\agent.exe" },
       { pid: 4322, processStartTime: 11, ownerUid: null, parentPid: 4321, executable: "C:\\tool.exe" },
     ];
@@ -243,12 +323,12 @@ describe("AgentControl", () => {
       { pid: 4322, processStartTime: 12, ownerUid: 7, parentPid: 4321, executable: "C:\\tool.exe" },
     ]) {
       const graph: ProcessIdentity[] = [
-        { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 },
+        { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE },
         { pid: 4321, processStartTime: 10, ownerUid: null, parentPid: 1, executable: "C:\\agent.exe" },
         { pid: 4322, processStartTime: 11, ownerUid: null, parentPid: 4321, executable: "C:\\tool.exe" },
       ];
       const fresh = new Map<number, ProcessIdentity>([
-        [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
+        [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
         [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: "C:\\agent.exe" }],
         [4322, observedDescendant],
       ]);
@@ -270,7 +350,7 @@ describe("AgentControl", () => {
 
   it("does not report force termination until process exit is observed", async () => {
     const signal = vi.fn();
-    const inspect = () => ({ pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 });
+    const inspect = () => ({ pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE });
     const control = makeControl({ inspect, signal, currentUid: 7, graceMs: 0, storePath: testStore() });
     const outcome = await control.cancel(target({ exclusive: true, nativeState: async () => true }), true);
     expect(outcome.status).toBe("unresolved");
@@ -280,10 +360,10 @@ describe("AgentControl", () => {
   it("does not treat a failed exit lookup as proof that force termination succeeded", async () => {
     const signal = vi.fn(() => { lookupFailed = true; });
     let lookupFailed = false;
-    const identity: ProcessIdentity = { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 };
+    const identity: ProcessIdentity = { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE };
     const inspect = (pid: number) => {
       if (lookupFailed && pid === identity.pid) throw new Error("native process lookup unavailable");
-      if (pid === 9000) return { pid, processStartTime: 1, ownerUid: 7, parentPid: 1 };
+      if (pid === 9000) return { pid, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE };
       return pid === identity.pid ? identity : null;
     };
     const control = makeControl({ inspect, signal, currentUid: 7, currentPid: 9000, graceMs: 0, listProcesses: () => [identity], storePath: testStore() });
@@ -304,10 +384,10 @@ describe("AgentControl", () => {
 
   it("terminates verified owned descendants without widening to an unrelated sibling", async () => {
     const identities = new Map<number, ProcessIdentity>([
-      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
-      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 }],
-      [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321 }],
-      [4333, { pid: 4333, processStartTime: 12, ownerUid: 7, parentPid: 1 }],
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
+      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
+      [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321, executable: TEST_EXECUTABLE }],
+      [4333, { pid: 4333, processStartTime: 12, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
     ]);
     const signal = vi.fn((pid: number) => { identities.delete(pid); });
     const control = makeControl({
@@ -327,9 +407,9 @@ describe("AgentControl", () => {
 
   it("accepts a native tree signal that already removed the verified descendants", async () => {
     const identities = new Map<number, ProcessIdentity>([
-      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
-      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 }],
-      [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321 }],
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
+      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }],
+      [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321, executable: TEST_EXECUTABLE }],
     ]);
     const signal = vi.fn((pid: number) => {
       if (pid === 4321) {
@@ -506,7 +586,7 @@ describe("AgentControl", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-control-"));
     try {
       const statePath = join(root, "control.json");
-      const inspect = (pid: number) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1 });
+      const inspect = (pid: number) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE });
       const first = makeControl({ statePath, inspect, currentUid: 7, currentPid: 9000 });
       expect(first.register(target({ pid: 4321, exclusive: true }))).toBe(true);
       first.close();
@@ -523,7 +603,7 @@ describe("AgentControl", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-control-live-"));
     try {
       const storePath = join(root, "control.sqlite");
-      const inspect = (pid: number) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1 });
+      const inspect = (pid: number) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE });
       const serverStartedFirst = makeControl({ storePath, inspect, currentUid: 7, currentPid: 9000 });
       const hookOne = makeControl({ storePath, inspect, currentUid: 7, currentPid: 9001 });
       const hookTwo = makeControl({ storePath, inspect, currentUid: 7, currentPid: 9002 });
@@ -650,7 +730,7 @@ describe("AgentControl", () => {
     try {
       const control = makeControl({
         statePath: root,
-        inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1 }),
+        inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, parentPid: 1, executable: TEST_EXECUTABLE }),
         currentUid: 7,
         currentPid: 9000,
       });

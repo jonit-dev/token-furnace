@@ -292,8 +292,8 @@ export class AgentControl {
     if (!this.matchesCurrentOwner(identity)) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process owner SID changed." });
     }
-    if (target.executable && identity.executable && !sameExecutable(target.executable, identity.executable)) {
-      return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Executable identity changed." });
+    if (!executableIdentityMatches(target.executable, identity.executable)) {
+      return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Executable identity is unavailable or changed." });
     }
 
     if (!force && target.nativeCancel) {
@@ -429,7 +429,7 @@ export class AgentControl {
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return { ok: false, detail: "Process is not owned by the current user." };
     if (this.currentOwner && identity.ownerIdentity && identity.ownerIdentity !== this.currentOwner) return { ok: false, detail: "Process owner identity changed." };
     if (!this.matchesCurrentOwner(identity)) return { ok: false, detail: "Process owner identity changed or is unavailable." };
-    if (target.executable && identity.executable && !sameExecutable(target.executable, identity.executable)) return { ok: false, detail: "Executable identity changed." };
+    if (!executableIdentityMatches(target.executable, identity.executable)) return { ok: false, detail: "Executable identity is unavailable or changed." };
     return { ok: true };
   }
 
@@ -558,7 +558,7 @@ export class AgentControl {
     const inspected = observed ? { identity: observed, available: true } : this.inspectSafely(expected.pid);
     if (!inspected.available) return false;
     const identity = inspected.identity;
-    if (!identity || !sameProcessIdentity(identity, expected)) return false;
+    if (!identity || !sameProcessIdentity(identity, expected) || !executableIdentityMatches(expected.executable, identity.executable)) return false;
     const protection = this.protectsCurrentProcess(expected.pid, metadataGraph);
     if (!protection.available || expected.pid === this.currentPid || protection.protected) return false;
     if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return false;
@@ -839,7 +839,26 @@ function scopeRelation(scope: BudgetScope, target: ControlTarget): "match" | "un
 }
 
 function sameExecutable(expected: string, actual: string): boolean {
-  try { return realpathSync(expected) === realpathSync(actual); } catch { return expected === actual || expected.endsWith(`/${actual}`) || actual.endsWith(`/${expected}`); }
+  let expectedResolved: string | null = null;
+  let actualResolved: string | null = null;
+  try { expectedResolved = realpathSync(expected); } catch { /* compare authoritative absolute paths below */ }
+  try { actualResolved = realpathSync(actual); } catch { /* compare authoritative absolute paths below */ }
+  if (expectedResolved && actualResolved) return normalizeExecutablePath(expectedResolved) === normalizeExecutablePath(actualResolved);
+  if (expectedResolved || actualResolved) return false;
+  const normalizedExpected = normalizeExecutablePath(expected);
+  const normalizedActual = normalizeExecutablePath(actual);
+  return normalizedExpected !== null && normalizedExpected === normalizedActual;
+}
+
+function executableIdentityMatches(expected: string | null | undefined, actual: string | null | undefined): boolean {
+  return Boolean(expected && actual && sameExecutable(expected, actual));
+}
+
+function normalizeExecutablePath(value: string): string | null {
+  const path = value.trim();
+  if (!path || (!path.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(path) && !path.startsWith("\\\\"))) return null;
+  const normalized = path.replaceAll("\\", "/").replace(/\/+/g, "/").replace(/\/$/, "");
+  return process.platform === "win32" || /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//") ? normalized.toLowerCase() : normalized;
 }
 
 function sameProcessIdentity(actual: ProcessIdentity, expected: Pick<ProcessIdentity, "pid" | "processStartTime" | "ownerUid" | "ownerIdentity" | "ownerSid">): boolean {
@@ -849,8 +868,7 @@ function sameProcessIdentity(actual: ProcessIdentity, expected: Pick<ProcessIden
 
 function sameProcessMetadata(actual: ProcessIdentity, expected: ProcessIdentity): boolean {
   if (actual.pid !== expected.pid || actual.processStartTime !== expected.processStartTime || actual.parentPid !== expected.parentPid) return false;
-  if (expected.executable && (!actual.executable || !sameExecutable(expected.executable, actual.executable))) return false;
-  return true;
+  return executableIdentityMatches(expected.executable, actual.executable);
 }
 
 function sameProcessOwner(actual: ProcessIdentity, expected: ControlTarget): boolean {
