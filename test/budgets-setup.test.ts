@@ -30,6 +30,8 @@ describe("budget adapter setup", () => {
     const openCodePlugin = readFileSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"), "utf8");
     expect(openCodePlugin).toMatch(/stdin: new Blob|hasUsage/);
     expect(openCodePlugin).not.toMatch(/executable: process\.execPath/);
+    expect(openCodePlugin).toMatch(/scheme: "basic"/);
+    expect(openCodePlugin).toMatch(/OPENCODE_SERVER_PASSWORD/);
     expect(JSON.parse(readFileSync(join(root, ".codex", "hooks.json"), "utf8")).hooks.UserPromptSubmit).toHaveLength(1);
     expect(rollbackBudgetAdapters({ HOME: root }, { write: () => undefined })).toBe(0);
     expect(readFileSync(join(claude, "settings.json"), "utf8")).toBe(JSON.stringify(before));

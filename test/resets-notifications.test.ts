@@ -4,13 +4,14 @@
  */
 
 import { request } from "node:http";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Report } from "../src/core/model";
 import { assistant } from "./fixtures/build";
-import { compose } from "../src/compose";
+import { compose, type App } from "../src/compose";
 import { notifyTick, startServer, type LiveServer } from "../src/server";
 import { forgetResets, parseFeed, resetsSnapshot, type ResetsFeed } from "../src/services/resets-client";
 import {
@@ -20,11 +21,31 @@ import {
 
 const NOW = new Date("2026-10-10T12:00:00Z");
 const roots: string[] = [];
+const apps: App[] = [];
+
+function directApp(env: NodeJS.ProcessEnv): App {
+  const app = compose(env);
+  apps.push(app);
+  return app;
+}
+
+function closeApps(): void {
+  for (const app of apps.splice(0)) {
+    app.budgets.close();
+    app.control.close();
+  }
+}
 
 function expectPrivateSettings(path: string): void {
   // Windows reports default POSIX mode bits; its ACL protects the user-created temp tree.
   if (process.platform === "win32") {
     expect(statSync(path).isFile()).toBe(true);
+    const script = "$path=$args[0]; $acl=Get-Acl -LiteralPath $path; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; [pscustomobject]@{sid=$sid; rules=@($acl.Access | ForEach-Object { [pscustomobject]@{identity=$_.IdentityReference.Value; inherited=$_.IsInherited} })} | ConvertTo-Json -Compress";
+    const acl = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) as { sid?: string; rules?: Array<{ identity?: string; inherited?: boolean }> | { identity?: string; inherited?: boolean } };
+    const rules = Array.isArray(acl.rules) ? acl.rules : acl.rules ? [acl.rules] : [];
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.identity).toBe(acl.sid);
+    expect(rules[0]?.inherited).toBe(false);
     return;
   }
   expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -90,6 +111,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  closeApps();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -490,7 +512,7 @@ describe("the live server", () => {
       }), { status: 200 });
     }));
     saveSettings(env, onSettings());
-    const app = compose(env);
+    const app = directApp(env);
     await boot(env);
 
     const result = await notifyTick(app);
@@ -512,7 +534,7 @@ describe("the live server", () => {
       }), { status: 200 });
     }));
     saveSettings(env, onSettings());
-    const app = compose(env);
+    const app = directApp(env);
     await notifyTick(app, false);
     expect(calls.some((url) => url.includes("agentresets.com"))).toBe(true);
     expect(calls.some((url) => url.includes("api.anthropic.com") || url.includes("opencode.ai"))).toBe(false);
@@ -534,7 +556,7 @@ describe("the live server", () => {
     }), { status: 200 })));
     saveSettings(env, onSettings({ conditions: { ...defaultSettings().conditions,
       usage: { enabled: true, percent: 80, provider: "opencode" } } }));
-    const app = compose(env);
+    const app = directApp(env);
     const first = await notifyTick(app, false);
     expect(first.alerts).toHaveLength(1); // the saved opencode week over threshold fires through the tick
     const second = await notifyTick(app, false);
@@ -556,6 +578,7 @@ describe("the live server", () => {
 });
 
 afterEach(() => {
+  closeApps();
   for (const root of roots.splice(0)) if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -618,7 +641,7 @@ describe("session spike alerts", () => {
       schema_version: 1, generated_at: NOW.toISOString(), products: {},
     }), { status: 200 })));
     saveSettings(env, settings());
-    const app = compose(env);
+    const app = directApp(env);
     const result = await notifyTick(app, false, 0.001);
     expect(result.alerts).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Active session: critical burn spike" })]));
     expect(result.delivered).toEqual([expect.objectContaining({ skipped: true })]);

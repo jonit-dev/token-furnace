@@ -30,6 +30,15 @@ let sharedConfigHome;
 let sharedStateHome;
 let sharedCacheHome;
 
+if (process.argv.includes("--self-test")) {
+  const timedOut = finishNativeResult({ status: 1, signal: "SIGTERM" }, true, "", "contract", 0);
+  if (!timedOut.timedOut || !taskUnavailable(timedOut) || nativeAttemptPasses(timedOut)) {
+    console.error("qualification contract failed: timed-out native work was treated as usable");
+    process.exitCode = 1;
+  } else {
+    console.log("qualification contract ok");
+  }
+} else {
 try {
   await discoverPackage();
   for (const source of requested) {
@@ -54,6 +63,7 @@ try {
   for (const worker of nativeWorkers.splice(0)) await stopChild(worker);
   for (const server of servers) await stopChild(server);
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
+}
 }
 
 async function discoverPackage() {
@@ -140,12 +150,20 @@ async function qualify() {
   const oldServer = server;
   await stopChild(oldServer.child);
   servers.splice(servers.indexOf(oldServer), 1);
-  server = await startServer(serverEnv);
+  server = await startServer(serverEnv, true);
   servers.push(server);
   const persisted = await scenarioState(server.url);
   if (modeResult.status === "PASS" && requested.some((source) => !persisted?.policies?.some((policy) => policy.scope?.kind === "source" && policy.scope.source === source && policy.mode === "manual" && policy.limit === 1000))) {
     modeResult.status = "FAIL";
     modeResult.detail = "Manual browser policy did not survive the Token Furnace restart.";
+  }
+  if (modeResult.status === "PASS" && requested.some((source) => {
+    const before = modeResult.autoReadings?.find((reading) => reading.source === source)?.meter;
+    const after = persisted?.sources?.find((reading) => reading.source === source)?.meter;
+    return before && (!after || after.account !== before.account || after.window !== before.window || !Number.isFinite(Date.parse(after.observedAt ?? "")));
+  })) {
+    modeResult.status = "FAIL";
+    modeResult.detail = "The no-plan-usage restart did not preserve the authoritative quota snapshot identity and observation time.";
   }
   results.push(modeResult);
   for (const source of requested) {
@@ -185,10 +203,21 @@ async function scenarioModePolicy(url, browser, workspace) {
     const observed = Date.parse(reading?.meter?.observedAt ?? "");
     return reading?.policy?.mode === "auto" && Number.isFinite(reading.allowance) && reading.meter?.authoritative === true && Boolean(reading.meter.account) && Boolean(reading.meter.window) && Number.isFinite(observed) && observed <= Date.now() && Date.now() - observed <= 5 * 60_000;
   });
-  if (!freshAuto) {
-    return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: "Auto policy lacks a fresh authoritative quota/account/window reading for every requested source; no PASS was substituted." };
+  const autoMath = requested.every((source) => {
+    const reading = autoReadings.find((candidate) => candidate.source === source);
+    const meter = reading?.meter;
+    const observed = Date.parse(meter?.observedAt ?? "");
+    const reset = Date.parse(meter?.resetAt ?? "");
+    const used = Number(meter?.usedPercentagePoints);
+    const expected = Number.isFinite(observed) && Number.isFinite(reset) && reset > Date.now() && Number.isFinite(used)
+      ? Math.max(0, 100 - used) / ((reset - Date.now()) / 3_600_000)
+      : NaN;
+    return Number.isFinite(expected) && Math.abs(Number(reading?.allowance) - expected) < 0.01;
+  });
+  if (!freshAuto || !autoMath) {
+    return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: "Auto policy lacks a fresh authoritative quota/account/window reading or matching reset-derived pace for every requested source; no PASS was substituted." };
   }
-  return { status: "PASS", scenario: "mode-and-policy-wiring", detail: "Real browser rendered #budgets, saved Off/Auto/Manual, preserved Manual state across the server restart, and proved an Off native task." };
+  return { status: "PASS", scenario: "mode-and-policy-wiring", autoReadings, detail: "Real browser rendered #budgets, saved Off/Auto/Manual, proved reset-derived Auto pacing, preserved Manual and quota snapshot state across a no-plan-usage restart, and proved an Off native task." };
 }
 
 async function scenarioState(url) {
@@ -315,6 +344,7 @@ async function scenarioProviderStop(source, url, workspace, browser) {
   const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(unrelatedSentinel, "PROVIDER_STOP_UNRELATED"), 30_000, unrelated);
   nativeWorkers.push(...matchingWorkers.map((worker) => worker.child), unrelatedWorker.child);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+  if (matchingWorkers.some((worker) => worker.child.exitCode !== null) || unrelatedWorker.child.exitCode !== null) return { status: "BLOCKED", scenario, detail: "A real provider-stop worker was not still running at the native stop boundary." };
   const preview = await stopPreview(url, state.mutationToken, { kind: "provider", provider: matching.provider });
   if (!preview.ok) return { status: "FAIL", scenario, detail: `Provider stop preview failed: ${safeTail(preview.value?.error)}` };
   const selected = matchingCandidates.every((candidate, index) => (preview.value?.targets ?? []).some((target) => target.source === candidate.source && target.provider === candidate.provider && (candidate.source === "opencode" || target.pid === matchingWorkers[index].child.pid)));
@@ -325,10 +355,13 @@ async function scenarioProviderStop(source, url, workspace, browser) {
   const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "provider" && stop.scope.provider === matching.provider)?.operationId;
   const operation = operationId ? await getJson(`${url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
   if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario, detail: "The UI confirmation did not produce a completed provider stop operation." };
+  const selectedTargetIds = (preview.value?.targets ?? []).filter((target) => matchingCandidates.some((candidate) => candidate.source === target.source && candidate.provider === target.provider)).map((target) => target.id);
+  if (!selectedTargetIds.length || !selectedTargetIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario, detail: "The provider stop operation lacked correlated cancelled/terminated outcomes for every preview target." };
   const matchingResults = await Promise.all(matchingWorkers.map((worker) => worker.wait(8_000)));
-  const unrelatedAlive = unrelatedWorker.child.exitCode === null;
-  if (matchingResults.some((result, index) => result.timedOut || result.status === 0 || matchingWorkers[index].child.exitCode === null) || !unrelatedAlive) {
-    return { status: "FAIL", scenario, detail: "The verified matching worker did not exit or the unrelated provider worker stopped too." };
+  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
+  const unrelatedOriginal = await unrelatedWorker.wait(30_000);
+  if (matchingResults.some((result, index) => result.timedOut || result.status === 0 || matchingWorkers[index].child.exitCode === null) || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(unrelatedSentinel)) {
+    return { status: "FAIL", scenario, detail: "The verified matching worker did not exit or the original unrelated provider worker failed to advance after the stop." };
   }
   const unrelatedPostSentinel = join(workspace, "provider-stop-unrelated-post.sentinel");
   const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${unrelatedPostSentinel} containing exactly PROVIDER_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
@@ -367,6 +400,7 @@ async function scenarioModelStop(source, url, workspace, browser) {
   const unrelatedWorker = startNative(otherTarget, workspace, delayedPrompt(join(workspace, "model-stop-unrelated.sentinel"), "MODEL_STOP_UNRELATED"), 30_000, { ...unrelated, hostEndpoint: host.url });
   nativeWorkers.push(matchingWorker.child, unrelatedWorker.child);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+  if (matchingWorker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "BLOCKED", scenario, detail: "A real mixed-model worker was not still running at the native stop boundary." };
   const preview = await stopPreview(url, state.mutationToken, { kind: "model", provider: matching.provider, model: matching.model });
   if (!preview.ok) return { status: "FAIL", scenario, detail: `Model stop preview failed: ${safeTail(preview.value?.error)}` };
   const selected = (preview.value?.targets ?? []).some((item) => item.model === matching.model && item.source === source && item.pid === host.child.pid);
@@ -377,9 +411,13 @@ async function scenarioModelStop(source, url, workspace, browser) {
   const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "model" && stop.scope.provider === matching.provider && stop.scope.model === matching.model)?.operationId;
   const operation = operationId ? await getJson(`${url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
   if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario, detail: "The UI confirmation did not produce a completed model stop operation." };
+  const matchingTargetIds = (preview.value?.targets ?? []).filter((target) => target.source === source && target.model === matching.model).map((target) => target.id);
+  if (!matchingTargetIds.length || !matchingTargetIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario, detail: "The model stop operation lacked a correlated cancelled/terminated outcome for the matching preview target." };
   const matchingResult = await matchingWorker.wait(8_000);
-  if (matchingResult.timedOut || matchingResult.status === 0 || matchingWorker.child.exitCode === null || unrelatedWorker.child.exitCode !== null) {
-    return { status: "FAIL", scenario: "model-stop", detail: "Selective model cancellation did not stop only the verified matching worker." };
+  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
+  const unrelatedOriginal = await unrelatedWorker.wait(30_000);
+  if (matchingResult.timedOut || matchingResult.status === 0 || matchingWorker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(join(workspace, "model-stop-unrelated.sentinel"))) {
+    return { status: "FAIL", scenario: "model-stop", detail: "Selective model cancellation did not stop the matching worker while the original unrelated model advanced." };
   }
   const bypassSentinel = join(workspace, "model-stop-bypass.sentinel");
   const bypass = await runNative(target, workspace, `Create ${bypassSentinel} containing exactly MODEL_STOP_BYPASS.`, 60_000, matching);
@@ -412,9 +450,11 @@ async function scenarioForceRecovery(source, url, workspace) {
   const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(join(workspace, "force-stop-unrelated.sentinel"), "FORCE_STOP_UNRELATED"), 30_000, unrelated);
   nativeWorkers.push(worker.child, unrelatedWorker.child);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+  if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "BLOCKED", scenario, detail: "A real force-stop worker was not still running at the CLI preview boundary." };
   const env = isolatedEnv(candidate.source, targets.get(candidate.source).home, workspace, candidate);
   const preview = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider], { cwd: workspace, env, timeout: 20_000 });
   if (preview.status !== 0) return { status: "FAIL", scenario, detail: `Installed-package stop preview failed: ${safeTail(preview.output)}` };
+  if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "FAIL", scenario, detail: "The installed-package stop preview changed a live process before confirmation." };
   const previewValue = jsonOutput(preview.output);
   if (!previewValue || !(previewValue.targets ?? []).some((target) => target.provider === candidate.provider)) return { status: "BLOCKED", scenario, detail: "Installed-package preview did not expose the verified real target before confirmation." };
   const normal = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
@@ -430,7 +470,9 @@ async function scenarioForceRecovery(source, url, workspace) {
   const force = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider, "--confirm", "--force", "--force-confirm"], { cwd: workspace, env, timeout: 20_000 });
   const forceValue = jsonOutput(force.output);
   const unlocked = await run(packageBin, ["budgets", "unlock", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
-  if (force.status !== 0 || force.timedOut || !forceValue || forceValue.status !== "complete" || !(forceValue.outcomes ?? []).some((outcome) => outcome.targetId && outcome.status === "terminated") || worker.child.exitCode === null || unrelatedWorker.child.exitCode !== null) {
+  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
+  const unrelatedOriginal = await unrelatedWorker.wait(30_000);
+  if (force.status !== 0 || force.timedOut || !forceValue || forceValue.status !== "complete" || !(forceValue.outcomes ?? []).some((outcome) => outcome.targetId && outcome.status === "terminated") || worker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(join(workspace, "force-stop-unrelated.sentinel"))) {
     return { status: "FAIL", scenario, detail: `Force recovery did not verify target exit without collateral termination: ${safeTail(`${force.output} ${unlocked.output}`)}` };
   }
   const unrelatedSentinel = join(workspace, "force-stop-unrelated-post.sentinel");
@@ -461,6 +503,7 @@ async function scenarioCrossHarness(workspace, browser) {
   const workers = entry.slice(0, 2).map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(join(workspace, `cross-harness-${index}.sentinel`), `CROSS_HARNESS_${index}`), 30_000, candidate));
   nativeWorkers.push(...workers.map((worker) => worker.child));
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+  if (workers.some((worker) => worker.child.exitCode !== null)) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "A cross-harness worker was not still running at the native stop boundary." };
   const first = entry[0];
   const preview = await stopPreview(server.url, state.mutationToken, { kind: "model", provider: first.provider, model: first.model });
   if (!preview.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: `Cross-harness preview failed: ${safeTail(preview.value?.error)}` };
@@ -472,6 +515,8 @@ async function scenarioCrossHarness(workspace, browser) {
   const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "model" && stop.scope.provider === first.provider && stop.scope.model === first.model)?.operationId;
   const operation = operationId ? await getJson(`${server.url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
   if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "The UI confirmation did not produce a completed cross-harness operation." };
+  const selectedIds = selected.map((target) => target.id);
+  if (!selectedIds.length || !selectedIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "The cross-harness operation lacked correlated native outcomes for every preview target." };
   const results = await Promise.all(workers.map((worker) => worker.wait(8_000)));
   const unlocked = await unlockScope(server.url, state.mutationToken, { kind: "model", provider: first.provider, model: first.model });
   return results.every((result, index) => !result.timedOut && result.status !== 0 && workers[index].child.exitCode !== null) && unlocked.ok
@@ -550,7 +595,7 @@ async function driveBudgetsBrowser(browser, url) {
       return { budgets: document.body.innerText.includes("Budgets"), modes: document.querySelectorAll('select[aria-label$="budget mode"]').length, autoReadings };
     })()`);
     if (!result?.budgets || result.modes < 3) return { ok: false, ran: true, detail: "The real browser did not render all source mode controls." };
-    return { ok: true, ran: true, detail: "browser controls exercised" };
+    return { ok: true, ran: true, detail: "browser controls exercised", autoReadings: result.autoReadings };
   } catch (error) {
     return { ok: false, ran: true, detail: `Browser scenario error: ${error instanceof Error ? error.message : String(error)}` };
   } finally {
@@ -648,16 +693,24 @@ function startNative(target, workspace, prompt, timeout, identity = null) {
       let settled = false;
       let timer;
       let timedOut = false;
-      const finish = (result) => { if (settled) return; settled = true; clearTimeout(timer); resolvePromise({ ...result, timedOut: result.timedOut ?? timedOut, output, requestId, startedAt }); };
+      const finish = (result) => { if (settled) return; settled = true; clearTimeout(timer); resolvePromise(finishNativeResult(result, timedOut, output, requestId, startedAt)); };
       if (child.exitCode !== null || child.signalCode) {
-        finish({ status: child.exitCode ?? 1, signal: child.signalCode, timedOut: false });
+        finish({ status: child.exitCode ?? 1, signal: child.signalCode });
         return;
       }
       timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 1_000).unref(); }, waitTimeout).unref();
-      child.once("error", (error) => finish({ status: -1, timedOut: false, output: error.message }));
-      child.once("exit", (status, signal) => finish({ status: status ?? (signal ? 1 : -1), signal, timedOut: false }));
+      child.once("error", (error) => finish({ status: -1, output: error.message }));
+      child.once("exit", (status, signal) => finish({ status: status ?? (signal ? 1 : -1), signal }));
     }),
   };
+}
+
+function finishNativeResult(result, timedOut, output, requestId, startedAt) {
+  return { ...result, timedOut: result.timedOut ?? timedOut, output, requestId, startedAt };
+}
+
+function nativeAttemptPasses(result) {
+  return result?.status === 0 && !result?.timedOut && !result?.signal;
 }
 
 function nativeArgs(target, workspace, prompt, identity) {
@@ -708,9 +761,9 @@ function findBrowser() {
   return null;
 }
 
-function startServer(env) {
+function startServer(env, noPlanUsage = false) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [packageBin, "serve", "--port", "0"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [packageBin, "serve", "--port", "0", ...(noPlanUsage ? ["--no-plan-usage"] : [])], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const onData = (chunk) => {
       output = `${output}${chunk}`.slice(-4_000);

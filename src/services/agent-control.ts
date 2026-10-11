@@ -15,16 +15,26 @@ export interface ProcessIdentity {
   processStartTime: number;
   ownerUid: number | null;
   ownerIdentity?: string | null;
+  ownerSid?: string | null;
   parentPid: number | null;
   executable?: string | null;
   commandLine?: string | null;
+}
+
+export interface NativeAuth {
+  scheme: "bearer" | "basic";
+  /** Environment variable names only; secret values never enter target metadata. */
+  tokenEnv?: string;
+  usernameEnv?: string;
+  passwordEnv?: string;
 }
 
 export interface NativeTarget {
   kind: "opencode" | "codex";
   endpoint: string;
   transport?: "http" | "websocket" | "unix" | "stdio";
-  /** Environment variable name only; endpoint credentials never enter the control store. */
+  auth?: NativeAuth;
+  /** Legacy Codex-only environment variable name; endpoint credentials never enter the control store. */
   authEnv?: string;
   sessionId?: string;
   threadId?: string;
@@ -42,6 +52,7 @@ export interface ControlTarget {
   processStartTime: number;
   ownerUid: number | null;
   ownerIdentity?: string | null;
+  ownerSid?: string | null;
   executable?: string | null;
   sessionId?: string | null;
   /** Native cancellation is preferred for mixed-model hosts. */
@@ -76,6 +87,7 @@ export function controlTargetProof(targets: ControlTarget[]): string {
     processStartTime: target.processStartTime,
     ownerUid: target.ownerUid,
     ownerIdentity: target.ownerIdentity ?? null,
+    ownerSid: target.ownerSid ?? null,
     executable: target.executable ?? null,
     native: target.native ?? null,
     exclusive: target.exclusive === true,
@@ -93,6 +105,7 @@ export interface AgentControlOptions {
   signal?: (pid: number, signal: NodeJS.Signals) => void;
   currentUid?: number | null;
   currentOwner?: string | null;
+  currentOwnerSid?: string | null;
   currentPid?: number;
   /** Adapter discovery is invoked for every preview, so racing work is visible. */
   discoverRuntime?: () => ControlTarget[];
@@ -105,6 +118,7 @@ export class AgentControl {
   private readonly signalProcess: (pid: number, signal: NodeJS.Signals) => void;
   private readonly currentUid: number | null;
   private readonly currentOwner: string | null;
+  private readonly currentOwnerSid: string | null;
   private readonly currentPid: number;
   private readonly env: Env;
   private readonly store: ControlStore | null;
@@ -114,14 +128,18 @@ export class AgentControl {
   private readonly adapters = new Map<string, { cancel?: () => Promise<boolean>; state?: () => Promise<boolean> }>();
   private runtimeUnverified: ControlPreview["unverified"] = [];
   private storeError: string | null = null;
+  private closed = false;
 
   constructor(options: AgentControlOptions = {}) {
     this.inspectProcess = options.inspect ?? inspectProcess;
     this.signalProcess = options.signal ?? terminateProcess;
     this.currentUid = options.currentUid === undefined ? (typeof process.getuid === "function" ? process.getuid() : null) : options.currentUid;
-    this.currentOwner = options.currentOwner === undefined ? (options.env ?? process.env).USERNAME ?? (options.env ?? process.env).USER ?? null : options.currentOwner;
     this.currentPid = options.currentPid ?? process.pid;
     const env = options.env ?? process.env;
+    this.currentOwner = options.currentOwner === undefined
+      ? process.platform === "win32" && env.USERDOMAIN && env.USERNAME ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME ?? env.USER ?? null
+      : options.currentOwner;
+    this.currentOwnerSid = options.currentOwnerSid === undefined ? this.inspectProcess(this.currentPid)?.ownerSid ?? null : options.currentOwnerSid;
     this.env = env;
     const state = env.TOKEN_FURNACE_STATE_HOME || env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state");
     const storePath = options.storePath ?? options.statePath ?? join(state, "token-furnace", "control.sqlite");
@@ -136,13 +154,21 @@ export class AgentControl {
 
   register(target: ControlTarget): boolean {
     if (!target.id || !Number.isInteger(target.pid) || target.pid <= 0 || target.pid === this.currentPid) return false;
-    if (this.currentUid !== null && target.ownerUid !== null && target.ownerUid !== this.currentUid) return false;
+    const observed = this.inspectProcess(target.pid);
+    const ownerUid = target.ownerUid ?? observed?.ownerUid ?? null;
+    const ownerIdentity = target.ownerIdentity ?? observed?.ownerIdentity ?? null;
+    const ownerSid = target.ownerSid ?? observed?.ownerSid ?? null;
+    if (this.currentUid !== null && ownerUid !== null && ownerUid !== this.currentUid) return false;
+    if (this.currentOwnerSid && ownerSid && ownerSid !== this.currentOwnerSid) return false;
     const normalized: ControlTarget = {
       ...target,
       provider: canonicalIdentity(target.provider),
       account: canonicalIdentity(target.account),
       model: canonicalIdentity(target.model),
       sessionId: target.sessionId ?? target.native?.sessionId ?? null,
+      ownerUid,
+      ownerIdentity,
+      ownerSid,
       executable: target.executable ?? this.inspectProcess(target.pid)?.executable ?? null,
       nativeCancel: target.nativeCancel ?? nativeCanceller(target.native, this.env),
       nativeState: target.nativeState ?? nativeStateChecker(target.native, this.env),
@@ -223,11 +249,14 @@ export class AgentControl {
     if (target.pid === this.currentPid || this.protectsCurrentProcess(target.pid)) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Refused to target Token Furnace or an ancestor." });
     }
-    if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null)) {
+    if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null) || (identity.ownerSid ?? null) !== (target.ownerSid ?? null)) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process ownership or start identity changed." });
     }
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process is not owned by the current user." });
+    }
+    if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) {
+      return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process owner SID changed." });
     }
     if (target.executable && identity.executable && !sameExecutable(target.executable, identity.executable)) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Executable identity changed." });
@@ -254,8 +283,14 @@ export class AgentControl {
     try {
       const beforeSignal = this.verify(target);
       if (!beforeSignal.ok) return this.finish(target, { targetId: target.id, status: "unresolved", detail: beforeSignal.detail });
+      const descendants = this.ownedDescendants(target);
+      if (descendants === null) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant could not be verified for process fallback." });
       this.signalProcess(target.pid, force ? "SIGKILL" : "SIGTERM");
-      const terminal = await this.waitForTerminal(target);
+      for (const descendant of descendants) {
+        if (!this.verifyProcessIdentity(descendant)) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant changed identity before termination." });
+        this.signalProcess(descendant.pid, force ? "SIGKILL" : "SIGTERM");
+      }
+      const terminal = await this.waitForProcessExit(target, descendants);
       if (terminal) return this.finish(target, { targetId: target.id, status: force ? "terminated" : "cancelled", detail: "Process exit verified." });
       return this.finish(target, {
         targetId: target.id,
@@ -275,6 +310,8 @@ export class AgentControl {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.store?.close();
   }
 
@@ -323,10 +360,11 @@ export class AgentControl {
     const identity = this.inspectProcess(target.pid);
     if (!identity) return { ok: false, detail: "Process is no longer discoverable." };
     if (target.pid === this.currentPid || this.protectsCurrentProcess(target.pid)) return { ok: false, detail: "Token Furnace or an ancestor is protected." };
-    if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null)) return { ok: false, detail: "Process ownership or start identity changed." };
-    if (identity.ownerUid === null && !identity.ownerIdentity) return { ok: false, detail: "Process owner identity is unavailable." };
+    if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null) || (identity.ownerSid ?? null) !== (target.ownerSid ?? null)) return { ok: false, detail: "Process ownership or start identity changed." };
+    if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return { ok: false, detail: "Process owner identity is unavailable." };
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return { ok: false, detail: "Process is not owned by the current user." };
     if (this.currentOwner && identity.ownerIdentity && identity.ownerIdentity !== this.currentOwner) return { ok: false, detail: "Process owner identity changed." };
+    if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) return { ok: false, detail: "Process owner SID changed." };
     if (target.executable && identity.executable && !sameExecutable(target.executable, identity.executable)) return { ok: false, detail: "Executable identity changed." };
     return { ok: true };
   }
@@ -355,6 +393,54 @@ export class AgentControl {
     }
   }
 
+  private async waitForProcessExit(target: ControlTarget, descendants: ProcessIdentity[] = []): Promise<boolean> {
+    const started = Date.now();
+    while (true) {
+      const identity = this.inspectProcess(target.pid);
+      if (identity && !sameProcessIdentity(identity, target)) return false;
+      let descendantAlive = false;
+      for (const descendant of descendants) {
+        const current = this.inspectProcess(descendant.pid);
+        if (current && !sameProcessIdentity(current, descendant)) return false;
+        descendantAlive ||= Boolean(current);
+      }
+      if (!identity && !descendantAlive) return true;
+      if (Date.now() - started >= this.graceMs) return false;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, this.graceMs))));
+    }
+  }
+
+  private verifyProcessIdentity(expected: ProcessIdentity): boolean {
+    const identity = this.inspectProcess(expected.pid);
+    if (!identity || !sameProcessIdentity(identity, expected)) return false;
+    if (expected.pid === this.currentPid || this.protectsCurrentProcess(expected.pid)) return false;
+    if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return false;
+    if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return false;
+    if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) return false;
+    return true;
+  }
+
+  private ownedDescendants(target: ControlTarget): ProcessIdentity[] | null {
+    const processes = this.listProcesses();
+    const children = new Map<number, ProcessIdentity[]>();
+    for (const identity of processes) {
+      if (identity.parentPid === null) continue;
+      const list = children.get(identity.parentPid) ?? [];
+      list.push(identity);
+      children.set(identity.parentPid, list);
+    }
+    const result: ProcessIdentity[] = [];
+    const queue = [...(children.get(target.pid) ?? [])];
+    while (queue.length) {
+      const identity = queue.shift()!;
+      if (!sameProcessOwner(identity, target)) return null;
+      if (!this.verifyProcessIdentity(identity)) return null;
+      result.push(identity);
+      queue.push(...(children.get(identity.pid) ?? []));
+    }
+    return result;
+  }
+
   private finish(target: ControlTarget, outcome: ControlOutcome): ControlOutcome {
     this.writeStore(() => this.store?.recordOutcome(outcome) ?? false);
     return outcome;
@@ -371,6 +457,7 @@ interface StoredTargetRow {
   process_start_time: number;
   owner_uid: number | null;
   owner_identity: string | null;
+  owner_sid: string | null;
   executable: string | null;
   session_id: string | null;
   native_json: string | null;
@@ -398,6 +485,7 @@ class ControlStore {
         process_start_time INTEGER NOT NULL,
         owner_uid INTEGER,
         owner_identity TEXT,
+        owner_sid TEXT,
         executable TEXT,
         session_id TEXT,
         native_json TEXT,
@@ -413,21 +501,23 @@ class ControlStore {
       CREATE INDEX IF NOT EXISTS targets_source ON targets(source);
       CREATE INDEX IF NOT EXISTS targets_identity ON targets(provider, model);
     `);
+    const columns = this.db.prepare("PRAGMA table_info(targets)").all() as Array<{ name?: string }>;
+    if (!columns.some((column) => column.name === "owner_sid")) this.db.exec("ALTER TABLE targets ADD COLUMN owner_sid TEXT");
   }
 
   upsertTarget(target: ControlTarget): boolean {
     return this.write(() => {
       this.db.prepare(`INSERT INTO targets
-        (id, source, provider, account, model, pid, process_start_time, owner_uid, owner_identity, executable, session_id, native_json, exclusive, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, source, provider, account, model, pid, process_start_time, owner_uid, owner_identity, owner_sid, executable, session_id, native_json, exclusive, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET source=excluded.source,
         model=COALESCE(excluded.model, targets.model), pid=excluded.pid, process_start_time=excluded.process_start_time, owner_uid=COALESCE(excluded.owner_uid, targets.owner_uid),
-        owner_identity=COALESCE(excluded.owner_identity, targets.owner_identity), executable=COALESCE(excluded.executable, targets.executable),
+        owner_identity=COALESCE(excluded.owner_identity, targets.owner_identity), owner_sid=COALESCE(excluded.owner_sid, targets.owner_sid), executable=COALESCE(excluded.executable, targets.executable),
         provider=COALESCE(excluded.provider, targets.provider), account=COALESCE(excluded.account, targets.account),
         session_id=COALESCE(excluded.session_id, targets.session_id), native_json=COALESCE(excluded.native_json, targets.native_json),
         exclusive=excluded.exclusive, updated_at=excluded.updated_at`).run(
         target.id, target.source, target.provider, target.account ?? null, target.model, target.pid, target.processStartTime,
-        target.ownerUid, target.ownerIdentity ?? null, target.executable ?? null, target.sessionId ?? null,
+        target.ownerUid, target.ownerIdentity ?? null, target.ownerSid ?? null, target.executable ?? null, target.sessionId ?? null,
         target.native ? JSON.stringify(serializableNative(target.native)) : null, target.exclusive === true ? 1 : 0, Date.now(),
       );
       return true;
@@ -442,7 +532,7 @@ class ControlStore {
   }
 
   readTargets(): ControlTarget[] {
-    return (this.db.prepare("SELECT id, source, provider, account, model, pid, process_start_time, owner_uid, owner_identity, executable, session_id, native_json, exclusive FROM targets ORDER BY id").all() as unknown as StoredTargetRow[])
+    return (this.db.prepare("SELECT id, source, provider, account, model, pid, process_start_time, owner_uid, owner_identity, owner_sid, executable, session_id, native_json, exclusive FROM targets ORDER BY id").all() as unknown as StoredTargetRow[])
       .map((row) => ({
         id: row.id,
         source: row.source,
@@ -453,6 +543,7 @@ class ControlStore {
         processStartTime: row.process_start_time,
         ownerUid: row.owner_uid,
         ownerIdentity: row.owner_identity,
+        ownerSid: row.owner_sid,
         executable: row.executable,
         sessionId: row.session_id,
         native: parseNative(row.native_json),
@@ -493,7 +584,23 @@ class ControlStore {
 }
 
 function serializableNative(native: NativeTarget): NativeTarget {
-    return { ...native, endpoint: sanitizeEndpoint(native.endpoint), ...(native.authEnv && /^[A-Z_][A-Z0-9_]*$/.test(native.authEnv) ? { authEnv: native.authEnv } : {}) };
+  const validEnv = (value: unknown): value is string => typeof value === "string" && /^[A-Z_][A-Z0-9_]*$/.test(value);
+  const auth = native.auth && (native.auth.scheme === "basic" || native.auth.scheme === "bearer") ? {
+    scheme: native.auth.scheme,
+    ...(validEnv(native.auth.tokenEnv) ? { tokenEnv: native.auth.tokenEnv } : {}),
+    ...(validEnv(native.auth.usernameEnv) ? { usernameEnv: native.auth.usernameEnv } : {}),
+    ...(validEnv(native.auth.passwordEnv) ? { passwordEnv: native.auth.passwordEnv } : {}),
+  } satisfies NativeAuth : undefined;
+  return {
+    kind: native.kind,
+    endpoint: sanitizeEndpoint(native.endpoint),
+    transport: native.transport,
+    ...(auth ? { auth } : {}),
+    ...(validEnv(native.authEnv) ? { authEnv: native.authEnv } : {}),
+    ...(typeof native.sessionId === "string" ? { sessionId: native.sessionId } : {}),
+    ...(typeof native.threadId === "string" ? { threadId: native.threadId } : {}),
+    ...(typeof native.turnId === "string" ? { turnId: native.turnId } : {}),
+  };
 }
 
 function sanitizeEndpoint(endpoint: string): string {
@@ -515,7 +622,13 @@ function parseNative(value: string | null): NativeTarget | undefined {
     const parsed = JSON.parse(value) as Partial<NativeTarget>;
     if ((parsed.kind !== "codex" && parsed.kind !== "opencode") || typeof parsed.endpoint !== "string" || !parsed.endpoint) return undefined;
     const transport = parsed.transport === "http" || parsed.transport === "websocket" || parsed.transport === "unix" || parsed.transport === "stdio" ? parsed.transport : undefined;
-    return { kind: parsed.kind, endpoint: sanitizeEndpoint(parsed.endpoint), transport, authEnv: typeof parsed.authEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.authEnv) ? parsed.authEnv : undefined, sessionId: parsed.sessionId, threadId: parsed.threadId, turnId: parsed.turnId };
+    const auth = parsed.auth && typeof parsed.auth === "object" && (parsed.auth.scheme === "basic" || parsed.auth.scheme === "bearer") ? {
+      scheme: parsed.auth.scheme,
+      tokenEnv: typeof parsed.auth.tokenEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.auth.tokenEnv) ? parsed.auth.tokenEnv : undefined,
+      usernameEnv: typeof parsed.auth.usernameEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.auth.usernameEnv) ? parsed.auth.usernameEnv : undefined,
+      passwordEnv: typeof parsed.auth.passwordEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.auth.passwordEnv) ? parsed.auth.passwordEnv : undefined,
+    } satisfies NativeAuth : undefined;
+    return { kind: parsed.kind, endpoint: sanitizeEndpoint(parsed.endpoint), transport, auth, authEnv: typeof parsed.authEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.authEnv) ? parsed.authEnv : undefined, sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined, threadId: typeof parsed.threadId === "string" ? parsed.threadId : undefined, turnId: typeof parsed.turnId === "string" ? parsed.turnId : undefined };
   } catch {
     return undefined;
   }
@@ -534,6 +647,18 @@ function sameExecutable(expected: string, actual: string): boolean {
   try { return realpathSync(expected) === realpathSync(actual); } catch { return expected === actual || expected.endsWith(`/${actual}`) || actual.endsWith(`/${expected}`); }
 }
 
+function sameProcessIdentity(actual: ProcessIdentity, expected: Pick<ProcessIdentity, "pid" | "processStartTime" | "ownerUid" | "ownerIdentity" | "ownerSid">): boolean {
+  return actual.pid === expected.pid && actual.processStartTime === expected.processStartTime && actual.ownerUid === expected.ownerUid &&
+    (actual.ownerIdentity ?? null) === (expected.ownerIdentity ?? null) && (actual.ownerSid ?? null) === (expected.ownerSid ?? null);
+}
+
+function sameProcessOwner(actual: ProcessIdentity, expected: ControlTarget): boolean {
+  if (expected.ownerUid !== null && actual.ownerUid !== expected.ownerUid) return false;
+  if (expected.ownerIdentity && actual.ownerIdentity !== expected.ownerIdentity) return false;
+  if (expected.ownerSid && actual.ownerSid !== expected.ownerSid) return false;
+  return expected.ownerUid !== null || Boolean(expected.ownerIdentity) || Boolean(expected.ownerSid);
+}
+
 function nativeCanceller(native: NativeTarget | undefined, env: Env): (() => Promise<boolean>) | undefined {
   if (!native?.endpoint || (native.kind === "opencode" && !native.sessionId)) return undefined;
   return async () => {
@@ -543,6 +668,7 @@ function nativeCanceller(native: NativeTarget | undefined, env: Env): (() => Pro
     }
     const url = localHttpEndpoint(native.endpoint, `/session/${encodeURIComponent(native.sessionId ?? "")}/abort`);
     if (!url) return false;
+    if (!await verifyOpenCodeSession(native, env)) return false;
     const statusUrl = localHttpEndpoint(native.endpoint, "/session/status");
     if (!statusUrl) return false;
     const statusResponse = await fetch(statusUrl, { headers: nativeHeaders(native, env), signal: AbortSignal.timeout(2_000) });
@@ -552,6 +678,16 @@ function nativeCanceller(native: NativeTarget | undefined, env: Env): (() => Pro
     const response = await fetch(url, { method: "POST", headers: nativeHeaders(native, env), signal: AbortSignal.timeout(2_000) });
     return response.ok;
   };
+}
+
+async function verifyOpenCodeSession(native: NativeTarget, env: Env): Promise<boolean> {
+  if (native.kind !== "opencode" || !native.sessionId) return false;
+  const url = localHttpEndpoint(native.endpoint, `/session/${encodeURIComponent(native.sessionId)}`);
+  if (!url) return false;
+  const response = await fetch(url, { headers: nativeHeaders(native, env), signal: AbortSignal.timeout(2_000) });
+  if (!response.ok) return false;
+  const session = await response.json() as { id?: unknown };
+  return session.id === native.sessionId;
 }
 
 function nativeStateChecker(native: NativeTarget | undefined, env: Env): (() => Promise<boolean>) | undefined {
@@ -568,6 +704,7 @@ function nativeStateChecker(native: NativeTarget | undefined, env: Env): (() => 
   }
   if (!native.sessionId) return undefined;
   return async () => {
+    if (!await verifyOpenCodeSession(native, env)) return false;
     const url = localHttpEndpoint(native.endpoint, "/session/status");
     if (!url) return false;
     const response = await fetch(url, { headers: nativeHeaders(native, env), signal: AbortSignal.timeout(2_000) });
@@ -579,7 +716,16 @@ function nativeStateChecker(native: NativeTarget | undefined, env: Env): (() => 
 }
 
 function nativeHeaders(native: NativeTarget, env: Env): Record<string, string> {
-  const token = native.authEnv ? safeAuthToken(env[native.authEnv]) : undefined;
+  if (native.kind === "opencode") {
+    const passwordEnv = native.auth?.passwordEnv ?? "OPENCODE_SERVER_PASSWORD";
+    const usernameEnv = native.auth?.usernameEnv ?? "OPENCODE_SERVER_USERNAME";
+    const password = safeAuthToken(env[passwordEnv]);
+    if (!password) return {};
+    const username = safeAuthToken(env[usernameEnv]) ?? "opencode";
+    return { Authorization: `Basic ${Buffer.from(`${username}:${password}`, "utf8").toString("base64")}` };
+  }
+  const tokenEnv = native.auth?.tokenEnv ?? native.authEnv;
+  const token = tokenEnv ? safeAuthToken(env[tokenEnv]) : undefined;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -632,7 +778,8 @@ function localHttpEndpoint(endpoint: string, suffix: string): string | null {
 }
 
 function rpcOverWebSocket(native: NativeTarget, env: Env, method: string, params: Record<string, unknown>): Promise<RpcMessage> {
-  const token = native.authEnv ? safeAuthToken(env[native.authEnv]) : undefined;
+  const tokenEnv = native.auth?.tokenEnv ?? native.authEnv;
+  const token = tokenEnv ? safeAuthToken(env[tokenEnv]) : undefined;
   if (!token && !isLoopbackEndpoint(native.endpoint)) return Promise.reject(new Error("Codex remote WebSocket requires an authenticated endpoint."));
   if (token) return rpcOverNetworkSocket(native.endpoint, method, params, token, "Codex App Server WebSocket");
   return rpcOverBrowserWebSocket(native.endpoint, method, params);
@@ -682,7 +829,8 @@ function rpcOverUnixSocket(native: NativeTarget, env: Env, method: string, param
   const endpoint = native.endpoint;
   const socketPath = decodeURIComponent(endpoint.slice("unix://".length));
   if (!socketPath || socketPath === "/") return Promise.reject(new Error("Codex Unix transport requires an explicit socket path."));
-  return rpcOverSocket(() => createConnection(socketPath), "localhost", "/", native.authEnv ? safeAuthToken(env[native.authEnv]) : undefined, method, params, "Codex Unix App Server");
+  const tokenEnv = native.auth?.tokenEnv ?? native.authEnv;
+  return rpcOverSocket(() => createConnection(socketPath), "localhost", "/", tokenEnv ? safeAuthToken(env[tokenEnv]) : undefined, method, params, "Codex Unix App Server");
 }
 
 interface NativeSocket {
@@ -861,12 +1009,16 @@ function targetFromProcess(identity: ProcessIdentity, source: Source, env: Recor
     processStartTime: identity.processStartTime,
     ownerUid: identity.ownerUid,
     ownerIdentity: identity.ownerIdentity,
+    ownerSid: identity.ownerSid,
     executable: identity.executable,
     sessionId: env.TOKEN_FURNACE_NATIVE_SESSION || null,
     native: env.TOKEN_FURNACE_NATIVE_ENDPOINT ? {
       kind: source === "opencode" ? "opencode" : "codex",
       endpoint: env.TOKEN_FURNACE_NATIVE_ENDPOINT,
       transport: env.TOKEN_FURNACE_NATIVE_TRANSPORT as NativeTarget["transport"],
+      auth: source === "opencode"
+        ? { scheme: "basic", usernameEnv: env.TOKEN_FURNACE_NATIVE_USERNAME_ENV || "OPENCODE_SERVER_USERNAME", passwordEnv: env.TOKEN_FURNACE_NATIVE_PASSWORD_ENV || "OPENCODE_SERVER_PASSWORD" }
+        : env.TOKEN_FURNACE_NATIVE_AUTH_ENV ? { scheme: "bearer", tokenEnv: env.TOKEN_FURNACE_NATIVE_AUTH_ENV } : undefined,
       authEnv: env.TOKEN_FURNACE_NATIVE_AUTH_ENV,
       sessionId: env.TOKEN_FURNACE_NATIVE_SESSION,
       threadId: env.TOKEN_FURNACE_NATIVE_THREAD,
@@ -984,28 +1136,61 @@ function parsePsLine(line: string): ProcessIdentity | null {
 
 function inspectWindowsProcess(pid: number): ProcessIdentity | null {
   try {
-    const script = "$p=Get-CimInstance Win32_Process -Filter 'ProcessId=" + String(pid) + "'; if($p){$o=$p.GetOwner(); Write-Output ($p.ProcessId.ToString()+\"|\"+$p.ParentProcessId.ToString()+\"|\"+$p.CreationDate.ToUniversalTime().Ticks.ToString()+\"|\"+$p.ExecutablePath+\"|\"+$o.User+\"|\"+$p.CommandLine)}";
+    const script = windowsProcessScript(`Get-CimInstance Win32_Process -Filter 'ProcessId=${String(pid)}'`);
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return parseWindowsLine(output);
+    return parseWindowsOutput(output)[0] ?? null;
   } catch { return null; }
 }
 
 function listWindowsProcesses(): ProcessIdentity[] {
   try {
-    const script = "$rows=Get-CimInstance Win32_Process | ForEach-Object {$o=$_.GetOwner(); $_.ProcessId.ToString()+\"|\"+$_.ParentProcessId.ToString()+\"|\"+$_.CreationDate.ToUniversalTime().Ticks.ToString()+\"|\"+$_.ExecutablePath+\"|\"+$o.User+\"|\"+$_.CommandLine}; $rows";
+    const script = windowsProcessScript("Get-CimInstance Win32_Process");
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return output.split(/\r?\n/).map((line) => parseWindowsLine(line)).filter((value): value is ProcessIdentity => value !== null);
+    return parseWindowsOutput(output);
   } catch { return []; }
 }
 
-function parseWindowsLine(line: string): ProcessIdentity | null {
-  const parts = line.trim().split("|");
-  if (parts.length < 5) return null;
-  const pid = Number(parts[0]);
-  const parentPid = Number(parts[1]);
-  const ticks = Number(parts[2]);
-  if (!Number.isInteger(pid) || !Number.isInteger(parentPid) || !Number.isFinite(ticks)) return null;
-  return { pid, parentPid, ownerUid: null, ownerIdentity: parts[4] || null, processStartTime: Math.floor(ticks / 10_000) - 11644473600000, executable: parts[3] || null, commandLine: parts.slice(5).join("|") || null };
+function windowsProcessScript(query: string): string {
+  return `$rows=@(${query} | ForEach-Object { try { $owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ return }; [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } } catch { } }); $rows | ConvertTo-Json -Compress`;
+}
+
+function parseWindowsOutput(output: string): ProcessIdentity[] {
+  try {
+    const parsed = JSON.parse(output) as WindowsProcessRecord | WindowsProcessRecord[];
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows.map(parseWindowsRecord).filter((value): value is ProcessIdentity => value !== null);
+  } catch { return []; }
+}
+
+interface WindowsProcessRecord {
+  ProcessId?: unknown;
+  ParentProcessId?: unknown;
+  StartTime?: unknown;
+  ExecutablePath?: unknown;
+  Domain?: unknown;
+  User?: unknown;
+  Sid?: unknown;
+  CommandLine?: unknown;
+}
+
+function parseWindowsRecord(row: WindowsProcessRecord): ProcessIdentity | null {
+  const pid = Number(row.ProcessId);
+  const parentPid = Number(row.ParentProcessId);
+  const processStartTime = Number(row.StartTime);
+  if (!Number.isInteger(pid) || !Number.isInteger(parentPid) || !Number.isFinite(processStartTime) || processStartTime <= 0) return null;
+  const domain = typeof row.Domain === "string" ? row.Domain : "";
+  const user = typeof row.User === "string" ? row.User : "";
+  const ownerIdentity = domain && user ? `${domain}\\${user}` : user || null;
+  return {
+    pid,
+    parentPid,
+    ownerUid: null,
+    ownerIdentity,
+    ownerSid: typeof row.Sid === "string" ? row.Sid : null,
+    processStartTime,
+    executable: typeof row.ExecutablePath === "string" ? row.ExecutablePath : null,
+    commandLine: typeof row.CommandLine === "string" ? row.CommandLine : null,
+  };
 }
 
 function terminateProcess(pid: number, signal: NodeJS.Signals): void {
@@ -1013,7 +1198,7 @@ function terminateProcess(pid: number, signal: NodeJS.Signals): void {
     process.kill(pid, signal);
     return;
   }
-  const args = ["/PID", String(pid)];
+  const args = ["/PID", String(pid), "/T"];
   if (signal === "SIGKILL") args.push("/F");
   execFileSync("taskkill.exe", args, { stdio: "ignore" });
 }

@@ -19,7 +19,7 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
-import { controlTargetProof, type ControlOutcome } from "./services/agent-control";
+import { controlTargetProof, type ControlOutcome, type NativeTarget } from "./services/agent-control";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
 
@@ -307,7 +307,7 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   const model = metadata?.model ?? null;
   const account = source ? app.budgets.verifiedAccount(source, provider, metadata?.account) : null;
   const identity = source ? { source, provider, model, account } : null;
-  if (identity && (phase === "start" || provider || model || metadata?.account || stringValue(event.nativeEndpoint ?? event.native_endpoint ?? event.serverUrl ?? event.server_url))) {
+  if (identity && (phase === "start" || provider || model || metadata?.account || nativeFromEvent(event, identity.source))) {
     registerHookTarget(app, event, identity);
   }
   if ((reservationId || requestId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
@@ -364,10 +364,9 @@ function registerHookTarget(app: App, event: Record<string, unknown>, identity: 
   const pid = numberValue(event.pid ?? event.processId ?? event.process_id) ?? process.ppid;
   const expectedExecutable = stringValue(event.executable ?? event.executablePath ?? event.executable_path);
   const observed = pid ? app.control.owningProcess(pid, identity.source, expectedExecutable) : null;
-  if (!observed || !Number.isFinite(observed.processStartTime) || (observed.ownerUid === null && !observed.ownerIdentity)) return;
-  const nativeKind = identity.source === "opencode" ? "opencode" : identity.source === "codex" ? "codex" : undefined;
-  const endpoint = stringValue(event.nativeEndpoint ?? event.native_endpoint ?? event.serverUrl ?? event.server_url);
-  const sessionId = stringValue(event.sessionId ?? event.session_id);
+  if (!observed || !Number.isFinite(observed.processStartTime) || (observed.ownerUid === null && !observed.ownerIdentity && !observed.ownerSid)) return;
+  const native = nativeFromEvent(event, identity.source);
+  const sessionId = stringValue(event.sessionId ?? event.session_id) ?? native?.sessionId ?? null;
   app.control.register({
     id: sessionId ?? `${identity.source}:${observed.pid}:${observed.processStartTime}`,
     source: identity.source,
@@ -378,20 +377,35 @@ function registerHookTarget(app: App, event: Record<string, unknown>, identity: 
     processStartTime: observed.processStartTime,
     ownerUid: observed.ownerUid,
     ownerIdentity: observed.ownerIdentity,
+    ownerSid: observed.ownerSid,
     executable: observed.executable,
     sessionId,
-    native: nativeKind && endpoint ? {
-      kind: nativeKind,
-      endpoint,
-      transport: event.nativeTransport === "websocket" || event.nativeTransport === "unix" || event.nativeTransport === "stdio" || event.nativeTransport === "http"
-        ? event.nativeTransport : undefined,
-      authEnv: stringValue(event.nativeAuthEnv ?? event.native_auth_env) ?? undefined,
-      sessionId: stringValue(event.nativeSessionId ?? event.native_session_id) ?? sessionId ?? undefined,
-      threadId: stringValue(event.threadId ?? event.thread_id ?? event.session_id) ?? undefined,
-      turnId: stringValue(event.turnId ?? event.turn_id) ?? undefined,
-    } : undefined,
+    native: native ? { ...native, sessionId: native.sessionId ?? sessionId ?? undefined } : undefined,
     exclusive: event.exclusive === true && observed.pid === pid,
   });
+}
+
+function nativeFromEvent(event: Record<string, unknown>, source: Source): NativeTarget | undefined {
+  const value = event.native;
+  if (!value || typeof value !== "object") return undefined;
+  const native = value as Record<string, unknown>;
+  const endpoint = stringValue(native.endpoint);
+  const expectedKind: NativeTarget["kind"] | null = source === "opencode" ? "opencode" : source === "codex" ? "codex" : null;
+  if (!endpoint || !expectedKind || native.kind !== expectedKind) return undefined;
+  const transport = native.transport === "websocket" || native.transport === "unix" || native.transport === "stdio" || native.transport === "http" ? native.transport : undefined;
+  const rawAuth = native.auth;
+  const auth: NativeTarget["auth"] = rawAuth && typeof rawAuth === "object" ? (() => {
+    const value = rawAuth as Record<string, unknown>;
+    if (value.scheme !== "basic" && value.scheme !== "bearer") return undefined;
+    const envName = (candidate: unknown): string | undefined => typeof candidate === "string" && /^[A-Z_][A-Z0-9_]*$/.test(candidate) ? candidate : undefined;
+    return { scheme: value.scheme as "basic" | "bearer", tokenEnv: envName(value.tokenEnv), usernameEnv: envName(value.usernameEnv), passwordEnv: envName(value.passwordEnv) };
+  })() : undefined;
+  if (rawAuth && !auth) return undefined;
+  const sessionId = stringValue(native.sessionId ?? native.session_id);
+  const threadId = stringValue(native.threadId ?? native.thread_id);
+  const turnId = stringValue(native.turnId ?? native.turn_id);
+  if (expectedKind === "opencode" && !sessionId) return undefined;
+  return { kind: expectedKind, endpoint, transport, auth, sessionId: sessionId ?? undefined, threadId: threadId ?? undefined, turnId: turnId ?? undefined };
 }
 
 function usageAmount(event: Record<string, unknown>): number | null {

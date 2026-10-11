@@ -25,6 +25,20 @@ async function boot() {
 }
 
 describe("budget HTTP controls", () => {
+  it("serves the Budgets tab on a first run with no transcript report", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-empty-"));
+    roots.push(root);
+    const app = compose({ HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state") }, { noCache: true });
+    await app.reports.refresh();
+    const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    servers.push(server);
+    const response = await fetch(`${server.url}/`);
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(html).toContain("budgets");
+    expect(html).not.toContain("No assistant turns.");
+  });
+
   it("preserves a cached meter observation time and makes stale Auto unavailable", async () => {
     const root = mkdtempSync(join(tmpdir(), "tf-budget-stale-"));
     roots.push(root);

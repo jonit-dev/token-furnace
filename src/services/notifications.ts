@@ -10,7 +10,8 @@
  * returned message never carries the destination URL or the token.
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Report, Source } from "../core/model";
@@ -199,9 +200,20 @@ export function saveSettings(env: Env, settings: NotificationSettings): void {
   const path = settingsPath(env);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
-  chmodSync(path, 0o600);
+  try {
+    writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+    if (process.platform === "win32") enforceWindowsPrivateFile(temporary);
+    renameSync(temporary, path);
+    if (process.platform !== "win32") chmodSync(path, 0o600);
+  } catch (error) {
+    if (existsSync(temporary)) unlinkSync(temporary);
+    throw error;
+  }
+}
+
+function enforceWindowsPrivateFile(path: string): void {
+  const script = "$path=$args[0]; $acl=Get-Acl -LiteralPath $path; $acl.SetAccessRuleProtection($true,$false); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; if($null -eq $sid){throw 'Current Windows SID is unavailable.'}; foreach($entry in @($acl.Access)){ $acl.PurgeAccessRules($entry.IdentityReference) }; $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $path -AclObject $acl";
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { stdio: ["ignore", "ignore", "pipe"] });
 }
 
 export interface DeliveryResult {

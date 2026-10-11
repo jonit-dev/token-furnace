@@ -1031,12 +1031,19 @@ function callBudget(event) {
   if (result.exitCode !== 0 || !body.allow) throw new Error(body.reason || "Token Furnace budget hook denied the request.");
   return body;
 }
+function nativeFor(ctx, sessionID) {
+  return {
+    kind: "opencode",
+    endpoint: String(ctx.serverUrl),
+    transport: "http",
+    sessionId: sessionID,
+    auth: { scheme: "basic", usernameEnv: "OPENCODE_SERVER_USERNAME", passwordEnv: "OPENCODE_SERVER_PASSWORD" },
+  };
+}
 export const TokenFurnaceBudget = async (ctx) => ({
   "tool.execute.before": async (input) => {
     const identity = await modelFor(ctx, input.sessionID);
-    // Bun's execPath is the plugin runtime, not the owning OpenCode command. Let the hook resolve
-    // the native host from its actual process identity and command line.
-    const decision = callBudget({ source: "opencode", ...identity, identityVerified: true, session_id: input.sessionID, sessionId: input.sessionID, nativeEndpoint: String(ctx.serverUrl), nativeTransport: "http", pid: process.pid, requestId: process.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID ?? input.callID });
+    const decision = callBudget({ source: "opencode", ...identity, identityVerified: true, session_id: input.sessionID, sessionId: input.sessionID, native: nativeFor(ctx, input.sessionID), pid: process.pid, requestId: process.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID ?? input.callID });
     if (decision.reservationId) {
       reservationByCall.set(input.callID, decision.reservationId);
       sessionByCall.set(input.callID, input.sessionID);
@@ -1064,7 +1071,7 @@ export const TokenFurnaceBudget = async (ctx) => ({
       if (ownedSession !== sessionID) continue;
       const reservationId = reservationByCall.get(callID);
       if (!reservationId) continue;
-      callBudget({ source: "opencode", phase: "abandon", reservationId, eventId: String(sessionID), session_id: String(sessionID), pid: process.pid });
+      callBudget({ source: "opencode", phase: "abandon", reservationId, eventId: String(sessionID), session_id: String(sessionID), native: nativeFor(ctx, String(sessionID)), pid: process.pid });
       reservationByCall.delete(callID);
       sessionByCall.delete(callID);
     }
