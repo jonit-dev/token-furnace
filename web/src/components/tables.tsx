@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import type { BaselineRow, Issue, Report } from "../../../src/core/model";
 import { fmt, LEVEL, LEVEL_ORDER, plural, sharePct, SOURCE_LABEL, TH } from "./format";
 import { Card, CopyButton, LevelTag, SourceBadge } from "./ui";
+import { sessionKey, useUi } from "../store";
 
 // One row per leak. The row opens in place; the prompt holds the why text and the evidence lines.
 function LeakRow({ i, open, onToggle }: { i: Issue; open: boolean; onToggle: () => void }) {
@@ -221,6 +222,7 @@ function Block({ title, headers, rows }: { title: string; headers: string[]; row
 }
 
 export function Sessions({ r }: { r: Partial<Report> }) {
+  const names = useUi((state) => state.sessionNames);
   const unpriced = r.unpriced ?? null;
   const blocks: { title: string; headers: string[]; rows: ReactNode[][] }[] = [
     {
@@ -236,8 +238,8 @@ export function Sessions({ r }: { r: Partial<Report> }) {
             className="text-[10px] px-1 py-0.5 bg-chip rounded border border-line hover:border-accent"
           />
         </div>,
-        <div key="title" className="truncate max-w-[22rem]" title={s.title || s.id}>
-          {s.title || s.id}
+        <div key="title" className="truncate max-w-[22rem]" title={names[sessionKey(s)] || s.title || s.id}>
+          {names[sessionKey(s)] || s.title || s.id}
         </div>,
         sharePct(s.share),
         s.turns ?? 0,

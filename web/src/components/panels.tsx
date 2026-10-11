@@ -1,13 +1,13 @@
 import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/context";
 import { sessionFixPrompt } from "../../../src/core/analyze/issues";
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import type { Burn, Report, Source } from "../../../src/core/model";
 import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
 import { Bar, Card, CopyButton, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
 import { Icon } from "./icons";
 import { Modal } from "./modal";
-import { useUi } from "../store";
+import { sessionKey, useUi } from "../store";
 
 export function ActNow({ r }: { r: Partial<Report> }) {
   const acts = r.actions ?? [];
@@ -68,6 +68,7 @@ function SessionTable({
   onOpen: (s: ActiveRow) => void;
   head?: boolean;
 }) {
+  const names = useUi((state) => state.sessionNames);
   return (
     <div className="session-table-container -mx-1">
       <table className="session-table w-full text-xs">
@@ -75,6 +76,7 @@ function SessionTable({
           <thead>
             <tr className="text-left text-[10px] uppercase tracking-wide text-muted [&_th]:font-normal">
               <th className="px-1">Session</th>
+              <th className="px-1">Project</th>
               <th className="px-1">Model</th>
               <th className="px-1 text-right" title="Burn rate">Burn</th>
               <th className="px-1" title="Provider burn share">Share</th>
@@ -86,24 +88,31 @@ function SessionTable({
           </thead>
         ) : null}
         <tbody>
-          {sessions.map((s, i) => {
+          {sessions.map((s) => {
+            const title = names[sessionKey(s)] || s.title || "(untitled)";
             const share = Number(s.rateShare) || 0;
             const hot = share >= 50;
             const limit = burns?.[s.source]?.limit;
             const providerLabel = sourceLabel(s.source);
             const n = s.flags?.length ?? 0;
             return (
-              <tr key={i} onClick={() => onOpen(s)} className="border-t border-line cursor-pointer hover:bg-chip/40">
+              <tr key={sessionKey(s)} onClick={() => onOpen(s)} className="border-t border-line cursor-pointer hover:bg-chip/40">
                 <td className="px-1 py-1.5 min-w-0 flex items-center gap-1.5">
                   <SourceBadge source={s.source} />
-                  <span className="truncate font-medium min-w-0" title={s.title || "(untitled)"}>
-                    {s.title || "(untitled)"}
+                  <span className="truncate font-medium min-w-0" title={title}>
+                    {title}
                   </span>
-                  <span className="shrink-0 max-w-[7rem] truncate text-muted" title={s.project ?? "?"}>
-                    {s.project ?? "?"}
-                  </span>
+                  <button type="button" aria-label={`Rename ${title}`} title="Rename session"
+                    onClick={(e) => { e.stopPropagation(); onOpen(s); }}
+                    className="shrink-0 p-1 text-muted hover:text-accent focus-visible:outline focus-visible:outline-accent">
+                    <Icon name="Pencil" size={12} />
+                  </button>
                 </td>
-                <td className="px-1 py-1.5 min-w-0 text-muted">
+                <td data-label="Project" className="px-1 py-1.5 text-muted">
+                  <div className="truncate" title={s.project ?? "?"}>{s.project ?? "?"}</div>
+                  <div className="truncate text-[10px] text-muted/70" title={s.fullId || s.id}>{s.id}</div>
+                </td>
+                <td data-label="Model" className="px-1 py-1.5 min-w-0 text-muted">
                   <div className="truncate" title={s.model || undefined}>
                     {s.model ? s.model.replace(/^claude-/, "") : "—"}
                   </div>
@@ -130,7 +139,7 @@ function SessionTable({
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onOpen(s); }}
-                    aria-label={`${n ? `${n} ${n === 1 ? "fix" : "fixes"}` : "Details"} for ${s.title || "(untitled)"}`}
+                    aria-label={`${n ? `${n} ${n === 1 ? "fix" : "fixes"}` : "Details"} for ${title}`}
                     className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
                       n ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-chip text-muted"
                     } hover:border-accent`}
@@ -148,6 +157,39 @@ function SessionTable({
   );
 }
 
+function SessionNameEditor({ session, onCancel }: { session: ActiveRow; onCancel: () => void }) {
+  const key = sessionKey(session);
+  const name = useUi((state) => state.sessionNames[key]);
+  const setName = useUi((state) => state.setSessionName);
+  const showToast = useUi((state) => state.showToast);
+  const [draft, setDraft] = useState(name || session.title || "");
+  const inputId = useId();
+  return <form onSubmit={(e) => {
+    e.preventDefault();
+    const trimmed = draft.trim();
+    if (!trimmed || trimmed.length > 200) return;
+    setName(key, trimmed);
+    onCancel();
+    showToast(`Session renamed to “${trimmed}”.`);
+  }} className="space-y-2">
+    <label htmlFor={inputId} className="block text-muted">Session name</label>
+    <input id={inputId} value={draft} onChange={(e) => setDraft(e.target.value)} required maxLength={200}
+      className="w-full rounded border border-line bg-bg px-3 py-2 text-ink focus:border-accent focus:outline-none" />
+    <p className="text-muted">Saved in this browser. Original transcript stays unchanged.</p>
+    <div className="flex flex-wrap gap-2">
+      <button type="submit" disabled={!draft.trim() || draft.trim().length > 200}
+        className="rounded border border-accent px-3 py-1 hover:bg-accent/10 disabled:opacity-40">Save name</button>
+      <button type="button" onClick={onCancel} className="rounded border border-line px-3 py-1 hover:border-accent">Cancel</button>
+      {name && <button type="button" onClick={() => {
+        setName(key, null);
+        onCancel();
+        showToast("Original session name restored.");
+      }}
+        className="rounded border border-line px-3 py-1 text-muted hover:border-accent">Reset name</button>}
+    </div>
+  </form>;
+}
+
 function SessionModal({
   session: s,
   burns,
@@ -157,6 +199,7 @@ function SessionModal({
   burns?: Report["burns"];
   onClose: () => void;
 }) {
+  const names = useUi((state) => state.sessionNames);
   const stats: [string, string][] = s
     ? [
         ["Burn rate", burnText(s, burns)],
@@ -172,7 +215,7 @@ function SessionModal({
     <Modal
       open={s != null}
       onClose={onClose}
-      title={s?.title || "(untitled)"}
+      title={(s && (names[sessionKey(s)] || s.title || "(untitled)")) || "(untitled)"}
       description={
         s ? (
           <div className="flex flex-wrap items-center gap-2">
@@ -198,6 +241,7 @@ function SessionModal({
     >
       {s ? (
         <div className="space-y-4 text-xs">
+          <SessionNameEditor key={sessionKey(s)} session={s} onCancel={onClose} />
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
             {stats.map(([k, v]) => (
               <div key={k}>
@@ -244,13 +288,17 @@ export function ActiveSessions({
   sessions: Report["active"];
   burns?: Report["burns"];
 }) {
-  const [selected, setSelected] = useState<ActiveRow | null>(null);
+  const modal = useUi((state) => state.modal);
+  const setModal = useUi((state) => state.setModal);
+  const selectedKey = typeof modal === "object" && modal?.type === "session" ? modal.key : null;
+  const selected = sessions.find((s) => sessionKey(s) === selectedKey) ?? null;
+  const select = (s: ActiveRow) => setModal({ type: "session", key: sessionKey(s) });
   if (!sessions.length) {
     return <p className="text-sm text-muted">No session had a turn in the last 30 minutes.</p>;
   }
   const attention = sessions.filter((s) => (s.flags?.length ?? 0) > 0);
   const others = sessions.filter((s) => !s.flags || s.flags.length === 0);
-  const close = () => setSelected(null);
+  const close = () => setModal(null);
 
   return (
     <div className="space-y-4">
@@ -260,7 +308,7 @@ export function ActiveSessions({
           Needs attention ({attention.length})
         </h3>
         {attention.length ? (
-          <SessionTable sessions={attention} burns={burns} onOpen={setSelected} />
+          <SessionTable sessions={attention} burns={burns} onOpen={select} />
         ) : (
           <p className="text-xs text-muted py-1">No active sessions have triggered leak flags.</p>
         )}
@@ -270,7 +318,7 @@ export function ActiveSessions({
           Other active sessions ({others.length})
         </h3>
         {others.length ? (
-          <SessionTable sessions={others} burns={burns} onOpen={setSelected} head={!attention.length} />
+          <SessionTable sessions={others} burns={burns} onOpen={select} head={!attention.length} />
         ) : (
           <p className="text-xs text-muted py-1">No other active sessions.</p>
         )}

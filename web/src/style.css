@@ -13,7 +13,7 @@ html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: I
 .session-table, .session-table thead, .session-table tbody { display: block; }
 .session-table tr {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 6rem 3.5rem 4.5rem 3rem 2.6rem 2.6rem 3.6rem;
+  grid-template-columns: minmax(0, 1fr) minmax(4rem, 6rem) 6rem 3.5rem 4.5rem 3rem 2.6rem 2.6rem 3.6rem;
   align-items: center;
 }
 .session-table th, .session-table td { min-width: 0; }

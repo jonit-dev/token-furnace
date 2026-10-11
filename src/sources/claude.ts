@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import type { ParsedFile, SourceFile, Turn, Wake } from "../core/model";
 import {
   classifyPrompt,
+  deriveHandoffTitle,
   isRead,
   jsonParse,
   num,
@@ -135,6 +136,8 @@ function userTitle(record: Record<string, any>): string | null {
   const command = /<command-name>(.*?)<\/command-name>/.exec(content);
   const args = /<command-args>(.*?)<\/command-args>/s.exec(content);
   const text = command ? `${command[1]} ${args ? args[1] : ""}` : content;
+  const handoff = deriveHandoffTitle(text);
+  if (handoff) return "title" in handoff ? handoff.title : null;
   return text.split(/\s+/).join(" ").trim().slice(0, 80) || null;
 }
 

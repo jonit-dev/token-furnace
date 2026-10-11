@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
-import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, within, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ActiveSessions } from "./components/panels";
 import { Sessions } from "./components/tables";
 import type { ActiveSession, Report, SessionRow } from "../../src/core/model";
+import { useUi } from "./store";
+import { Toasts } from "./components/toasts";
 
 describe("ActiveSessions and Sessions UI improvements", () => {
   beforeEach(() => {
+    localStorage.clear();
+    useUi.setState({ sessionNames: {}, modal: null, toast: null });
     Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
     Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
   });
@@ -107,6 +111,87 @@ describe("ActiveSessions and Sessions UI improvements", () => {
   it("shows existing empty message when active sessions array is empty", () => {
     render(<ActiveSessions sessions={[]} />);
     expect(screen.getByText("No session had a turn in the last 30 minutes.")).toBeTruthy();
+  });
+
+  const editableSession: ActiveSession = {
+    source: "codex", project: "token-furnace", id: "abcdef01", fullId: "abcdef01-first",
+    title: "Nonsense title", share: 5, turns: 2, peak: 50000, hours: 0.5,
+    context: 50000, idle: 5, flags: [], model: "gpt-6.1-sol", rate: 100000, rateShare: 20,
+  };
+
+  it("shows the short session ID beneath the project", () => {
+    render(<ActiveSessions sessions={[{ ...editableSession, project: "api-backend", id: "abcd1234" }]} />);
+    expect(screen.getByText("api-backend")).toBeTruthy();
+    expect(screen.getByText("abcd1234")).toBeTruthy();
+  });
+
+  it("renames only the matching provider/full ID and keeps the name after refresh and rehydration", async () => {
+    const sessions = [editableSession,
+      { ...editableSession, fullId: "abcdef01-second", title: "Same short ID" },
+      { ...editableSession, source: "claude" as const, title: "Another provider" }];
+    const { rerender } = render(<><ActiveSessions sessions={sessions} /><Toasts /></>);
+    expect(screen.getByRole("columnheader", { name: "Project" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Rename Nonsense title" }));
+    const input = screen.getByRole("textbox", { name: "Session name" });
+    fireEvent.change(input, { target: { value: "  Fix session names  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("Session renamed");
+    expect(useUi.getState().modal).toBeNull();
+    expect(screen.getByRole("button", { name: "Rename Fix session names" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rename Same short ID" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rename Another provider" })).toBeTruthy();
+    const saved = localStorage.getItem("token-furnace-provider-pins")!;
+    act(() => useUi.setState({ sessionNames: {} }));
+    localStorage.setItem("token-furnace-provider-pins", saved);
+    await act(async () => { await useUi.persist.rehydrate(); });
+    rerender(<ActiveSessions sessions={sessions.map((s) => ({ ...s, title: "New generated title" }))} />);
+    expect(screen.getByRole("button", { name: "Rename Fix session names" })).toBeTruthy();
+    cleanup();
+    render(<Sessions r={{ topSessions: [{ ...editableSession, path: "/tmp/session.jsonl" }] }} />);
+    expect(screen.getByText("Fix session names")).toBeTruthy();
+  });
+
+  it("cancels edits, rejects blank names and resets to the generated title", () => {
+    render(<><ActiveSessions sessions={[editableSession]} /><Toasts /></>);
+    fireEvent.click(screen.getByRole("button", { name: "Rename Nonsense title" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Session name" }), { target: { value: "Discard this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rename Nonsense title" }));
+    const input = screen.getByRole("textbox", { name: "Session name" });
+    expect((input as HTMLInputElement).value).toBe("Nonsense title");
+    fireEvent.change(input, { target: { value: "   " } });
+    expect((screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: "Useful name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Rename Useful name" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset name" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: "Rename Nonsense title" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("Original session name restored");
+    expect(JSON.parse(localStorage.getItem("token-furnace-provider-pins")!).state.sessionNames).toEqual({});
+  });
+
+  it("uses the shared modal slot so configuration replaces session details", () => {
+    render(<ActiveSessions sessions={[editableSession]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Rename Nonsense title" }));
+    const dialog = screen.getByRole("dialog");
+    expect(useUi.getState().modal).toEqual({ type: "session", key: "codex:abcdef01-first" });
+    act(() => useUi.getState().setModal("auto-fixes"));
+    fireEvent(dialog, new Event("close"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(useUi.getState().modal).toBe("auto-fixes");
+  });
+
+  it("ignores malformed persisted session names", async () => {
+    localStorage.setItem("token-furnace-provider-pins", JSON.stringify({ state: {
+      sessionNames: { "codex:abcdef01-first": 123, "codex:other": "   ", "codex:long": "x".repeat(201) },
+    }, version: 0 }));
+    await act(async () => { await useUi.persist.rehydrate(); });
+    render(<ActiveSessions sessions={[editableSession]} />);
+    expect(screen.getByRole("button", { name: "Rename Nonsense title" })).toBeTruthy();
+    expect(useUi.getState().sessionNames).toEqual({});
   });
 
   it("opens a session modal with full title, stats, Copy ID and Copy fix", async () => {

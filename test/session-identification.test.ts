@@ -16,6 +16,19 @@ describe("Session identification and actionability", () => {
 
     const multiline = "\n\n  \n# Heading to ignore\n\nFix memory leak in report generation\nMore details here";
     expect(extractCodexTitle(multiline)).toBe("Fix memory leak in report generation");
+
+    // Handoff with meaningful stem: sentence case, only the first word capitalized.
+    expect(extractCodexTitle("Read /tmp/spellbook-sonnet-brief.md and execute")).toBe("Spellbook sonnet brief");
+    expect(extractCodexTitle("Please Read /docs/fix-auth-tokens.md")).toBe("Fix auth tokens");
+
+    // Ordinary prose that mentions a file is left alone.
+    expect(extractCodexTitle("Fix config.toml")).toBe("Fix config.toml");
+
+    // Opaque handoffs: a UUID or a hash, with or without an extension, or behind a prefix.
+    expect(extractCodexTitle("Read /tmp/01a127e3-70f6-7dd3-9dfb-7504ffeb687d.md and continue")).toBeNull();
+    expect(extractCodexTitle("Read /tmp/01a127e3-70f6-7dd3-9dfb-7504ffeb687d")).toBeNull();
+    expect(extractCodexTitle("Read /tmp/abcdef0123456789.md")).toBeNull();
+    expect(extractCodexTitle("Read /home/x/opus-quota-handoff-46b352c3-958f-4680-975c-123456789abc")).toBeNull();
   });
 
   it("buildReport populates fullId and preserves short id for active and top sessions", () => {

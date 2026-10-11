@@ -16,6 +16,11 @@ function iso(when: Date): string {
 
 const median = (xs: number[]): number => (xs.length ? [...xs].sort((a, b) => a - b)[xs.length >> 1] : 0);
 
+/** A display name for a session with no native or prompt title: project plus short id. */
+function named<T extends { title: string | null; project: string; id: string }>(s: T): T {
+  return s.title ? s : { ...s, title: s.project ? `${s.project} ${s.id}` : "(untitled)" };
+}
+
 /** Everything dashboard.html draws, as JSON-ready data. The page owns all markup. burn.py:1415 */
 export function reportView(report: RawReport, now: Date): Report {
   const issues = topIssues(report);
@@ -123,7 +128,7 @@ export function reportView(report: RawReport, now: Date): Report {
       sessions: i.hits.length,
       prompt: issuePrompt(i),
     })),
-    active: report.active,
+    active: report.active.map(named),
     burndown,
     contextTargets: CONTEXT_TARGET,
     budget: report.budget,
@@ -134,7 +139,7 @@ export function reportView(report: RawReport, now: Date): Report {
     ])),
     checkHours: CHECK_HOURS,
     baseline: report.baseline,
-    topSessions: report.sessions,
+    topSessions: report.sessions.map(named),
     buckets: report.buckets.map(([label, , share, turns, aboveTargetShare]) => ({
       label,
       aboveTargetShare,

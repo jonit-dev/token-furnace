@@ -10,6 +10,7 @@ import { Checks, Leaks, Sessions } from "./components/tables";
 import { Tips } from "./components/tips";
 import { Resets } from "./components/resets";
 import { Notifications } from "./components/notifications";
+import { Toasts } from "./components/toasts";
 
 const TABS: [Tab, string][] = [
   ["dashboard", "Dashboard"],
@@ -102,6 +103,7 @@ export function App() {
       <main className="mt-3">
         {report || filePage ? bodies[tab] : <p className="text-sm text-muted py-6">Loading report…</p>}
       </main>
+      <Toasts />
     </div>
   );
 }

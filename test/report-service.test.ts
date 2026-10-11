@@ -3,9 +3,9 @@
  * harness, and a second scan must not parse a file that did not change.
  */
 
-import { appendFileSync, mkdtempSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compose, type App } from "../src/compose";
 import { MemorySessionRepository } from "../src/repo/memory-repo";
@@ -126,5 +126,69 @@ describe("getReport", () => {
     expect(report.issues.map((i) => i.title)).toContain("Sessions compact too late");
     expect(Object.keys(report.burns).sort()).toEqual(["claude", "codex"]);
     expect(report.turns).toBeGreaterThan(300);
+  });
+});
+
+const UUID = "01a127e3-70f6-7dd3-9dfb-7504ffeb687d";
+
+/** A codex-only fixture whose rollout filename carries a full UUID, plus an optional native index. */
+function codexNativeApp(indexLines: string[] | null): { app: App; index: string } {
+  const root = mkdtempSync(join(tmpdir(), "tf-native-"));
+  const rollout = join(root, "codex", "sessions", "2026", "10", "10", `rollout-2026-10-10T12-00-00-${UUID}.jsonl`);
+  mkdirSync(dirname(rollout), { recursive: true });
+  writeFileSync(rollout, [
+    JSON.stringify({ type: "session_meta", payload: { cwd: "/srv/api", id: UUID } }),
+    JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.5" } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "fix the thing" }] } }),
+    JSON.stringify({ type: "event_msg", timestamp: new Date(now.getTime() - 5 * 60_000).toISOString(), payload: { type: "token_count", info: { last_token_usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 10 } } } }),
+  ].join("\n") + "\n");
+  const index = join(root, "codex", "session_index.jsonl");
+  if (indexLines) writeFileSync(index, indexLines.join("\n") + "\n");
+  const env = { ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString(), TOKEN_FURNACE_NO_CACHE: "1" };
+  return { app: compose(env), index };
+}
+
+describe("native Codex session names", () => {
+  it("prefers a native thread name keyed by the full rollout UUID", async () => {
+    const { app } = codexNativeApp([JSON.stringify({ id: UUID, thread_name: "Native planner" })]);
+    await app.reports.refresh();
+    const report = app.reports.getReport(7, "codex", { weeklyBudget: null, now })!;
+    expect(report.active[0].title).toBe("Native planner");
+    expect(report.topSessions[0].title).toBe("Native planner");
+    expect(report.active[0].id).toBe("01a127e3");
+  });
+
+  it("falls back to the prompt when the native index is missing", async () => {
+    const { app } = codexNativeApp(null);
+    await app.reports.refresh();
+    expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("fix the thing");
+  });
+
+  it("observes an append-only index rename without reparsing a transcript", async () => {
+    const { app, index } = codexNativeApp([JSON.stringify({ id: UUID, thread_name: "First name" })]);
+    const seen = parseLog(app);
+    await app.reports.refresh();
+    expect(seen).toHaveLength(1);
+    expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("First name");
+    appendFileSync(index, JSON.stringify({ id: UUID, thread_name: "Second name" }) + "\n");
+    await app.reports.refresh();
+    expect(seen).toHaveLength(1); // only the index changed, so no transcript is reparsed
+    expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("Second name");
+  });
+
+  it("tolerates malformed lines and picks the latest nonempty name", async () => {
+    const { app } = codexNativeApp([
+      "not json",
+      JSON.stringify({ id: UUID, thread_name: "Keep me" }),
+      JSON.stringify({ id: UUID, thread_name: "" }),
+    ]);
+    await app.reports.refresh();
+    expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("Keep me");
+  });
+
+  it("never applies a name for an unknown session that shares an eight-character prefix", async () => {
+    const { app } = codexNativeApp([JSON.stringify({ id: "01a127e3-dead-beef-dead-beefdeadbeef", thread_name: "Wrong session" })]);
+    await app.reports.refresh();
+    expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("fix the thing");
   });
 });

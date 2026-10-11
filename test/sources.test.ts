@@ -109,6 +109,25 @@ describe("ClaudeSource", () => {
     expect(new ClaudeSource({ CLAUDE_CONFIG_DIR: join(FIXTURES, "gone") }).files()).toEqual([]);
     expect(new CodexSource({ CODEX_HOME: join(FIXTURES, "gone") }).files()).toEqual([]);
   });
+
+  it("names a handoff first prompt but keeps an explicit native title", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-claude-handoff-"));
+    try {
+      const handoff = join(root, "handoff.jsonl");
+      writeFileSync(handoff, [
+        JSON.stringify({ type: "user", timestamp: "2026-10-01T09:00:00+00:00", message: { content: "Read /tmp/spellbook-sonnet-brief.md and execute" } }),
+        JSON.stringify({ type: "assistant", timestamp: "2026-10-01T09:01:00+00:00", cwd: "/x", message: { model: "claude", usage: { input_tokens: 1, cache_read_input_tokens: 1, cache_creation_input_tokens: 0, output_tokens: 1 }, content: [] } }),
+      ].join("\n"));
+      expect(new ClaudeSource({}).parse(handoff).title).toBe("Spellbook sonnet brief");
+
+      const titled = join(root, "titled.jsonl");
+      writeFileSync(titled, [
+        JSON.stringify({ type: "summary", aiTitle: "Native name" }),
+        JSON.stringify({ type: "user", timestamp: "2026-10-01T09:00:00+00:00", message: { content: "Read /tmp/another-brief.md" } }),
+      ].join("\n"));
+      expect(new ClaudeSource({}).parse(titled).title).toBe("Native name");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 });
 
 describe("CodexSource", () => {

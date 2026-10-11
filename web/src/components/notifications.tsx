@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { PublicSettings } from "../../../src/services/notifications";
 import { Card } from "./ui";
 import { Modal } from "./modal";
+import { useUi } from "../store";
 
 const live = location.protocol === "http:" || location.protocol === "https:";
 const PROVIDERS: { value: PublicSettings["conditions"]["usage"]["provider"]; label: string }[] = [
@@ -18,7 +19,8 @@ export function Notifications() {
   const [status, setStatus] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const [help, setHelp] = useState<"ntfy" | "telegram" | null>(null);
+  const modal = useUi((state) => state.modal);
+  const setModal = useUi((state) => state.setModal);
 
   const load = useCallback(async () => {
     if (!live) return;
@@ -162,7 +164,7 @@ export function Notifications() {
               onChange={(event) => setRemove((current) => ({ ...current, ntfy: event.target.checked }))} />
             Remove the saved token
           </label>
-          <button type="button" onClick={() => setHelp("ntfy")}
+          <button type="button" onClick={() => setModal("ntfy-setup")}
             className="mt-3 text-xs px-3 py-1.5 rounded-lg border border-line bg-chip text-ink hover:border-accent">
             Setup instructions
           </button>
@@ -190,7 +192,7 @@ export function Notifications() {
               onChange={(event) => setRemove((current) => ({ ...current, telegram: event.target.checked }))} />
             Remove the saved token
           </label>
-          <button type="button" onClick={() => setHelp("telegram")}
+          <button type="button" onClick={() => setModal("telegram-setup")}
             className="mt-3 text-xs px-3 py-1.5 rounded-lg border border-line bg-chip text-ink hover:border-accent">
             Setup instructions
           </button>
@@ -253,9 +255,9 @@ export function Notifications() {
         </p>
       </div>
 
-      <Modal open={help === "ntfy"} onClose={() => setHelp(null)} title="ntfy setup"
+      <Modal open={modal === "ntfy-setup"} onClose={() => setModal(null)} title="ntfy setup"
         description="Get phone alerts from your own private topic."
-        footer={<button type="button" onClick={() => setHelp(null)}
+        footer={<button type="button" onClick={() => setModal(null)}
           className="text-xs px-3 py-1.5 rounded-lg border border-line bg-chip text-ink hover:border-accent">Close</button>}>
         <ol className="list-decimal space-y-2 pl-5 text-sm">
           <li>Install the app from <a className="text-accent hover:underline" href="https://ntfy.sh" target="_blank" rel="noreferrer">ntfy.sh</a> (details in the <a className="text-accent hover:underline" href="https://docs.ntfy.sh/subscribe/phone/" target="_blank" rel="noreferrer">official docs</a>) and subscribe it to a unique private topic on your server, for example <code>my-alerts-9f3k</code>. Pick your own unique name, not this example.</li>
@@ -265,9 +267,9 @@ export function Notifications() {
         </ol>
       </Modal>
 
-      <Modal open={help === "telegram"} onClose={() => setHelp(null)} title="Telegram setup"
+      <Modal open={modal === "telegram-setup"} onClose={() => setModal(null)} title="Telegram setup"
         description="Get alerts from a bot you own."
-        footer={<button type="button" onClick={() => setHelp(null)}
+        footer={<button type="button" onClick={() => setModal(null)}
           className="text-xs px-3 py-1.5 rounded-lg border border-line bg-chip text-ink hover:border-accent">Close</button>}>
         <ol className="list-decimal space-y-2 pl-5 text-sm">
           <li>Open the verified <a className="text-accent hover:underline" href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather</a>, send <code>/newbot</code>, and copy the bot token it returns (format <code>123456:ABC-DEF…</code>).</li>

@@ -51,6 +51,27 @@ export class CodexSource implements AgentSource {
   }
 
   /**
+   * Reads $CODEX_HOME/session_index.jsonl if present and returns Map<fullId, thread_name>.
+   * Append-only format; later entries win.
+   */
+  sessionMetadata(): Map<string, string> {
+    const out = new Map<string, string>();
+    const content = this.readFile("session_index.jsonl");
+    if (!content) return out;
+    for (const line of content.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const record = jsonParse(line);
+      if (record && typeof record.id === "string" && typeof record.thread_name === "string") {
+        const title = record.thread_name.trim();
+        if (title) {
+          out.set(record.id, title);
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
    * Codex logs usage in event_msg/token_count and tool calls in separate records.
    *
    * input_tokens already includes the cached portion, unlike Claude Code, so base input is

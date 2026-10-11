@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
-import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, Source, Week } from "../core/model";
+import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week } from "../core/model";
 import type { SessionRepository } from "../repo/session-repo";
 import { ParsePool } from "./parse-pool";
 import type { AgentSource, Env } from "../sources/agent-source";
@@ -136,14 +136,32 @@ export class ReportService {
     const live = this.live(source);
     if (!live.length) return null;
     const cutoff = new Date(now.getTime() - days * 86_400_000);
+
+    // Load native session metadata once per report, without mutating cached session titles
+    const metadataBySource = new Map<Source, Map<string, string>>();
+    for (const agent of this.sources) {
+      if (live.includes(agent.name) && agent.sessionMetadata) {
+        metadataBySource.set(agent.name, agent.sessionMetadata());
+      }
+    }
+
+    const rawSessions = this.repo
+      .all(cutoff)
+      .sort((a, b) => (this.order.get(a.path) ?? Infinity) - (this.order.get(b.path) ?? Infinity));
+
+    const sessions = rawSessions.map((s) => {
+      const meta = metadataBySource.get(s.source);
+      const fullId = fullSessionId(s);
+      const title = fullId ? meta?.get(fullId) : undefined;
+      return title ? { ...s, title } : s;
+    });
+
     return buildReport({
       now,
       days,
       weeklyBudget: opts.weeklyBudget,
       live,
-      sessions: this.repo
-        .all(cutoff)
-        .sort((a, b) => (this.order.get(a.path) ?? Infinity) - (this.order.get(b.path) ?? Infinity)),
+      sessions,
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,
       opencodeWeek: opts.opencodeWeek ?? null,
@@ -171,4 +189,19 @@ export class ReportService {
       env: this.env,
     };
   }
+}
+
+const UUID_ONLY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/**
+ * The full session UUID for a native index lookup. The parser keeps a short eight-character id in
+ * turns, so the full id comes from the rollout filename; a turn id is used only when it is already
+ * a full UUID. A short prefix never matches.
+ */
+function fullSessionId(session: SessionInput): string | null {
+  const turn = session.turns[0]?.session ?? "";
+  if (UUID_ONLY.test(turn)) return turn;
+  const match = UUID_ANY.exec(session.path);
+  return match ? match[0] : null;
 }

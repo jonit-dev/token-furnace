@@ -20,7 +20,7 @@ export function Modal({ open, onClose, title, description, children, footer, bus
 
   return <dialog ref={dialog} aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined}
     onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}
-    onClose={() => { if (!busy) onClose(); }}
+    onClose={() => { if (open && !busy) onClose(); }}
     className="w-[calc(100%-2rem)] max-w-lg max-h-[85dvh] overflow-hidden m-auto p-0 rounded-xl border border-line bg-card text-ink backdrop:bg-black/70 open:flex open:flex-col">
     <header className="shrink-0 border-b border-line p-5">
       <div className="flex items-start justify-between gap-3">

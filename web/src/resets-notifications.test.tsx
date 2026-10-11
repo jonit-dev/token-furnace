@@ -47,7 +47,7 @@ beforeEach(() => {
     HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
   }
   localStorage.clear();
-  useUi.setState({ tab: "dashboard" });
+  useUi.setState({ tab: "dashboard", modal: null, toast: null });
   window.__REPORT__ = null;
   fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
@@ -140,11 +140,14 @@ describe("the Notifications tab", () => {
     const buttons = screen.getAllByRole("button", { name: "Setup instructions" });
     expect(buttons).toHaveLength(2);
     fireEvent.click(buttons[0]);
+    expect(useUi.getState().modal).toBe("ntfy-setup");
     expect(await screen.findByText("Get phone alerts from your own private topic.")).not.toBeNull();
     expect(screen.getByRole("link", { name: "ntfy.sh" }).getAttribute("href")).toBe("https://ntfy.sh");
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() => expect(document.querySelector("dialog[open]")).toBeNull());
+    expect(useUi.getState().modal).toBeNull();
     fireEvent.click(buttons[1]);
+    expect(useUi.getState().modal).toBe("telegram-setup");
     expect(await screen.findByText("Get alerts from a bot you own.")).not.toBeNull();
     expect(screen.getByRole("link", { name: "@BotFather" }).getAttribute("href")).toBe("https://t.me/BotFather");
     fireEvent.keyDown(screen.getByText("Get alerts from a bot you own."), { key: "Escape" });

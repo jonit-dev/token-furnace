@@ -18,6 +18,8 @@ export interface AgentSource {
   week?(now: Date): Week | null;
   /** MEMORY.md indexes the agent loads, with their line counts. Claude only. */
   memoryIndexes?(): { path: string; lines: number }[];
+  /** Map of full session ID to native thread/session title, if the agent stores an index. */
+  sessionMetadata?(): Map<string, string>;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -54,6 +56,36 @@ export function classifyPrompt(text: string): "human" | "teammate" | "task" | "p
   return "human";
 }
 
+/** A full UUID anywhere in a string. */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/** Readable words from a file stem: first word capitalized, acronyms kept, the rest lower case. */
+function humanizeStem(stem: string): string {
+  const words = stem.split(/[-_\s]+/).filter(Boolean);
+  if (!words.length) return "";
+  const parts = words.map((w) => (/[a-z]/.test(w) ? w.toLowerCase() : w));
+  parts[0] = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+  return parts.join(" ");
+}
+
+/**
+ * A readable title from a handoff prompt, or null. A handoff begins with Read or Please read and a
+ * path; the path must carry a separator, so ordinary prose never matches. The stem becomes readable
+ * words, or `opaque` when it names a UUID or a hash (the caller then falls back to project plus id).
+ */
+export function deriveHandoffTitle(text: string): { title: string } | { opaque: true } | null {
+  const start = /^\s*(?:please\s+)?read\s+(\S+)/i.exec(text);
+  if (!start) return null;
+  const token = start[1].replace(/^["'`]|["'`]$/g, "").replace(/[.,;:]+$/, "");
+  if (!/[\\/]/.test(token)) return null; // a path needs a separator
+  const base = token.split(/[\\/]/).pop() ?? "";
+  const stem = base.replace(/\.[^.]+$/, ""); // drop an extension, if any
+  if (!stem) return null;
+  if (UUID_RE.test(stem) || /^[0-9a-f]{16,}$/i.test(stem)) return { opaque: true };
+  const title = humanizeStem(stem);
+  return title ? { title } : null;
+}
+
 /** Extract clean fallback title for Codex sessions, skipping AGENTS/prompt preamble. */
 export function extractCodexTitle(text: string): string | null {
   if (!text) return null;
@@ -71,6 +103,12 @@ export function extractCodexTitle(text: string): string | null {
   for (const line of trimmed.split(/\r?\n/)) {
     const l = line.trim();
     if (l && !l.startsWith("#") && !l.startsWith("<")) {
+      const handoff = deriveHandoffTitle(l);
+      if (handoff) {
+        if ("title" in handoff) return handoff.title;
+        // Opaque handoff path: return null so caller defaults to project + short ID
+        return null;
+      }
       const single = l.split(/\s+/).join(" ");
       return single.slice(0, 80) || null;
     }
