@@ -15,7 +15,7 @@ import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
 import { PROVIDERS } from "./core/providers";
-import type { BudgetScope } from "./core/budgets";
+import { weightedBudgetTokens, type BudgetScope } from "./core/budgets";
 import type { StopTargetOutcome } from "./services/budget-service";
 import { controlTargetProof } from "./services/agent-control";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
@@ -278,7 +278,7 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
             detail: error instanceof Error ? error.message : String(error),
           }));
         }
-        const updated = app.budgets.updateOperation(operation.id, outcomes) ?? operation;
+        const updated = { ...(app.budgets.updateOperation(operation.id, outcomes) ?? operation), ...(operation.settingsError ? { settingsError: operation.settingsError } : {}) };
         return res.json(updated);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -297,8 +297,8 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
       const denied = budgetWriteError(req, mutationToken);
       if (denied) return res.status(denied.status).json({ error: denied.message });
       try {
-        app.budgets.unlock(stopScope(req.body?.scope));
-        return res.json({ ok: true });
+        const settingsError = app.budgets.unlock(stopScope(req.body?.scope));
+        return res.json({ ok: true, ...(settingsError ? { settingsError } : {}) });
       } catch (error) {
         return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
       }
@@ -407,6 +407,12 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
 function budgetSources(app: App) {
   const models = new Map<Source, Set<string>>();
   const providers = new Map<Source, Set<string>>();
+  const scopes = new Map<Source, Map<string, { provider: string; model: string }>>();
+  const addScope = (source: Source, provider: string, model: string) => {
+    const values = scopes.get(source) ?? new Map<string, { provider: string; model: string }>();
+    values.set(`${provider}/${model}`, { provider, model });
+    scopes.set(source, values);
+  };
   for (const session of app.repo.all()) {
     const sourceModels = models.get(session.source) ?? new Set<string>();
     const sourceProviders = providers.get(session.source) ?? new Set<string>();
@@ -414,8 +420,13 @@ function budgetSources(app: App) {
       const model = turn.model.trim();
       if (!model) continue;
       sourceModels.add(model);
+      // Only OpenCode records providerID/modelID; other transcripts' slashes are part of the model ID.
       const slash = model.indexOf("/");
-      if (slash > 0) sourceProviders.add(model.slice(0, slash).trim().toLowerCase());
+      if (session.source === "opencode" && slash > 0 && slash < model.length - 1) {
+        const provider = model.slice(0, slash).trim().toLowerCase();
+        sourceProviders.add(provider);
+        addScope(session.source, provider, model.slice(slash + 1).trim());
+      }
     }
     models.set(session.source, sourceModels);
     providers.set(session.source, sourceProviders);
@@ -425,6 +436,7 @@ function budgetSources(app: App) {
       const values = providers.get(target.source) ?? new Set<string>();
       values.add(target.provider);
       providers.set(target.source, values);
+      if (target.model) addScope(target.source, target.provider, target.model);
     }
   }
   for (const [source, observed] of app.budgets.observedProviders()) {
@@ -440,6 +452,7 @@ function budgetSources(app: App) {
       installed: Boolean(adapter && existsSync(adapter.root())),
       models: [...(models.get(source) ?? [])].sort(),
       providers: [...(providers.get(source) ?? [])].sort(),
+      modelScopes: [...(scopes.get(source)?.values() ?? [])].sort((a, b) => `${a.provider}/${a.model}`.localeCompare(`${b.provider}/${b.model}`)),
     };
   });
 }
@@ -448,11 +461,12 @@ function seedBudgetUsage(app: App): void {
   const events: Array<{ scope: BudgetScope; amount: number; eventId: string; at: Date }> = [];
   for (const session of app.repo.all()) {
     for (const [index, turn] of session.turns.entries()) {
-      const amount = turn.baseIn + turn.cacheRead + turn.cacheWrite + turn.output;
+      const amount = weightedBudgetTokens({ input: turn.baseIn, cacheRead: turn.cacheRead, cacheWrite: turn.cacheWrite, output: turn.output });
       if (!Number.isFinite(amount) || amount <= 0) continue;
       const eventId = `transcript:${session.path}:${index}:${turn.when.getTime()}`;
       events.push({ scope: { kind: "source", source: session.source }, amount, eventId, at: turn.when });
-      const slash = turn.model.indexOf("/");
+      // Only OpenCode records providerID/modelID; a slash in other sources' model IDs is not a provider.
+      const slash = session.source === "opencode" ? turn.model.indexOf("/") : -1;
       if (slash > 0 && slash < turn.model.length - 1) {
         const provider = turn.model.slice(0, slash);
         const model = turn.model.slice(slash + 1);

@@ -277,6 +277,81 @@ describe("budget CLI", () => {
     }
   });
 
+  it("resolves Claude identity from the configured upstream and each subagent's own transcript", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-claude-identity-"));
+    roots.push(root);
+    const dir = join(root, ".claude", "projects", "p");
+    mkdirSync(join(dir, "s1", "subagents"), { recursive: true });
+    const transcript = join(dir, "s1.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "m1", model: "parent/model-a" } })}\n`);
+    writeFileSync(join(dir, "s1", "subagents", "agent-a1.jsonl"), `${JSON.stringify({ type: "assistant", message: { id: "m2", model: "child/model-b" } })}\n`);
+    const app = compose({ HOME: root, ANTHROPIC_BASE_URL: "https://openrouter.ai/api" }, { noCache: true });
+    stubNoNativeHost(app);
+    const out: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { out.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    const decide = (event: Record<string, unknown>): string => {
+      out.length = 0;
+      expect(runBudgetHook(JSON.stringify({ transcript_path: transcript, session_id: "s1", hook_event_name: "PreToolUse", ...event }), app, "claude")).toBe(0);
+      return out.join("");
+    };
+    try {
+      const preview = app.budgets.previewStop({ kind: "model", provider: "openrouter", model: "child/model-b" }, []);
+      app.budgets.commitStop(preview.id, preview.fingerprint, []);
+      // The parent's own tool call is a different model under the same OpenRouter upstream: allowed.
+      expect(decide({ tool_name: "Bash", tool_use_id: "p1" })).not.toContain("deny");
+      // The child's tool call reads the child's transcript and hits the model stop.
+      expect(decide({ tool_name: "Bash", tool_use_id: "c1", agent_id: "a1" })).toContain("deny");
+      // A spawn with only a bare alias cannot inherit the parent's model: unresolved under a model stop.
+      expect(decide({ tool_name: "Agent", tool_use_id: "s1", tool_input: { model: "sonnet", prompt: "x" } })).toContain("deny");
+    } finally {
+      process.stdout.write = original;
+      app.close();
+    }
+  });
+
+  it("charges one native message once across several PostToolUse hooks and skips discovery while Off", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-native-once-"));
+    roots.push(root);
+    const transcript = join(root, ".claude", "projects", "p", "session.jsonl");
+    mkdirSync(join(root, ".claude", "projects", "p"), { recursive: true });
+    writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-opus-4", usage: { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0 } } })}\n`);
+    const app = compose({ HOME: root }, { noCache: true });
+    stubNoNativeHost(app);
+    const owningProcess = vi.spyOn(app.control, "owningProcess");
+    const original = process.stdout.write;
+    process.stdout.write = (() => true) as typeof process.stdout.write;
+    let db: DatabaseSync | undefined;
+    const hook = (event: Record<string, unknown>) => expect(runBudgetHook(JSON.stringify({ transcript_path: transcript, session_id: "s1", ...event }), app, "claude")).toBe(0);
+    try {
+      hook({ hook_event_name: "PreToolUse", tool_use_id: "t0" });
+      hook({ hook_event_name: "Stop" });
+      expect(owningProcess).not.toHaveBeenCalled();
+      app.budgets.savePolicies([{ scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 1000, deadline: "2099-10-11T12:00:00.000Z" }], 0);
+      for (const id of ["t1", "t2"]) hook({ hook_event_name: "PreToolUse", tool_use_id: id, estimatedCost: 20, costUnit: "tokens-total" });
+      for (const id of ["t1", "t2"]) hook({ hook_event_name: "PostToolUse", tool_use_id: id });
+      db = new DatabaseSync(app.budgets.dbPath);
+      const rows = db.prepare("SELECT amount FROM usage_events WHERE scope_key = 'source:claude'").all() as Array<{ amount: number }>;
+      expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBe(15);
+    } finally {
+      process.stdout.write = original;
+      db?.close();
+      app.close();
+    }
+  });
+
+  it.each(["Stop", "SubagentStop", "SessionEnd"])("does not block a malformed %s hook with exit 2", (hookEvent) => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-stop-malformed-"));
+    roots.push(root);
+    const app = compose({ HOME: root }, { noCache: true });
+    try {
+      expect(runBudgetHook(`{"hook_event_name":"${hookEvent}","session_id":`, app, "claude")).toBe(0);
+      expect(runBudgetHook(`{"hook_event_name":"PreToolUse","tool_name":`, app, "claude")).toBe(2);
+    } finally {
+      app.close();
+    }
+  });
+
   it.each(["claude", "codex", "opencode"] as const)("fails closed for non-object hook input from %s", (source) => {
     const root = mkdtempSync(join(tmpdir(), `tf-budget-${source}-invalid-hook-`));
     roots.push(root);

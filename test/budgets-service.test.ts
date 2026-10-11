@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -172,5 +172,45 @@ describe("BudgetService", () => {
     expect((percentageDb.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE event_id LIKE 'native-token-message:%'").get() as { count: number }).count).toBe(0);
     percentageDb.close();
     percentage.service.close();
+  });
+
+  it("never overwrites a malformed settings file on stop or unlock and keeps denying", () => {
+    const { service } = setup();
+    const scope = { kind: "provider", provider: "anthropic" } as const;
+    const identity = { source: "claude", provider: "anthropic", model: "claude-opus" } as const;
+    const preview = service.previewStop(scope, []);
+    const malformed = "{ not json";
+    writeFileSync(service.settingsPath, malformed);
+
+    const operation = service.commitStop(preview.id, preview.fingerprint, []);
+    expect(operation.settingsError).toMatch(/malformed|JSON/i);
+    expect(readFileSync(service.settingsPath, "utf8")).toBe(malformed);
+    expect(service.admit({ identity, estimatedCost: 1, now }).allowed).toBe(false);
+    unlinkSync(service.settingsPath);
+    expect(service.admit({ identity, estimatedCost: 1, now }).reason).toMatch(/Emergency stop/); // the SQLite row latched durably
+
+    writeFileSync(service.settingsPath, malformed);
+    expect(service.unlock(scope)).toMatch(/malformed|JSON/i);
+    expect(readFileSync(service.settingsPath, "utf8")).toBe(malformed);
+    expect(service.admit({ identity, estimatedCost: 1, now }).allowed).toBe(false);
+    unlinkSync(service.settingsPath);
+    expect(service.admit({ identity, estimatedCost: 1, now }).allowed).toBe(true);
+    service.close();
+  });
+
+  it("reports blocked work only inside the current window and enforcing only when something is on", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-blocked-"));
+    roots.push(root);
+    let clock = now;
+    const service = new BudgetService({ HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state") }, { now: () => clock });
+    const blocked = () => service.snapshot(sources).sources.find((source) => source.source === "claude")!.blockedWork;
+    expect(service.enforcing()).toBe(false);
+    service.savePolicies([{ scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-per-hour", limit: 10, deadline: "2026-10-20T12:00:00.000Z" }], 0);
+    expect(service.enforcing()).toBe(true);
+    expect(service.admit({ identity: { source: "claude", provider: null, model: null }, estimatedCost: 20, now: clock }).allowed).toBe(false);
+    expect(blocked()).toBe(1);
+    clock = new Date(now.getTime() + 2 * 3_600_000);
+    expect(blocked()).toBe(0);
+    service.close();
   });
 });

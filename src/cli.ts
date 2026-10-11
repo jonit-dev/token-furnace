@@ -5,12 +5,12 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { CONTEXT_TARGET_LABEL } from "./core/context";
 import { PROVIDERS } from "./core/providers";
-import type { BudgetScope } from "./core/budgets";
+import { nativeUsageTokens, type BudgetScope } from "./core/budgets";
 import { compose, type App } from "./compose";
 import { topIssues } from "./core/analyze/issues";
 import { reportView } from "./core/analyze/view";
@@ -19,10 +19,11 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
-import { controlTargetProof, type ControlOutcome, type NativeTarget } from "./services/agent-control";
+import { controlTargetProof, MANAGED_ENDPOINT_PREFIX, type ControlOutcome, type NativeTarget } from "./services/agent-control";
 import type { ActualUsageUnit } from "./services/budget-service";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
+import { claudeUpstreamProvider, runManagedNative } from "./services/native-host";
 
 const USAGE = `Usage: token-furnace [days] [options]
        token-furnace serve [--port 8765]
@@ -30,6 +31,7 @@ const USAGE = `Usage: token-furnace [days] [options]
        token-furnace fix-config
        token-furnace hook churn
        token-furnace hook budget [--source <source>]
+       token-furnace native run --source claude|codex --prompt <text> [--model <id>] [--provider <id>] [-- <native args>]
        token-furnace budgets status
        token-furnace budgets enable --confirm [--rollback]
        token-furnace budgets stop --source <source> | --provider <id> | --model <provider/model> [--confirm] [--force --force-confirm]
@@ -112,6 +114,12 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
       app?.env ?? process.env,
       process.stdout,
     );
+  }
+
+  if (argv[0] === "native" && argv[1] === "run") {
+    const ownsApp = !app;
+    const nativeApp = app ?? compose(process.env, { noCache: true });
+    try { return await runNative(argv.slice(2), nativeApp); } finally { if (ownsApp) nativeApp.close(); }
   }
 
   if (argv[0] === "budgets") {
@@ -258,17 +266,19 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
       process.stderr.write("Refusing unlock without --confirm.\n");
       return 2;
     }
-    app.budgets.unlock(scope);
-    process.stdout.write(`${JSON.stringify({ ok: true, scope })}\n`);
+    const settingsError = app.budgets.unlock(scope);
+    process.stdout.write(`${JSON.stringify({ ok: true, scope, ...(settingsError ? { settingsError } : {}) })}\n`);
     return 0;
   }
   const controlPreview = app.control.preview(scope);
   const targets = controlPreview.targets;
   const preview = app.budgets.previewStop(scope, targets.map((target) => target.id), controlTargetProof(targets));
+  const previewText = `${JSON.stringify({ action: "preview", ...preview, targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, account: target.account ?? null, model: target.model, pid: target.pid, processStartTime: target.processStartTime, ownerUid: target.ownerUid, executable: target.executable })), unverified: controlPreview.unverified, collateral: controlPreview.collateral })}\n`;
   if (!parsed.values.confirm) {
-    process.stdout.write(`${JSON.stringify({ action: "preview", ...preview, targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, account: target.account ?? null, model: target.model, pid: target.pid, processStartTime: target.processStartTime, ownerUid: target.ownerUid, executable: target.executable })), unverified: controlPreview.unverified, collateral: controlPreview.collateral })}\n`);
+    process.stdout.write(previewText);
     return 0;
   }
+  process.stderr.write(previewText); // show targets, unverified and collateral before committing; stdout stays the final operation
   if (parsed.values.force && !parsed.values["force-confirm"]) {
     process.stderr.write("Force stop requires --force-confirm.\n");
     return 2;
@@ -291,9 +301,43 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
       detail: error instanceof Error ? error.message : String(error),
     }));
   }
-  const updated = app.budgets.updateOperation(operation.id, outcomes) ?? operation;
+  const updated = { ...(app.budgets.updateOperation(operation.id, outcomes) ?? operation), ...(operation.settingsError ? { settingsError: operation.settingsError } : {}) };
   process.stdout.write(`${JSON.stringify(updated)}\n`);
   return updated.status === "complete" ? 0 : 1;
+}
+
+const NATIVE_USAGE = "Usage: token-furnace native run --source claude|codex --prompt <text> [--model <id>] [--provider <id>] [--cwd <path>]\n" +
+  "         [--thread-prompt <text> --thread-model <id> [--thread-provider <id>]]... [-- <native CLI args>]\n";
+
+async function runNative(argv: string[], app: App): Promise<number> {
+  const parsed = parseArgs({
+    args: argv, allowPositionals: true,
+    options: {
+      source: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }, provider: { type: "string" }, cwd: { type: "string" },
+      "thread-prompt": { type: "string", multiple: true }, "thread-model": { type: "string", multiple: true }, "thread-provider": { type: "string", multiple: true },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  if (parsed.values.help) { process.stdout.write(NATIVE_USAGE); return 0; }
+  const { source, prompt } = parsed.values;
+  const threadPrompts = parsed.values["thread-prompt"] ?? [];
+  const threadModels = parsed.values["thread-model"] ?? [];
+  const threadProviders = parsed.values["thread-provider"] ?? [];
+  if ((source !== "claude" && source !== "codex") || !prompt || threadPrompts.length !== threadModels.length ||
+    threadProviders.length > threadPrompts.length || (source === "claude" && threadPrompts.length)) {
+    process.stderr.write(NATIVE_USAGE);
+    return 2;
+  }
+  try {
+    return await runManagedNative({
+      source, prompt, model: parsed.values.model, provider: parsed.values.provider, cwd: parsed.values.cwd,
+      threads: threadPrompts.map((text, index) => ({ prompt: text, model: threadModels[index], provider: threadProviders[index] })),
+      nativeArgs: parsed.positionals, env: app.env, control: app.control,
+    });
+  } catch (error) {
+    process.stderr.write(`Native host failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }
 
 export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
@@ -304,7 +348,10 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Budget hook input must be a JSON object.");
     event = parsed as Record<string, unknown>;
   } catch {
-    if (configuredSource === "claude" || configuredSource === "codex") return 2;
+    if (configuredSource === "claude" || configuredSource === "codex") {
+      // Exit 2 on a Stop-type event would tell Claude not to stop, so only a possible admission event fails closed.
+      return /"(?:hook_event_name|hookEventName|eventName)"\s*:\s*"(?:Stop|SubagentStop|SessionEnd)"/.test(stdin) ? 0 : 2;
+    }
     process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Malformed budget hook input." }));
     return 0;
   }
@@ -325,13 +372,16 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   const model = metadata?.model ?? null;
   const account = source ? app.budgets.verifiedAccount(source, provider, metadata?.account) : null;
   const identity = source ? { source, provider, model, account } : null;
-  if (identity && (phase === "start" || provider || model || metadata?.account || nativeFromEvent(event, identity.source))) {
+  const enforcing = app.budgets.enforcing(); // Off with no latch: skip process discovery entirely
+  if (enforcing && identity && (phase === "start" || provider || model || metadata?.account || nativeFromEvent(event, identity.source))) {
     registerHookTarget(app, event, identity);
   }
   if ((reservationId || reservationIds.length || requestId || sessionId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
-    const amount = usageAmount(event) ?? metadata?.usage ?? null;
+    const eventUsage = usageAmount(event);
+    const amount = eventUsage ?? metadata?.usage ?? null;
     if (amount !== null && (phase === "complete" || phase === "completed" || phase === "reconcile")) {
-      const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? (reservationIds.length ? reservationIds.join(",") : null) ?? requestId ?? sessionId}:${phase}`;
+      // Transcript usage belongs to one native message: key it by that id so later tool hooks do not charge it again.
+      const eventId = stringValue(event.eventId ?? event.event_id) ?? (eventUsage === null && source && metadata?.usageId ? `usage:${source}:${metadata.usageId}` : null) ?? `${reservationId ?? (reservationIds.length ? reservationIds.join(",") : null) ?? requestId ?? sessionId}:${phase}`;
       const observedAt = eventObservedAt(event);
       const actualUnit = nativeUsageUnit(event);
       const reconciledReservationIds = source && reservationIds.length
@@ -347,7 +397,7 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
       return 0;
     } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
       const sessionId = stringValue(event.session_id ?? event.sessionId);
-      if (!source || !sessionId || !app.control.ownsSession(source, sessionId)) {
+      if (!source || !sessionId || (enforcing && !app.control.ownsSession(source, sessionId))) {
         writeBudgetHookOutput(source, hookEvent, false, "Native abandonment was not tied to a verified owned session.", null, reservationId);
         return 0;
       }
@@ -455,8 +505,9 @@ function nativeFromEvent(event: Record<string, unknown>, source: Source): Native
   if (!value || typeof value !== "object") return undefined;
   const native = value as Record<string, unknown>;
   const endpoint = stringValue(native.endpoint);
+  // Claude cancellation exists only on a managed host's own stdio; a hook payload cannot claim it.
   const expectedKind: NativeTarget["kind"] | null = source === "opencode" ? "opencode" : source === "codex" ? "codex" : null;
-  if (!endpoint || !expectedKind || native.kind !== expectedKind) return undefined;
+  if (!endpoint || !expectedKind || native.kind !== expectedKind || endpoint.startsWith(MANAGED_ENDPOINT_PREFIX)) return undefined;
   const transport = native.transport === "websocket" || native.transport === "unix" || native.transport === "stdio" || native.transport === "http" ? native.transport : undefined;
   const rawAuth = native.auth;
   const auth: NativeTarget["auth"] = rawAuth && typeof rawAuth === "object" ? (() => {
@@ -477,14 +528,7 @@ function usageAmount(event: Record<string, unknown>): number | null {
   const direct = numberValue(event.actualCost ?? event.actual_cost ?? event.tokens ?? event.weightedTokens ?? event.weighted_tokens);
   if (direct !== null && direct >= 0) return direct;
   const usage = event.usage ?? (event.tool_response && typeof event.tool_response === "object" ? (event.tool_response as Record<string, unknown>).usage : null);
-  if (!usage || typeof usage !== "object") return null;
-  const record = usage as Record<string, unknown>;
-  const values = ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens", "cached_input_tokens", "cachedInputTokens", "cache_read_input_tokens", "cacheReadInputTokens", "cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write_tokens", "cacheWriteTokens", "total_tokens", "totalTokens"]
-    .map((key) => numberValue(record[key]) ?? 0);
-  const total = Number.isFinite(Number(record.total_tokens ?? record.totalTokens))
-    ? Number(record.total_tokens ?? record.totalTokens)
-    : values.reduce((sum, value) => sum + value, 0);
-  return total > 0 ? total : null;
+  return usage && typeof usage === "object" ? nativeUsageTokens(usage as Record<string, unknown>) : null;
 }
 
 function nativeUsageUnit(event: Record<string, unknown>): ActualUsageUnit {
@@ -512,9 +556,11 @@ interface NativeMetadata {
   model: string | null;
   account: string | null;
   usage: number | null;
+  usageId?: string | null;
 }
 
 function resolveNativeMetadata(app: App, event: Record<string, unknown>, source: Source, hookEvent: string | null, hintedProvider: string | null, hintedModel: string | null): NativeMetadata {
+  if (source === "claude") return resolveClaudeMetadata(app, event, hookEvent, hintedModel);
   const transcriptPath = stringValue(event.transcript_path ?? event.transcriptPath);
   const fromTranscript = transcriptPath ? readNativeTranscriptMetadata(app, source, transcriptPath) : null;
   const nativePayload = Boolean(hookEvent && (hintedProvider || hintedModel));
@@ -529,7 +575,34 @@ function resolveNativeMetadata(app: App, event: Record<string, unknown>, source:
     model,
     account: fromTranscript?.account ?? ((nativePayload || event.identityVerified === true) ? stringValue(event.account ?? event.accountId ?? event.account_id) : null),
     usage: fromTranscript?.usage ?? null,
+    usageId: fromTranscript?.usageId ?? null,
   };
+}
+
+/**
+ * Claude transcripts carry no provider: it is the upstream configured for this Claude process
+ * (the hook inherits its environment). A subagent's tool call uses the subagent's own transcript;
+ * spawning a child resolves its model only from an explicit ID or configured alias, never the parent.
+ */
+function resolveClaudeMetadata(app: App, event: Record<string, unknown>, hookEvent: string | null, hintedModel: string | null): NativeMetadata {
+  const env = { ...process.env, ...app.env };
+  const provider = claudeUpstreamProvider(env);
+  const transcriptPath = stringValue(event.transcript_path ?? event.transcriptPath);
+  const sessionId = stringValue(event.session_id ?? event.sessionId);
+  const agentId = stringValue(event.agent_id ?? event.agentId);
+  const childPath = transcriptPath && sessionId && agentId && /^[A-Za-z0-9_-]+$/.test(agentId) && /^[A-Za-z0-9_-]+$/.test(sessionId)
+    ? join(dirname(transcriptPath), sessionId, "subagents", `agent-${agentId}.jsonl`)
+    : null;
+  const own = childPath ? readNativeTranscriptMetadata(app, "claude", childPath) : transcriptPath ? readNativeTranscriptMetadata(app, "claude", transcriptPath) : null;
+  const toolName = stringValue(event.tool_name ?? event.toolName);
+  let model = own?.model ?? (hookEvent === "SessionStart" ? hintedModel : null);
+  if (hookEvent === "PreToolUse" && (toolName === "Agent" || toolName === "Task")) {
+    const input = event.tool_input && typeof event.tool_input === "object" ? event.tool_input as Record<string, unknown> : {};
+    const requested = stringValue(input.model);
+    const alias = requested && /^(opus|sonnet|haiku)$/i.test(requested) ? env[`ANTHROPIC_DEFAULT_${requested.toUpperCase()}_MODEL`] ?? null : null;
+    model = alias || (requested && !/^(opus|sonnet|haiku|inherit)$/i.test(requested) ? requested : null);
+  }
+  return { provider, model, account: own?.account ?? null, usage: own?.usage ?? null, usageId: own?.usageId ?? null };
 }
 
 function readNativeTranscriptMetadata(app: App, source: Source, path: string): NativeMetadata | null {
@@ -558,7 +631,10 @@ function collectNativeMetadata(value: unknown, metadata: NativeMetadata, depth =
   metadata.model = stringValue(record.model ?? record.modelID ?? record.model_id) ?? metadata.model;
   metadata.account = stringValue(record.account ?? record.accountId ?? record.account_id ?? record.subscription_id) ?? metadata.account;
   const usage = record.usage ?? record.tokenUsage ?? record.token_usage ?? record.last_token_usage ?? record.lastTokenUsage ?? record.total_token_usage ?? record.totalTokenUsage;
-  if (usage && typeof usage === "object") metadata.usage = usageAmount(usage as Record<string, unknown>) ?? metadata.usage;
+  if (usage && typeof usage === "object") {
+    const amount = nativeUsageTokens(usage as Record<string, unknown>);
+    if (amount !== null) { metadata.usage = amount; metadata.usageId = stringValue(record.id ?? record.message_id ?? record.messageId); }
+  }
   for (const key of ["message", "response", "result", "turn", "info", "metadata", "data", "event", "payload", "usage", "tokens", "last_token_usage", "lastTokenUsage", "total_token_usage", "totalTokenUsage"]) {
     const child = record[key];
     if (child && typeof child === "object") {

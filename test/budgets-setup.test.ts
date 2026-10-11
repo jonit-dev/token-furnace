@@ -92,14 +92,14 @@ describe("budget adapter setup", () => {
     const before = callbacks["tool.execute.before"] as (input: Record<string, unknown>) => Promise<void>;
     const after = callbacks["tool.execute.after"] as (input: Record<string, unknown>, output: Record<string, unknown>) => Promise<void>;
     const onEvent = callbacks.event as (input: { event: Record<string, unknown> }) => Promise<void>;
-    const assistant = (id: string, callID: string, providerID: string, modelID: string, input: number, output: number, status = "completed") => ({
+    const assistant = (id: string, callID: string, providerID: string, modelID: string, input: number, output: number, status?: string) => ({
       info: { id, role: "assistant", providerID, modelID, time: { completed: "2026-10-11T12:00:00.000Z" }, tokens: { input, output } },
-      parts: [{ type: "tool", callID, state: { status } }],
+      parts: [{ type: "tool", callID, ...(status === undefined ? {} : { state: { status } }) }],
     });
 
     await before({ sessionID: "multi", callID: "call-a" });
     await before({ sessionID: "multi", callID: "call-b" });
-    messages = [assistant("message-a", "call-a", "provider-a", "model-a", 3, 2), assistant("message-b", "call-b", "provider-b", "model-b", 4, 1)];
+    messages = [assistant("message-a", "call-a", "provider-a", "model-a", 3, 2, "completed"), assistant("message-b", "call-b", "provider-b", "model-b", 4, 1, "completed")];
     await onEvent({ event: { type: "session.idle", properties: { sessionID: "multi" } } });
     const multi = hookEvents.filter((event) => event.phase === "complete" && Array.isArray(event.reservationIds));
     expect(multi).toHaveLength(2);
@@ -113,7 +113,7 @@ describe("budget adapter setup", () => {
     await before({ sessionID: "same-session", callID: "metadata-call" });
     await after({ sessionID: "same-session", callID: "metadata-call" }, { metadata: { usage: { total_tokens: 2 } } });
     await before({ sessionID: "same-session", callID: "no-metadata-call" });
-    messages = [assistant("message-c", "no-metadata-call", "provider-c", "model-c", 5, 1)];
+    messages = [assistant("message-c", "no-metadata-call", "provider-c", "model-c", 5, 1, "completed")];
     await onEvent({ event: { type: "session.idle", properties: { sessionID: "same-session" } } });
     expect(hookEvents.filter((event) => event.phase === "complete" && event.eventId === "message-c")).toHaveLength(1);
 
@@ -123,6 +123,12 @@ describe("budget adapter setup", () => {
     await onEvent({ event: { type: "session.idle", properties: { sessionID: "background" } } });
     await onEvent({ event: { type: "session.idle", properties: { sessionID: "background" } } });
     expect(hookEvents).toHaveLength(beforeBackgroundIdle);
+
+    await before({ sessionID: "unknown", callID: "unknown-call" });
+    messages = [assistant("message-unknown", "unknown-call", "provider-unknown", "model-unknown", 2, 2, undefined)];
+    const beforeUnknownIdle = hookEvents.length;
+    await onEvent({ event: { type: "session.idle", properties: { sessionID: "unknown" } } });
+    expect(hookEvents).toHaveLength(beforeUnknownIdle);
   });
 
   it("leaves malformed native config untouched", () => {

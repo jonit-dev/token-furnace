@@ -11,7 +11,7 @@ const snapshot = {
   stops: [],
   error: null,
   sources: [
-    { source: "claude", label: "Claude Code", installed: true, providers: ["anthropic"], models: ["claude-opus"], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
+    { source: "claude", label: "Claude Code", installed: true, providers: ["anthropic"], models: ["claude-opus"], modelScopes: [{ provider: "anthropic", model: "claude-opus" }], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
     { source: "codex", label: "Codex", installed: true, providers: ["openai"], models: ["gpt-5"], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
     { source: "opencode", label: "OpenCode", installed: false, models: [], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
   ],
@@ -37,7 +37,7 @@ describe("Budgets", () => {
     expect(screen.getByText("Claude Code")).toBeTruthy();
     expect(screen.getByText("Codex")).toBeTruthy();
     expect(screen.getByText("OpenCode")).toBeTruthy();
-    expect(screen.getByText("claude-opus")).toBeTruthy();
+    expect(screen.getByText("anthropic/claude-opus")).toBeTruthy();
     expect((screen.getByRole("combobox", { name: "Claude Code budget mode" }) as HTMLSelectElement).value).toBe("off");
     expect((screen.getByRole("button", { name: "Save Claude Code budget" }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -72,6 +72,9 @@ describe("Budgets", () => {
     });
     render(<Budgets />);
     const card = (await screen.findByText("Claude Code")).closest("section")!;
+    // A transcript label without a verified provider is shown but cannot be targeted.
+    const codexCard = (await screen.findByText("Codex")).closest("section") as HTMLElement;
+    expect((within(codexCard).getByRole("button", { name: "Stop model" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(within(card).getByRole("button", { name: "Stop model anthropic/claude-opus" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm stop" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/budgets/stop-preview", expect.objectContaining({ method: "POST" })));

@@ -709,6 +709,34 @@ describe("AgentControl", () => {
     }
   });
 
+  it("merges only compatible hook and native rows from one process generation", () => {
+    const control = makeControl({
+      storePath: testStore(),
+      inspect: (pid) => ({ pid, processStartTime: 10, ownerUid: 7, ownerSid: TEST_OWNER_SID, parentPid: 1, executable: TEST_EXECUTABLE }),
+      currentUid: 7,
+      currentOwnerSid: TEST_OWNER_SID,
+      currentPid: 9000,
+    });
+    expect(control.register(target({ id: "pid-row", provider: null, model: null, sessionId: null, native: undefined }))).toBe(true);
+    expect(control.register(target({ id: "hook-row", provider: "anthropic", model: "claude-opus", sessionId: "session-1" }))).toBe(true);
+    expect(control.register(target({ id: "different-session", sessionId: "session-2", model: "claude-sonnet" }))).toBe(true);
+    const rows = control.registered();
+    expect(rows.map((row) => row.id)).toEqual(["different-session", "pid-row"]);
+    expect(rows.find((row) => row.id === "pid-row")).toMatchObject({ provider: "anthropic", model: "claude-opus", sessionId: "session-1" });
+    control.close();
+  });
+
+  it("reads registrations without scanning the process table, and scans once per preview", () => {
+    const listNativeProcesses = vi.fn(() => []);
+    const control = makeControl({ storePath: testStore(), currentUid: 7, listNativeProcesses });
+    control.registered();
+    control.registered();
+    expect(listNativeProcesses).not.toHaveBeenCalled();
+    control.preview({ kind: "source", source: "claude" });
+    expect(listNativeProcesses).toHaveBeenCalledTimes(1);
+    control.close();
+  });
+
   it("reads registrations from concurrent real hook processes after the server starts", async () => {
     const root = mkdtempSync(join(tmpdir(), "tf-control-hooks-"));
     const storePath = join(root, "state", "token-furnace", "control.sqlite");

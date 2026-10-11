@@ -1,5 +1,6 @@
 import type { Source } from "./model";
 import { PROVIDERS } from "./providers";
+import { CACHE_READ_RATE, CACHE_WRITE_RATE, OUTPUT_RATE } from "./analyze/pricing";
 
 export const BUDGET_MODES = ["off", "auto", "manual"] as const;
 export type BudgetMode = (typeof BUDGET_MODES)[number];
@@ -134,4 +135,39 @@ export function policyUnitForMeter(policy: BudgetPolicy, meter: BudgetMeter | nu
   if (policy.mode === "off") return null;
   if (policy.mode === "auto") return meter?.authoritative ? "percentage-per-hour" : null;
   return policy.unit;
+}
+
+/**
+ * Budget token unit: token classes weighted like the report (cache reads 0.1x, cache writes
+ * 1.25x, output 5x), without a per-model price, so an unpriced model is never given a cost.
+ */
+export function weightedBudgetTokens(parts: { input: number; cacheRead: number; cacheWrite: number; output: number }): number {
+  return parts.input + CACHE_READ_RATE * parts.cacheRead + CACHE_WRITE_RATE * parts.cacheWrite + OUTPUT_RATE * parts.output;
+}
+
+/** Weighted tokens from one native usage record (Anthropic, OpenAI/Codex or OpenCode field names). */
+export function nativeUsageTokens(usage: Record<string, unknown>): number | null {
+  const n = (...keys: string[]): number | null => {
+    for (const key of keys) {
+      const value = Number(usage[key]);
+      if (usage[key] !== undefined && usage[key] !== null && Number.isFinite(value) && value >= 0) return value;
+    }
+    return null;
+  };
+  const cache = usage.cache && typeof usage.cache === "object" ? usage.cache as Record<string, unknown> : {};
+  const input = n("input_tokens", "inputTokens", "input");
+  const output = n("output_tokens", "outputTokens", "output");
+  // Anthropic reports cache reads beside input; OpenAI's cached input is a subset of input_tokens.
+  const anthropicRead = n("cache_read_input_tokens", "cacheReadInputTokens");
+  const openAiCached = n("cached_input_tokens", "cachedInputTokens");
+  const cacheRead = anthropicRead ?? (Number.isFinite(Number(cache.read)) ? Number(cache.read) : null);
+  const cacheWrite = n("cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write_tokens", "cacheWriteTokens") ??
+    (Number.isFinite(Number(cache.write)) ? Number(cache.write) : 0);
+  if (input === null && output === null) {
+    const total = n("total_tokens", "totalTokens");
+    return total !== null && total > 0 ? total : null;
+  }
+  const base = openAiCached !== null && anthropicRead === null ? Math.max(0, (input ?? 0) - openAiCached) : input ?? 0;
+  const amount = weightedBudgetTokens({ input: base, cacheRead: cacheRead ?? openAiCached ?? 0, cacheWrite, output: output ?? 0 });
+  return amount > 0 ? amount : null;
 }

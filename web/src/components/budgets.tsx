@@ -153,7 +153,7 @@ export function Budgets() {
       {error ? <p role="status" className="text-xs text-warn">{error}</p> : null}
       {snapshot.error ? <p role="status" className="text-xs text-hot">{snapshot.error}</p> : null}
       <div className="grid items-start gap-3 md:grid-cols-2 xl:grid-cols-3">
-      {snapshot.sources.map((source) => <BudgetCard key={source.source} source={source} policies={snapshot.policies} draft={drafts[source.source] ?? draftFor(source)} modelDrafts={modelDrafts} setDraft={(draft) => setDrafts((current) => ({ ...current, [source.source]: draft }))} setModelDraft={(key, draft) => setModelDrafts((current) => ({ ...current, [key]: draft }))} onSave={() => void save(source)} onSaveModel={(scope, draft) => void saveModel(source, scope, draft)} onEnable={() => void previewEnable(source.label)} canWrite={canWrite} onStopSource={() => setStop({ scope: { kind: "source", source: source.source }, title: `Stop All ${source.label}` })} onStopProvider={(provider) => setStop({ scope: { kind: "provider", provider }, title: `Stop upstream provider ${provider} (all harnesses)` })} onStopModel={(model) => { const scope = modelScope(source.source, model); if (scope) setStop({ scope, title: `Stop model ${scope.provider}/${scope.model}` }); }} />)}
+      {snapshot.sources.map((source) => <BudgetCard key={source.source} source={source} policies={snapshot.policies} draft={drafts[source.source] ?? draftFor(source)} modelDrafts={modelDrafts} setDraft={(draft) => setDrafts((current) => ({ ...current, [source.source]: draft }))} setModelDraft={(key, draft) => setModelDrafts((current) => ({ ...current, [key]: draft }))} onSave={() => void save(source)} onSaveModel={(scope, draft) => void saveModel(source, scope, draft)} onEnable={() => void previewEnable(source.label)} canWrite={canWrite} onStopSource={() => setStop({ scope: { kind: "source", source: source.source }, title: `Stop All ${source.label}` })} onStopProvider={(provider) => setStop({ scope: { kind: "provider", provider }, title: `Stop upstream provider ${provider} (all harnesses)` })} onStopModel={(scope) => setStop({ scope, title: `Stop model ${scope.provider}/${scope.model}` })} />)}
       </div>
       {snapshot.stops.length ? (
         <section aria-labelledby="budget-stop-recovery" className="rounded-md border border-hot/30 bg-hot/5 p-4">
@@ -185,11 +185,13 @@ function BudgetCard({ source, policies, draft, modelDrafts, setDraft, setModelDr
   canWrite: boolean;
   onStopSource: () => void;
   onStopProvider: (provider: string) => void;
-  onStopModel: (model: string) => void;
+  onStopModel: (scope: { kind: "model"; provider: string; model: string }) => void;
 }) {
   const disabled = !canWrite;
   const mode = draft.mode;
-  const models = source.models ?? [];
+  // Verified identities first, then transcript labels whose provider is still unresolved.
+  const verified = (source.modelScopes ?? []).map((scope) => `${scope.provider}/${scope.model}`);
+  const models = [...verified, ...(source.models ?? []).filter((model) => !verified.includes(model) && !(source.modelScopes ?? []).some((scope) => scope.model === model))];
   return (
     <Card title={source.label} sub={source.installed ? "Installed source" : "Not installed"}>
       <div className="flex items-center justify-between gap-2">
@@ -232,10 +234,10 @@ function BudgetCard({ source, policies, draft, modelDrafts, setDraft, setModelDr
       <div className="mt-4 border-t border-line pt-3">
         <h3 className="text-xs font-medium">Models</h3>
         {models.length ? <ul className="mt-2 space-y-3">{models.map((model) => {
-          const scope = modelScope(source.source, model);
+          const scope = modelScope(source, model);
           const key = scope ? `model:${scope.provider}/${scope.model}` : "";
           const modelDraft = scope ? modelDrafts[key] ?? draftForPolicy(policies, scope) : null;
-          return <li key={model} className="text-xs"><div className="flex items-center justify-between gap-2"><span className="truncate" title={model}>{model}</span><button type="button" disabled={disabled || !source.installed || !scope} onClick={() => onStopModel(model)} aria-label={scope ? `Stop model ${scope.provider}/${scope.model}` : "Stop model"} className="shrink-0 rounded border border-hot/50 px-2 py-1 text-[11px] text-hot disabled:cursor-not-allowed disabled:opacity-40">Stop model</button></div>{scope && modelDraft ? <div className="mt-2 grid gap-2 sm:grid-cols-3"><select aria-label={`${model} budget mode`} value={modelDraft.mode} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, mode: event.target.value as BudgetMode })} className="rounded border border-line bg-chip px-2 py-1"><option value="off">Off</option><option value="manual">Manual</option></select>{modelDraft.mode === "manual" ? <input aria-label={`${model} budget limit`} type="number" min="1" value={modelDraft.limit} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, limit: event.target.value })} className="rounded border border-line bg-chip px-2 py-1" /> : null}{modelDraft.mode === "manual" ? <><select aria-label={`${model} budget unit`} value={modelDraft.unit} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, unit: event.target.value as BudgetDraft["unit"] })} className="rounded border border-line bg-chip px-2 py-1"><option value="tokens-per-hour">Tokens/hour</option><option value="tokens-total">Fixed allowance</option></select>{modelDraft.unit === "tokens-total" ? <input aria-label={`${model} budget deadline`} type="datetime-local" value={modelDraft.deadline} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, deadline: event.target.value })} className="rounded border border-line bg-chip px-2 py-1" /> : null}<button type="button" disabled={disabled || !(Number(modelDraft.limit) > 0) || (modelDraft.unit === "tokens-total" && !modelDraft.deadline)} onClick={() => onSaveModel(scope, modelDraft)} className="rounded border border-accent/60 px-2 py-1 text-accent">Save model budget</button></> : null}</div> : null}</li>;
+          return <li key={model} className="text-xs"><div className="flex items-center justify-between gap-2"><span className="truncate" title={model}>{model}</span><button type="button" disabled={disabled || !source.installed || !scope} onClick={() => { if (scope) onStopModel(scope); }} aria-label={scope ? `Stop model ${scope.provider}/${scope.model}` : "Stop model"} className="shrink-0 rounded border border-hot/50 px-2 py-1 text-[11px] text-hot disabled:cursor-not-allowed disabled:opacity-40">Stop model</button></div>{scope && modelDraft ? <div className="mt-2 grid gap-2 sm:grid-cols-3"><select aria-label={`${model} budget mode`} value={modelDraft.mode} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, mode: event.target.value as BudgetMode })} className="rounded border border-line bg-chip px-2 py-1"><option value="off">Off</option><option value="manual">Manual</option></select>{modelDraft.mode === "manual" ? <input aria-label={`${model} budget limit`} type="number" min="1" value={modelDraft.limit} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, limit: event.target.value })} className="rounded border border-line bg-chip px-2 py-1" /> : null}{modelDraft.mode === "manual" ? <><select aria-label={`${model} budget unit`} value={modelDraft.unit} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, unit: event.target.value as BudgetDraft["unit"] })} className="rounded border border-line bg-chip px-2 py-1"><option value="tokens-per-hour">Tokens/hour</option><option value="tokens-total">Fixed allowance</option></select>{modelDraft.unit === "tokens-total" ? <input aria-label={`${model} budget deadline`} type="datetime-local" value={modelDraft.deadline} disabled={disabled} onChange={(event) => setModelDraft(key, { ...modelDraft, deadline: event.target.value })} className="rounded border border-line bg-chip px-2 py-1" /> : null}<button type="button" disabled={disabled || !(Number(modelDraft.limit) > 0) || (modelDraft.unit === "tokens-total" && !modelDraft.deadline)} onClick={() => onSaveModel(scope, modelDraft)} className="rounded border border-accent/60 px-2 py-1 text-accent">Save model budget</button></> : null}</div> : null}</li>;
         })}</ul> : <p className="mt-2 text-[11px] text-muted">No model identity discovered yet.</p>}
       </div>
     </Card>
@@ -305,12 +307,10 @@ function sourceKey(policy: BudgetPolicy): string {
   return policy.scope.kind === "source" ? `source:${policy.scope.source}` : `${policy.scope.kind}:${policy.scope.kind === "provider" ? policy.scope.provider : `${policy.scope.provider}/${policy.scope.model}`}`;
 }
 
-function modelScope(source: BudgetSourceStatus["source"], value: string): { kind: "model"; provider: string; model: string } | null {
-  const slash = value.indexOf("/");
-  if (slash > 0 && slash < value.length - 1) return { kind: "model", provider: value.slice(0, slash), model: value.slice(slash + 1) };
-  if (source === "opencode") return null;
-  const provider = source === "claude" ? "anthropic" : "openai";
-  return { kind: "model", provider, model: value };
+/** Model rows use server-verified provider identities; an unverified transcript label gets no scope. */
+function modelScope(source: BudgetSourceStatus, value: string): { kind: "model"; provider: string; model: string } | null {
+  const scope = (source.modelScopes ?? []).find((candidate) => `${candidate.provider}/${candidate.model}` === value);
+  return scope ? { kind: "model", ...scope } : null;
 }
 
 function scopeLabel(scope: BudgetScope): string {

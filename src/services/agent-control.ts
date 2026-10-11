@@ -30,15 +30,32 @@ export interface NativeAuth {
 }
 
 export interface NativeTarget {
-  kind: "opencode" | "codex";
+  kind: "opencode" | "codex" | "claude";
   endpoint: string;
-  transport?: "http" | "websocket" | "unix" | "stdio";
+  transport?: "http" | "websocket" | "unix" | "stdio" | "store";
   auth?: NativeAuth;
   /** Legacy Codex-only environment variable name; endpoint credentials never enter the control store. */
   authEnv?: string;
   sessionId?: string;
   threadId?: string;
   turnId?: string;
+  /** Claude task ID inside a managed stream-json host. */
+  taskId?: string;
+}
+
+/** Managed hosts own native stdio; the control store relays cancellation to them. */
+export const MANAGED_ENDPOINT_PREFIX = "managed://";
+
+export function managedHostId(native: NativeTarget | undefined): string | null {
+  return native?.endpoint.startsWith(MANAGED_ENDPOINT_PREFIX) ? native.endpoint.slice(MANAGED_ENDPOINT_PREFIX.length) || null : null;
+}
+
+export interface NativeRequest {
+  targetId: string;
+  hostId: string;
+  op: "cancel";
+  status: "pending" | "sent" | "stopped" | "completed" | "failed";
+  detail: string | null;
 }
 
 export interface ControlTarget {
@@ -194,8 +211,8 @@ export class AgentControl {
       ownerIdentity,
       ownerSid,
       executable: target.executable ?? observed?.executable ?? null,
-      nativeCancel: target.nativeCancel ?? nativeCanceller(target.native, this.env),
-      nativeState: target.nativeState ?? nativeStateChecker(target.native, this.env),
+      nativeCancel: target.nativeCancel ?? this.nativeAdapter(target).cancel,
+      nativeState: target.nativeState ?? this.nativeAdapter(target).state,
     };
     this.adapters.set(normalized.id, { cancel: normalized.nativeCancel, state: normalized.nativeState });
     return this.writeStore(() => this.store?.upsertTarget(normalized) ?? false);
@@ -207,7 +224,9 @@ export class AgentControl {
 
   /** All durable registrations, useful for provider/model identity discovery in the UI. */
   registered(): ControlTarget[] {
-    this.refreshRuntime();
+    // Native process discovery only fills runtimeUnverified, which preview() refreshes itself. A read
+    // must not pay for a process-table scan (a synchronous PowerShell spawn on Windows).
+    if (this.discoverRuntime) this.refreshRuntime();
     return this.readTargets();
   }
 
@@ -237,11 +256,17 @@ export class AgentControl {
   preview(scope: BudgetScope): ControlPreview {
     this.refreshRuntime();
     const targets: ControlTarget[] = [];
-    const unverified: ControlPreview["unverified"] = [...this.runtimeUnverified];
+    const registered = this.readTargets();
+    // A runtime that is already registered (for example a managed host) is not also unmanaged work.
+    const registeredProcesses = new Set(registered.map((target) => `${target.pid}:${target.processStartTime}`));
+    const unverified: ControlPreview["unverified"] = this.runtimeUnverified.filter((row) => {
+      const match = /^unmanaged:[a-z]+:(\d+):(\d+)$/.exec(row.id);
+      return !match || !registeredProcesses.has(`${match[1]}:${match[2]}`);
+    });
     const collateral: ControlPreview["collateral"] = [];
     const metadataGraph = this.metadataAncestry ? this.readMetadataGraph() : undefined;
     if (this.storeError) unverified.push({ id: "control-store", source: null, provider: null, model: null, detail: `Control store unavailable: ${this.storeError}` });
-    for (const target of this.readTargets()) {
+    for (const target of registered) {
       const relation = scopeRelation(scope, target);
       if (relation === "none") continue;
       const verification = this.verify(target, metadataGraph);
@@ -368,7 +393,7 @@ export class AgentControl {
     }
     for (const target of discovered) {
       if (!target.id) continue;
-      const normalized = { ...target, provider: canonicalIdentity(target.provider), account: canonicalIdentity(target.account), model: canonicalIdentity(target.model), nativeCancel: target.nativeCancel ?? nativeCanceller(target.native, this.env), nativeState: target.nativeState ?? nativeStateChecker(target.native, this.env) };
+      const normalized = { ...target, provider: canonicalIdentity(target.provider), account: canonicalIdentity(target.account), model: canonicalIdentity(target.model), nativeCancel: target.nativeCancel ?? this.nativeAdapter(target).cancel, nativeState: target.nativeState ?? this.nativeAdapter(target).state };
       this.adapters.set(normalized.id, { cancel: normalized.nativeCancel, state: normalized.nativeState });
       this.writeStore(() => this.store?.upsertTarget(normalized) ?? false);
     }
@@ -397,12 +422,38 @@ export class AgentControl {
     try {
       return this.store.readTargets().map((target) => {
         const adapter = this.adapters.get(target.id);
-        return { ...target, nativeCancel: adapter?.cancel ?? nativeCanceller(target.native, this.env), nativeState: adapter?.state ?? nativeStateChecker(target.native, this.env) };
+        const native = this.nativeAdapter(target);
+        return { ...target, nativeCancel: adapter?.cancel ?? native.cancel, nativeState: adapter?.state ?? native.state };
       });
     } catch (error) {
       this.storeError = error instanceof Error ? error.message : String(error);
       return [];
     }
+  }
+
+  /** Pending cancellation requests for one managed host; the host acts only on its own registrations. */
+  nativeRequests(hostId: string): NativeRequest[] {
+    try { return this.store?.nativeRequests(hostId) ?? []; } catch { return []; }
+  }
+
+  /** Record the native terminal state observed by the managed host. */
+  resolveNativeRequest(targetId: string, status: NativeRequest["status"], detail: string): boolean {
+    return this.writeStore(() => this.store?.resolveNativeRequest(targetId, status, detail) ?? false);
+  }
+
+  private nativeAdapter(target: Pick<ControlTarget, "id" | "native">): { cancel?: () => Promise<boolean>; state?: () => Promise<boolean> } {
+    const hostId = managedHostId(target.native);
+    if (!hostId) return { cancel: nativeCanceller(target.native, this.env), state: nativeStateChecker(target.native, this.env) };
+    const store = this.store;
+    if (!store) return {};
+    return {
+      cancel: async () => this.writeStore(() => store.requestNative(target.id, hostId)),
+      // Only a native terminal event reported by the owning host counts; a failed relay stays unresolved.
+      state: async () => {
+        const request = store.nativeRequest(target.id);
+        return request?.status === "stopped" || request?.status === "completed";
+      },
+    };
   }
 
   private writeStore(fn: () => boolean): boolean {
@@ -697,6 +748,16 @@ class ControlStore {
           detail TEXT,
           updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS native_requests (
+          target_id TEXT PRIMARY KEY,
+          host_id TEXT NOT NULL,
+          op TEXT NOT NULL,
+          status TEXT NOT NULL,
+          detail TEXT,
+          requested_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS native_requests_host ON native_requests(host_id, status);
         CREATE INDEX IF NOT EXISTS targets_source ON targets(source);
         CREATE INDEX IF NOT EXISTS targets_identity ON targets(provider, model);
       `);
@@ -707,6 +768,20 @@ class ControlStore {
 
   upsertTarget(target: ControlTarget): boolean {
     return this.write(() => {
+      const sameGeneration = this.db.prepare(`SELECT id, provider, account, model, session_id, native_json
+        FROM targets WHERE source = ? AND pid = ? AND process_start_time = ?`).all(target.source, target.pid, target.processStartTime) as unknown as Array<Pick<StoredTargetRow, "id" | "provider" | "account" | "model" | "session_id" | "native_json">>;
+      // A managed host is authoritative for its own process: hook rows never merge into or beside it.
+      const managedRows = sameGeneration.filter((row) => managedHostId(parseNative(row.native_json)) !== null);
+      if (managedHostId(target.native)) {
+        for (const row of sameGeneration) if (!managedHostId(parseNative(row.native_json))) this.db.prepare("DELETE FROM targets WHERE id = ?").run(row.id);
+      } else if (managedRows.length) {
+        return true;
+      }
+      const compatible = managedHostId(target.native) ? undefined : sameGeneration.find((row) => targetIdentityCompatible(row, target));
+      const idRow = this.db.prepare("SELECT id, pid, process_start_time FROM targets WHERE id = ?").get(target.id) as { id?: string; pid?: number; process_start_time?: number } | undefined;
+      const id = idRow && (idRow.pid !== target.pid || idRow.process_start_time !== target.processStartTime)
+        ? `${target.id}:${target.pid}:${target.processStartTime}`
+        : compatible?.id ?? target.id;
       this.db.prepare(`INSERT INTO targets
         (id, source, provider, account, model, pid, process_start_time, owner_uid, owner_identity, owner_sid, executable, session_id, native_json, exclusive, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -716,7 +791,7 @@ class ControlStore {
         provider=COALESCE(excluded.provider, targets.provider), account=COALESCE(excluded.account, targets.account),
         session_id=COALESCE(excluded.session_id, targets.session_id), native_json=COALESCE(excluded.native_json, targets.native_json),
         exclusive=excluded.exclusive, updated_at=excluded.updated_at`).run(
-        target.id, target.source, target.provider, target.account ?? null, target.model, target.pid, target.processStartTime,
+        id, target.source, target.provider, target.account ?? null, target.model, target.pid, target.processStartTime,
         target.ownerUid, target.ownerIdentity ?? null, target.ownerSid ?? null, target.executable ?? null, target.sessionId ?? null,
         target.native ? JSON.stringify(serializableNative(target.native)) : null, target.exclusive === true ? 1 : 0, Date.now(),
       );
@@ -751,6 +826,37 @@ class ControlStore {
       }));
   }
 
+  requestNative(targetId: string, hostId: string): boolean {
+    return this.write(() => {
+      const now = Date.now();
+      this.db.prepare(`INSERT INTO native_requests (target_id, host_id, op, status, detail, requested_at, updated_at)
+        VALUES (?, ?, 'cancel', 'pending', NULL, ?, ?)
+        ON CONFLICT(target_id) DO UPDATE SET host_id=excluded.host_id,
+        status=CASE WHEN native_requests.status IN ('stopped', 'completed') THEN native_requests.status ELSE 'pending' END,
+        requested_at=excluded.requested_at, updated_at=excluded.updated_at`).run(targetId, hostId, now, now);
+      return true;
+    });
+  }
+
+  nativeRequest(targetId: string): NativeRequest | null {
+    const row = this.db.prepare("SELECT target_id, host_id, op, status, detail FROM native_requests WHERE target_id = ?").get(targetId) as
+      { target_id: string; host_id: string; op: "cancel"; status: NativeRequest["status"]; detail: string | null } | undefined;
+    return row ? { targetId: row.target_id, hostId: row.host_id, op: row.op, status: row.status, detail: row.detail } : null;
+  }
+
+  nativeRequests(hostId: string): NativeRequest[] {
+    return (this.db.prepare("SELECT target_id, host_id, op, status, detail FROM native_requests WHERE host_id = ? AND status = 'pending' ORDER BY requested_at").all(hostId) as
+      Array<{ target_id: string; host_id: string; op: "cancel"; status: NativeRequest["status"]; detail: string | null }>)
+      .map((row) => ({ targetId: row.target_id, hostId: row.host_id, op: row.op, status: row.status, detail: row.detail }));
+  }
+
+  resolveNativeRequest(targetId: string, status: NativeRequest["status"], detail: string): boolean {
+    return this.write(() => {
+      this.db.prepare("UPDATE native_requests SET status = ?, detail = ?, updated_at = ? WHERE target_id = ?").run(status, detail, Date.now(), targetId);
+      return true;
+    });
+  }
+
   recordOutcome(outcome: ControlOutcome): boolean {
     return this.write(() => {
       this.db.prepare(`INSERT INTO outcomes (target_id, status, detail, updated_at) VALUES (?, ?, ?, ?)
@@ -783,6 +889,20 @@ class ControlStore {
   }
 }
 
+function targetIdentityCompatible(row: Pick<StoredTargetRow, "provider" | "account" | "model" | "session_id" | "native_json">, target: ControlTarget): boolean {
+  const differs = (known: string | null | undefined, incoming: string | null | undefined): boolean => Boolean(known && incoming && canonicalIdentity(known) !== canonicalIdentity(incoming));
+  if (differs(row.provider, target.provider) || differs(row.account, target.account) || differs(row.model, target.model) || differs(row.session_id, target.sessionId)) return false;
+  if (row.native_json && target.native && !nativeBindingsEqual(parseNative(row.native_json), target.native)) return false;
+  return true;
+}
+
+function nativeBindingsEqual(left: NativeTarget | undefined, right: NativeTarget | undefined): boolean {
+  if (!left || !right) return true;
+  return left.kind === right.kind && sanitizeEndpoint(left.endpoint) === sanitizeEndpoint(right.endpoint) &&
+    (left.sessionId ?? null) === (right.sessionId ?? null) && (left.threadId ?? null) === (right.threadId ?? null) &&
+    (left.turnId ?? null) === (right.turnId ?? null) && (left.taskId ?? null) === (right.taskId ?? null);
+}
+
 function serializableNative(native: NativeTarget): NativeTarget {
   const validEnv = (value: unknown): value is string => typeof value === "string" && /^[A-Z_][A-Z0-9_]*$/.test(value);
   const auth = native.auth && (native.auth.scheme === "basic" || native.auth.scheme === "bearer") ? {
@@ -800,6 +920,7 @@ function serializableNative(native: NativeTarget): NativeTarget {
     ...(typeof native.sessionId === "string" ? { sessionId: native.sessionId } : {}),
     ...(typeof native.threadId === "string" ? { threadId: native.threadId } : {}),
     ...(typeof native.turnId === "string" ? { turnId: native.turnId } : {}),
+    ...(typeof native.taskId === "string" ? { taskId: native.taskId } : {}),
   };
 }
 
@@ -820,15 +941,15 @@ function parseNative(value: string | null): NativeTarget | undefined {
   if (!value) return undefined;
   try {
     const parsed = JSON.parse(value) as Partial<NativeTarget>;
-    if ((parsed.kind !== "codex" && parsed.kind !== "opencode") || typeof parsed.endpoint !== "string" || !parsed.endpoint) return undefined;
-    const transport = parsed.transport === "http" || parsed.transport === "websocket" || parsed.transport === "unix" || parsed.transport === "stdio" ? parsed.transport : undefined;
+    if ((parsed.kind !== "codex" && parsed.kind !== "opencode" && parsed.kind !== "claude") || typeof parsed.endpoint !== "string" || !parsed.endpoint) return undefined;
+    const transport = parsed.transport === "http" || parsed.transport === "websocket" || parsed.transport === "unix" || parsed.transport === "stdio" || parsed.transport === "store" ? parsed.transport : undefined;
     const auth = parsed.auth && typeof parsed.auth === "object" && (parsed.auth.scheme === "basic" || parsed.auth.scheme === "bearer") ? {
       scheme: parsed.auth.scheme,
       tokenEnv: typeof parsed.auth.tokenEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.auth.tokenEnv) ? parsed.auth.tokenEnv : undefined,
       usernameEnv: typeof parsed.auth.usernameEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.auth.usernameEnv) ? parsed.auth.usernameEnv : undefined,
       passwordEnv: typeof parsed.auth.passwordEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.auth.passwordEnv) ? parsed.auth.passwordEnv : undefined,
     } satisfies NativeAuth : undefined;
-    return { kind: parsed.kind, endpoint: sanitizeEndpoint(parsed.endpoint), transport, auth, authEnv: typeof parsed.authEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.authEnv) ? parsed.authEnv : undefined, sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined, threadId: typeof parsed.threadId === "string" ? parsed.threadId : undefined, turnId: typeof parsed.turnId === "string" ? parsed.turnId : undefined };
+    return { kind: parsed.kind, endpoint: sanitizeEndpoint(parsed.endpoint), transport, auth, authEnv: typeof parsed.authEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(parsed.authEnv) ? parsed.authEnv : undefined, sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined, threadId: typeof parsed.threadId === "string" ? parsed.threadId : undefined, turnId: typeof parsed.turnId === "string" ? parsed.turnId : undefined, taskId: typeof parsed.taskId === "string" ? parsed.taskId : undefined };
   } catch {
     return undefined;
   }
@@ -884,7 +1005,8 @@ function sameProcessOwner(actual: ProcessIdentity, expected: ControlTarget): boo
 }
 
 function nativeCanceller(native: NativeTarget | undefined, env: Env): (() => Promise<boolean>) | undefined {
-  if (!native?.endpoint || (native.kind === "opencode" && !native.sessionId)) return undefined;
+  // Claude exposes cancellation only on the stdio of the process that owns the stream (managed hosts).
+  if (!native?.endpoint || managedHostId(native) || native.kind === "claude" || (native.kind === "opencode" && !native.sessionId)) return undefined;
   return async () => {
     if (native.kind === "codex") {
       const response = await codexRpc(native, env, "turn/interrupt", { threadId: native.threadId, turnId: native.turnId });
@@ -915,15 +1037,15 @@ async function verifyOpenCodeSession(native: NativeTarget, env: Env): Promise<bo
 }
 
 function nativeStateChecker(native: NativeTarget | undefined, env: Env): (() => Promise<boolean>) | undefined {
-  if (!native?.endpoint) return undefined;
+  if (!native?.endpoint || managedHostId(native) || native.kind === "claude") return undefined;
   if (native.kind === "codex") {
     if (!native.threadId || !native.turnId) return undefined;
     return async () => {
       const response = await codexRpc(native, env, "thread/read", { threadId: native.threadId, includeTurns: true });
       if (response.error || !response.result || typeof response.result !== "object") return false;
-      const result = response.result as { thread?: { turns?: Array<{ id?: string; status?: string }> }; turn?: { id?: string; status?: string }; status?: string };
-      const turn = result.turn ?? result.thread?.turns?.find((candidate) => candidate.id === native.turnId);
-      return Boolean(turn?.status && ["interrupted", "completed", "failed", "declined"].includes(turn.status)) || ["interrupted", "completed", "failed", "declined"].includes(result.status ?? "");
+      const result = response.result as { thread?: { turns?: Array<{ id?: string; status?: string }> } };
+      const turn = result.thread?.turns?.find((candidate) => candidate.id === native.turnId);
+      return Boolean(turn?.status && ["interrupted", "completed", "failed"].includes(turn.status));
     };
   }
   if (!native.sessionId) return undefined;
@@ -940,6 +1062,7 @@ function nativeStateChecker(native: NativeTarget | undefined, env: Env): (() => 
 }
 
 function nativeHeaders(native: NativeTarget, env: Env): Record<string, string> {
+  if (native.kind === "claude") return {};
   if (native.kind === "opencode") {
     const passwordEnv = native.auth?.passwordEnv ?? "OPENCODE_SERVER_PASSWORD";
     const usernameEnv = native.auth?.usernameEnv ?? "OPENCODE_SERVER_USERNAME";
@@ -1186,40 +1309,19 @@ function discoverNativeProcesses(list: () => ProcessIdentity[], inspect: (pid: n
   const byPid = new Map(listed.map((identity) => [identity.pid, identity]));
   for (const identity of listed) {
     if (identity.pid === currentPid) continue;
-    const identitySource = sourceForIdentity(identity);
-    const env = identitySource || isShellExecutable(identity.executable ?? "") ? readProcEnv(identity.pid) : {};
-    const markedSource = env.TOKEN_FURNACE_SOURCE;
-    const source = validSource(markedSource) ? markedSource : identitySource;
+    const identitySource = sourceForRuntimeIdentity(identity);
+    const source = identitySource;
     if (!source) continue;
     const owner = resolveNativeProcess(identity, source, inspect, byPid);
-    if (markedSource === "claude" || markedSource === "codex" || markedSource === "opencode") {
-      if (owner) {
-        const verifiedOwner = inspect(owner.pid);
-        if (verifiedOwner) targets.push(targetFromProcess(verifiedOwner, source, { ...env, ...readProcEnv(verifiedOwner.pid) }));
-        else unverified.push({
-          id: `unmanaged:${source}:${identity.pid}:${identity.processStartTime}`,
-          source,
-          provider: null,
-          model: null,
-          detail: `${source} owning runtime PID ${owner.pid} is no longer discoverable for ownership verification.`,
-        });
-      }
-      else unverified.push({
-        id: `unmanaged:${source}:${identity.pid}:${identity.processStartTime}`,
-        source,
-        provider: null,
-        model: null,
-        detail: `${source} label was found on PID ${identity.pid}, but its owning native runtime executable is unresolved.`,
-      });
-    } else {
-      unverified.push({
-        id: `unmanaged:${source}:${identity.pid}:${identity.processStartTime}`,
-        source,
-        provider: null,
-        model: null,
-        detail: `Unmanaged ${source} runtime discovered at PID ${identity.pid}; native hook/session ownership is unresolved.`,
-      });
-    }
+    unverified.push({
+      id: `unmanaged:${source}:${identity.pid}:${identity.processStartTime}`,
+      source,
+      provider: null,
+      model: null,
+      detail: owner
+        ? `Unmanaged ${source} runtime discovered at PID ${owner.pid}; native hook/session ownership is unresolved.`
+        : `${source} runtime label was found at PID ${identity.pid}, but its owning native executable is unresolved.`,
+    });
   }
   return { targets, unverified };
 }
@@ -1229,44 +1331,10 @@ function resolveNativeProcess(start: ProcessIdentity, source: Source, inspect: (
   let current: ProcessIdentity | null = start;
   while (current && current.pid > 1 && !seen.has(current.pid)) {
     seen.add(current.pid);
-    if (sourceForIdentity(current) === source && !isShellExecutable(current.executable ?? "")) return current;
+    if (sourceForRuntimeIdentity(current) === source && !isShellExecutable(current.executable ?? "")) return current;
     current = current.parentPid ? listed.get(current.parentPid) ?? inspect(current.parentPid) : null;
   }
   return null;
-}
-
-function targetFromProcess(identity: ProcessIdentity, source: Source, env: Record<string, string>): ControlTarget {
-  return {
-    id: env.TOKEN_FURNACE_SESSION_ID || `${source}:${identity.pid}:${identity.processStartTime}`,
-    source,
-    provider: env.TOKEN_FURNACE_PROVIDER || null,
-    account: env.TOKEN_FURNACE_ACCOUNT || null,
-    model: env.TOKEN_FURNACE_MODEL || null,
-    pid: identity.pid,
-    processStartTime: identity.processStartTime,
-    ownerUid: identity.ownerUid,
-    ownerIdentity: identity.ownerIdentity,
-    ownerSid: identity.ownerSid,
-    executable: identity.executable,
-    sessionId: env.TOKEN_FURNACE_NATIVE_SESSION || null,
-    native: env.TOKEN_FURNACE_NATIVE_ENDPOINT ? {
-      kind: source === "opencode" ? "opencode" : "codex",
-      endpoint: env.TOKEN_FURNACE_NATIVE_ENDPOINT,
-      transport: env.TOKEN_FURNACE_NATIVE_TRANSPORT as NativeTarget["transport"],
-      auth: source === "opencode"
-        ? { scheme: "basic", usernameEnv: env.TOKEN_FURNACE_NATIVE_USERNAME_ENV || "OPENCODE_SERVER_USERNAME", passwordEnv: env.TOKEN_FURNACE_NATIVE_PASSWORD_ENV || "OPENCODE_SERVER_PASSWORD" }
-        : env.TOKEN_FURNACE_NATIVE_AUTH_ENV ? { scheme: "bearer", tokenEnv: env.TOKEN_FURNACE_NATIVE_AUTH_ENV } : undefined,
-      authEnv: env.TOKEN_FURNACE_NATIVE_AUTH_ENV,
-      sessionId: env.TOKEN_FURNACE_NATIVE_SESSION,
-      threadId: env.TOKEN_FURNACE_NATIVE_THREAD,
-      turnId: env.TOKEN_FURNACE_NATIVE_TURN,
-    } : undefined,
-    exclusive: env.TOKEN_FURNACE_EXCLUSIVE === "1",
-  };
-}
-
-function validSource(value: string | undefined): value is Source {
-  return value === "claude" || value === "codex" || value === "opencode";
 }
 
 function sourceForExecutable(executable: string | null | undefined): Source | null {
@@ -1281,6 +1349,22 @@ function sourceForIdentity(identity: ProcessIdentity): Source | null {
   return sourceForExecutable(identity.executable) ?? sourceForCommandLine(identity.commandLine);
 }
 
+function sourceForRuntimeIdentity(identity: ProcessIdentity): Source | null {
+  return sourceForExecutable(identity.executable) ?? sourceForRuntimeCommandLine(identity.commandLine);
+}
+
+function sourceForRuntimeCommandLine(commandLine: string | null | undefined): Source | null {
+  const tokens = [...(commandLine ?? "").matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3] ?? "");
+  if (!tokens.length) return null;
+  const direct = sourceForExecutable(tokens[0]);
+  if (direct) return direct;
+  if (!isShellExecutable(tokens[0])) return null;
+  const commandIndex = tokens.findIndex((token) => token === "-c" || token === "/c" || token === "-Command");
+  if (commandIndex < 0 || !tokens[commandIndex + 1]) return null;
+  const command = tokens[commandIndex + 1].match(/^\s*(?:env\s+)?(?:[A-Z_][A-Z0-9_]*=[^\s]+\s+)*(?:exec\s+)?([^\s]+)/)?.[1];
+  return sourceForExecutable(command);
+}
+
 function sourceForCommandLine(commandLine: string | null | undefined): Source | null {
   const value = commandLine ?? "";
   for (const source of ["claude", "codex", "opencode"] as const) {
@@ -1292,23 +1376,6 @@ function sourceForCommandLine(commandLine: string | null | undefined): Source | 
 function isShellExecutable(executable: string): boolean {
   const name = executable.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   return ["sh", "bash", "zsh", "fish", "dash", "ksh", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(name);
-}
-
-function readProcEnv(pid: number): Record<string, string> {
-  try {
-    const result: Record<string, string> = {};
-    const text = process.platform === "darwin"
-      ? execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-      : readFileSync(`/proc/${pid}/environ`).toString();
-    for (const entry of text.split("\0")) {
-      const split = entry.indexOf("=");
-      if (split > 0 && entry.startsWith("TOKEN_FURNACE_")) result[entry.slice(0, split)] = entry.slice(split + 1);
-    }
-    if (process.platform === "darwin") {
-      for (const match of text.matchAll(/(?:^|\s)(TOKEN_FURNACE_[A-Z0-9_]+)=([^\s]+)/g)) result[match[1]] = match[2];
-    }
-    return result;
-  } catch { return {}; }
 }
 
 function readProcExecutable(pid: number): string | null {

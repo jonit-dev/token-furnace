@@ -1091,7 +1091,7 @@ export const TokenFurnaceBudget = async (ctx) => ({
         const info = item?.info;
         if (!info?.id || info.role !== "assistant" || !info.time?.completed || info.error || seen.has(String(info.id))) continue;
         const calls = Array.isArray(item.parts)
-          ? item.parts.filter((part) => part?.type === "tool" && typeof part.callID === "string" && pendingByCall.has(part.callID) && (!part.state?.status || part.state.status === "completed" || part.state.status === "error"))
+          ? item.parts.filter((part) => part?.type === "tool" && typeof part.callID === "string" && pendingByCall.has(part.callID) && (part.state?.status === "completed" || part.state?.status === "error"))
           : [];
         if (!calls.length || !info.tokens) continue;
         const usage = {

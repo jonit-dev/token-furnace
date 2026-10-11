@@ -25,6 +25,8 @@ export interface BudgetSourceDescriptor {
   label: string;
   installed: boolean;
   models?: string[];
+  /** Verified provider/model identities (registered native targets, OpenCode provider/model records). */
+  modelScopes?: Array<{ provider: string; model: string }>;
   /** Only identities observed from native telemetry or authoritative meters. */
   providers?: string[];
 }
@@ -93,6 +95,7 @@ export interface StopOperation {
   status: "complete" | "partial";
   outcomes: StopTargetOutcome[];
   createdAt: string;
+  settingsError?: string;
 }
 
 interface StoredSettings {
@@ -326,7 +329,7 @@ export class BudgetService {
         const active = stops.some((stop) => stop.scope.kind === "source" && stop.scope.source === source.source);
         const pace = policy?.mode === "auto" && meterIsAdmissible(meter, now) ? autoPace(meter, now) : policy?.mode === "manual" ? policy.limit : null;
         const allowance = policy?.mode === "auto" && meterIsAdmissible(meter, now) ? pace : policy?.mode === "manual" ? policy.limit : null;
-        const blockedWork = this.blockedCount(source.source);
+        const blockedWork = this.blockedCount(source.source, policy, now);
         const status: BudgetSourceStatus["status"] = active
           ? "Emergency stopped"
           : policy?.mode === "off" || !policy
@@ -522,12 +525,15 @@ export class BudgetService {
         .run(policyKey(scope), JSON.stringify(scope), id, now.getTime());
       this.db.prepare("INSERT INTO operations (id, scope_json, status, outcomes_json, created_at) VALUES (?, ?, ?, ?, ?)")
         .run(id, JSON.stringify(scope), status, JSON.stringify(outcomes), now.getTime());
-      const settings = this.readSettings().settings;
-      const latches = (settings.latches ?? []).filter((latch) => policyKey(latch.scope) !== policyKey(scope));
-      latches.push({ scope, operationId: id, createdAt: now.getTime() });
-      this.writeSettings({ ...settings, latches });
+      // The SQLite stops row is the authoritative latch. A malformed settings file is reported, never overwritten.
+      const loaded = this.readSettings();
+      if (!loaded.error) {
+        const latches = (loaded.settings.latches ?? []).filter((latch) => policyKey(latch.scope) !== policyKey(scope));
+        latches.push({ scope, operationId: id, createdAt: now.getTime() });
+        this.writeSettings({ ...loaded.settings, latches });
+      }
       this.db.prepare("UPDATE stop_previews SET used = 1 WHERE id = ?").run(previewId);
-      return { id, scope, status, outcomes, createdAt: now.toISOString() };
+      return { id, scope, status, outcomes, createdAt: now.toISOString(), ...(loaded.error ? { settingsError: loaded.error } : {}) };
     });
   }
 
@@ -562,11 +568,14 @@ export class BudgetService {
     return { id: row.id, scope: JSON.parse(row.scope_json) as StopScope, status: row.status, outcomes: JSON.parse(row.outcomes_json) as StopTargetOutcome[], createdAt: new Date(row.created_at).toISOString() };
   }
 
-  unlock(scope: StopScope): void {
-    this.writeTransaction(() => {
+  /** Returns the settings error when the file is malformed and was left untouched. */
+  unlock(scope: StopScope): string | null {
+    return this.writeTransaction(() => {
       this.db.prepare("UPDATE stops SET active = 0, unlocked_at = ? WHERE scope_key = ?").run(this.now().getTime(), policyKey(normalizeScope(scope)));
-      const settings = this.readSettings().settings;
-      this.writeSettings({ ...settings, latches: (settings.latches ?? []).filter((latch) => policyKey(latch.scope) !== policyKey(normalizeScope(scope))) });
+      const loaded = this.readSettings();
+      if (loaded.error) return loaded.error;
+      this.writeSettings({ ...loaded.settings, latches: (loaded.settings.latches ?? []).filter((latch) => policyKey(latch.scope) !== policyKey(normalizeScope(scope))) });
+      return null;
     });
   }
 
@@ -580,8 +589,16 @@ export class BudgetService {
       .run(randomUUID(), input.identity.source, canonicalIdentity(input.identity.provider), canonicalIdentity(input.identity.account), canonicalIdentity(input.identity.model), input.requestId ?? null, input.correlationId ?? null, input.sessionId ?? null, allowed ? 1 : 0, reason, (input.now ?? this.now()).getTime());
   }
 
-  private blockedCount(source: Source): number {
-    return Number((this.db.prepare("SELECT COUNT(*) AS count FROM admission_decisions WHERE source = ? AND allowed = 0").get(source) as { count: number }).count);
+  /** Denials inside the same window admission measures usage over: the policy window for totals, else the last hour. */
+  private blockedCount(source: Source, policy: BudgetPolicy | null, now: Date): number {
+    const since = policy?.unit === "tokens-total" ? this.policyStartedAt(policyKey(policy.scope)) : now.getTime() - 3_600_000;
+    return Number((this.db.prepare("SELECT COUNT(*) AS count FROM admission_decisions WHERE source = ? AND allowed = 0 AND at >= ?").get(source, since) as { count: number }).count);
+  }
+
+  /** True when any policy is on, a stop is latched, or settings are unreadable, so hooks must do control work. */
+  enforcing(): boolean {
+    const loaded = this.readSettings();
+    return Boolean(loaded.error) || loaded.settings.policies.some((policy) => policy.mode !== "off") || this.activeStops().length > 0;
   }
 
   private policyStartedAt(scopeKey: string): number {
