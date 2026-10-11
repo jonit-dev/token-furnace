@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
 import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ActiveSessions } from "./components/panels";
 import { Sessions } from "./components/tables";
 import type { ActiveSession, Report, SessionRow } from "../../src/core/model";
 
 describe("ActiveSessions and Sessions UI improvements", () => {
+  beforeEach(() => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
+  });
+
   afterEach(() => {
     cleanup();
   });
@@ -58,9 +63,14 @@ describe("ActiveSessions and Sessions UI improvements", () => {
     expect(within(attentionGroup).getByText(/Needs attention \(1\)/i)).toBeTruthy();
     expect(within(attentionGroup).getAllByText("Fix bug").length).toBeGreaterThanOrEqual(1);
     expect(within(attentionGroup).queryByText("Add endpoint")).toBeNull();
-    expect(within(attentionGroup).getByText("late compaction:")).toBeTruthy();
-    expect(within(attentionGroup).getByText("Use a 160000 claude compaction window.")).toBeTruthy();
     expect(within(attentionGroup).getByText("of Claude Code")).toBeTruthy();
+    // Issues live in the session modal, opened from the Fixes column.
+    expect(screen.queryByText("late compaction:")).toBeNull();
+    fireEvent.click(within(attentionGroup).getByRole("button", { name: "1 fix for Fix bug" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("late compaction:")).toBeTruthy();
+    expect(within(dialog).getByText("Use a 160000 claude compaction window.")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close modal" }));
 
     expect(within(otherGroup).getByText(/Other active sessions \(1\)/i)).toBeTruthy();
     expect(within(otherGroup).getAllByText("Add endpoint").length).toBeGreaterThanOrEqual(1);
@@ -99,7 +109,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
     expect(screen.getByText("No session had a turn in the last 30 minutes.")).toBeTruthy();
   });
 
-  it("copies full UUID on active session Copy ID click and reveals full title and Project in details", async () => {
+  it("opens a session modal with full title, stats, Copy ID and Copy fix", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {
       clipboard: { writeText },
@@ -117,23 +127,31 @@ describe("ActiveSessions and Sessions UI improvements", () => {
       hours: 1.2,
       context: 120000,
       idle: 1,
-      flags: [],
-      model: "claude-3-7-sonnet",
+      flags: ["caller reads: 519 file/log reads. Send them to a cheap read-only agent."],
+      model: "opencode-go/deepseek-v4.1-flash",
       rate: 300000,
       rateShare: 40,
     };
 
     render(<ActiveSessions sessions={[activeSession]} />);
 
-    const copyBtn = screen.getByRole("button", { name: "Copy ID" });
-    fireEvent.click(copyBtn);
-    expect(writeText).toHaveBeenCalledWith("98765432-1111-2222-3333-444455556666");
+    expect(screen.getByTitle("opencode-go/deepseek-v4.1-flash").textContent).toBe("opencode-go/deepseek-v4.1-flash");
+    expect(screen.queryByRole("button", { name: "Copy ID" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^1 fix for / }));
 
-    const details = screen.getByText("Details").closest("details")!;
-    expect(within(details).getByText("Extremely long title that should not be truncated inside the expandable session details section")).toBeTruthy();
-    expect(within(details).getByText("Project:")).toBeTruthy();
-    expect(within(details).queryByText(/Project\/cwd:/i)).toBeNull();
-    expect(within(details).getByText("my-frontend-service")).toBeTruthy();
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Copy fix" }));
+    const prompt = writeText.mock.calls[0][0] as string;
+    // The copied fix must let another agent find the session and choose a session fix or a rules file.
+    expect(prompt).toContain("98765432-1111-2222-3333-444455556666");
+    expect(prompt).toContain("my-frontend-service");
+    expect(prompt).toContain("caller reads: 519 file/log reads");
+    expect(prompt).toContain("add a short rule to CLAUDE.md");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Copy ID" }));
+    expect(writeText).toHaveBeenCalledWith("98765432-1111-2222-3333-444455556666");
+    expect(within(dialog).getByText("Extremely long title that should not be truncated inside the expandable session details section")).toBeTruthy();
+    expect(within(dialog).getByText("my-frontend-service")).toBeTruthy();
+    expect(within(dialog).getByText("8")).toBeTruthy();
   });
 
   it("renders CopyButton with fullId in Top sessions table", async () => {

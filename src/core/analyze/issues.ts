@@ -10,7 +10,7 @@ import {
   SUBAGENT_ENV,
   TOOL_CONCURRENCY,
 } from "./flags";
-import type { Priority, RawIssue, RawReport, SessionRow, Source } from "../model";
+import type { ActiveSession, Priority, RawIssue, RawReport, SessionRow, Source } from "../model";
 import { PROVIDERS } from "../providers";
 
 /** Per leak flag prefix: short fix, title, why it costs tokens, and the prompt for an agent. burn.py:1201 */
@@ -236,6 +236,46 @@ export function issuePrompt(issue: RawIssue): string {
     : ISSUE_EXTRA[issue.kind];
   if (extra) lines.push("", "Additional info:", ...extra.map((e) => `- ${e}`));
   lines.push("", `What to do: ${issue.action}`, "", "Report what you changed and how to check that it worked.");
+  return lines.join("\n");
+}
+
+/**
+ * A copy-to-agent prompt for one flag on one live session. It carries what another agent needs to
+ * find the session, and says to fix it there or in the rules file when the cause will repeat.
+ */
+export function sessionFixPrompt(s: ActiveSession, flag: string): string {
+  const kind = flag.split(":")[0];
+  const [fix, title, why] = ISSUES[kind] ?? [flag, kind, "", flag];
+  const provider = PROVIDERS[s.source];
+  const id = s.fullId || s.id;
+  const lines = [
+    `Token leak to fix in one ${provider.label} session: ${title}.`,
+    "",
+    "Find the session:",
+    `- Agent: ${provider.label}`,
+    `- Session ID: ${id}`,
+    `- Project: ${s.project}`,
+    `- Title: ${s.title || "(untitled)"}`,
+    s.path
+      ? `- Transcript: ${s.path}`
+      : `- Transcript: not recorded. Search the ${provider.label} data folder for a file whose name or content has the session ID.`,
+    `- State: ${s.model || "unknown model"}, ${s.turns} turns, ${fixed(s.hours, 1)} h old, idle ${(s.idle || 0) < 1 ? "now" : int0(s.idle) + " min"}, context ${int0(s.context / 1000)}k, peak ${int0(s.peak / 1000)}k`,
+    "",
+    `Measured: ${flag}`,
+  ];
+  if (why) lines.push(`Why it costs tokens: ${why}`);
+  lines.push(
+    "",
+    "What to do:",
+    "1. Read the transcript and find the turns behind the measurement above, such as the most repeated tool calls or the point where the context grew past the target.",
+    `2. If the cause is specific to this task, fix it in this session: ${fix}`,
+    `3. If the same mistake would repeat in other sessions, add a short rule to ${provider.rules} instead: the project's ${provider.rules} for this project, or the global one for every project. Write the rule as an instruction to the agent, not as a note.`,
+  );
+  const extra = kind === "late compaction"
+    ? [`${provider.label}: ${provider.compaction}.`, "Compact or hand off between meaningful phases, not every N tokens."]
+    : ISSUE_EXTRA[kind];
+  if (extra) lines.push("", "Additional info:", ...extra.map((e) => `- ${e}`));
+  lines.push("", "Report what you changed, where, and how to check that it worked.");
   return lines.join("\n");
 }
 

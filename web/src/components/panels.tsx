@@ -1,10 +1,12 @@
 import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/context";
-import type { ReactNode } from "react";
+import { sessionFixPrompt } from "../../../src/core/analyze/issues";
+import { useState, type ReactNode } from "react";
 import type { Burn, Report, Source } from "../../../src/core/model";
 import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
 import { Bar, Card, CopyButton, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
 import { Icon } from "./icons";
+import { Modal } from "./modal";
 import { useUi } from "../store";
 
 export function ActNow({ r }: { r: Partial<Report> }) {
@@ -48,122 +50,94 @@ function parseFlag(f: string): { label: string; reason: string; fix: string } {
   return { label, reason, fix };
 }
 
+type ActiveRow = Report["active"][number];
+
+function burnText(s: ActiveRow, burns?: Report["burns"]): string {
+  const limit = burns?.[s.source]?.limit;
+  return limit ? quota((100 * s.rate) / limit) : fmt(s.rate) + "/h";
+}
+
 function SessionTable({
   sessions,
   burns,
+  onOpen,
+  head = true,
 }: {
   sessions: Report["active"];
   burns?: Report["burns"];
+  onOpen: (s: ActiveRow) => void;
+  head?: boolean;
 }) {
   return (
-    <div className="overflow-x-auto -mx-1">
-      <table className="w-full min-w-max text-xs">
-        <thead>
-          <tr className="text-left text-[11px] uppercase tracking-wide text-muted font-normal [&_th]:font-normal">
-            <th className="px-1 pb-1">Session</th>
-            <th className="px-1">Model</th>
-            <th className="px-1 text-right">Burn rate</th>
-            <th className="px-1">Provider burn share</th>
-            <th className="px-1 text-right">Context</th>
-            <th className="px-1 text-right">Age</th>
-            <th className="px-1 text-right">Idle</th>
-            <th className="px-1">Flags & Fixes</th>
-          </tr>
-        </thead>
+    <div className="session-table-container -mx-1">
+      <table className="session-table w-full text-xs">
+        {head ? (
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wide text-muted [&_th]:font-normal">
+              <th className="px-1">Session</th>
+              <th className="px-1">Model</th>
+              <th className="px-1 text-right" title="Burn rate">Burn</th>
+              <th className="px-1" title="Provider burn share">Share</th>
+              <th className="px-1 text-right">Ctx</th>
+              <th className="px-1 text-right">Age</th>
+              <th className="px-1 text-right">Idle</th>
+              <th className="px-1 text-right">Fixes</th>
+            </tr>
+          </thead>
+        ) : null}
         <tbody>
           {sessions.map((s, i) => {
             const share = Number(s.rateShare) || 0;
             const hot = share >= 50;
             const limit = burns?.[s.source]?.limit;
             const providerLabel = sourceLabel(s.source);
+            const n = s.flags?.length ?? 0;
             return (
-              <tr key={i} className="border-t border-line align-top">
-                <td className="px-1 py-1 max-w-[18rem] min-w-[12rem]">
-                  <div className="truncate font-medium" title={s.title || "(untitled)"}>
+              <tr key={i} onClick={() => onOpen(s)} className="border-t border-line cursor-pointer hover:bg-chip/40">
+                <td className="px-1 py-1.5 min-w-0 flex items-center gap-1.5">
+                  <SourceBadge source={s.source} />
+                  <span className="truncate font-medium min-w-0" title={s.title || "(untitled)"}>
                     {s.title || "(untitled)"}
-                  </div>
-                  <div className="text-[11px] text-muted flex items-center gap-1.5 flex-wrap">
-                    <SourceBadge source={s.source} />
-                    <span title={s.project ?? "?"} className="truncate max-w-[7rem]">
-                      {s.project ?? "?"}
-                    </span>
-                    <span>·</span>
-                    <span title={s.fullId || s.id}>{s.id}</span>
-                    <CopyButton
-                      text={s.fullId || s.id}
-                      label="Copy ID"
-                      className="text-[10px] px-1 py-0.5 bg-chip rounded border border-line hover:border-accent"
-                    />
-                  </div>
-                  <details className="mt-1 text-[11px] text-muted cursor-pointer">
-                    <summary className="hover:text-ink">Details</summary>
-                    <div className="mt-1 p-1.5 bg-bg rounded border border-line space-y-1">
-                      <div className="break-all"><span className="font-semibold">Full ID:</span> {s.fullId || s.id}</div>
-                      <div className="whitespace-normal break-words"><span className="font-semibold">Title:</span> {s.title || "(untitled)"}</div>
-                      <div><span className="font-semibold">Project:</span> {s.project ?? "?"}</div>
-                      <div><span className="font-semibold">Turns:</span> {s.turns} · <span className="font-semibold">Peak:</span> {fmt(s.peak)}</div>
-                      {s.flags?.length ? (
-                        <div className="space-y-0.5 pt-1 border-t border-line">
-                          <div className="font-semibold">Measured flags:</div>
-                          {s.flags.map((flag, idx) => (
-                            <div key={idx} className="text-accent">{flag}</div>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  </details>
+                  </span>
+                  <span className="shrink-0 max-w-[7rem] truncate text-muted" title={s.project ?? "?"}>
+                    {s.project ?? "?"}
+                  </span>
                 </td>
-                <td className="px-1 py-1 text-muted whitespace-nowrap">
-                  {s.model ? s.model.replace(/^claude-/, "") : "—"}
-                </td>
-                <td className="px-1 py-1 text-right whitespace-nowrap" title={limit ? fmt(s.rate) + "/h" : undefined}>
-                  {limit ? quota((100 * s.rate) / limit) : fmt(s.rate) + "/h"}
-                </td>
-                <td className="px-1 py-1 whitespace-nowrap">
-                  <div className="flex items-center justify-between gap-1">
-                    <span className={hot ? "text-accent font-medium" : ""}>{sharePct(share)}</span>
-                    <span className="text-[10px] text-muted">of {providerLabel}</span>
+                <td className="px-1 py-1.5 min-w-0 text-muted">
+                  <div className="truncate" title={s.model || undefined}>
+                    {s.model ? s.model.replace(/^claude-/, "") : "—"}
                   </div>
-                  <div className="mt-0.5 h-1 w-20 rounded bg-line overflow-hidden">
+                </td>
+                <td data-label="Burn rate" className="px-1 py-1.5 text-right whitespace-nowrap" title={limit ? fmt(s.rate) + "/h" : undefined}>
+                  {burnText(s, burns)}
+                </td>
+                <td data-label="Provider burn share" className="px-1 py-1.5 flex items-center gap-1.5" title={`${sharePct(share)} of ${providerLabel}`}>
+                  <span className={`shrink-0 ${hot ? "text-accent font-medium" : ""}`}>{sharePct(share)}</span>
+                  <span className="sr-only"> of {providerLabel}</span>
+                  <div className="h-1 min-w-0 flex-1 rounded bg-line overflow-hidden">
                     <div
                       className={`h-full ${hot ? "bg-accent" : "bg-bar"}`}
                       style={{ width: Math.min(100, Math.max(0, share)) + "%" }}
                     />
                   </div>
                 </td>
-                <td className="px-1 py-1 text-right">{fmt(s.context)}</td>
-                <td className="px-1 py-1 text-right whitespace-nowrap">{Number(s.hours || 0).toFixed(1)} h</td>
-                <td className="px-1 py-1 text-right whitespace-nowrap">
+                <td data-label="Context" className="px-1 py-1.5 text-right">{fmt(s.context)}</td>
+                <td data-label="Age" className="px-1 py-1.5 text-right whitespace-nowrap">{Number(s.hours || 0).toFixed(1)} h</td>
+                <td data-label="Idle" className="px-1 py-1.5 text-right whitespace-nowrap">
                   {(s.idle || 0) < 1 ? "now" : Math.round(s.idle) + " m"}
                 </td>
-                <td className="px-1 py-1 max-w-[20rem]">
-                  {s.flags?.length ? (
-                    <div className="flex flex-col gap-1.5">
-                      {s.flags.map((f) => {
-                        const { label, reason, fix } = parseFlag(f);
-                        return (
-                          <div
-                            key={f}
-                            className="p-1 rounded bg-accent/10 text-accent text-[11px] leading-tight flex items-start justify-between gap-1.5"
-                          >
-                            <div>
-                              <span className="font-semibold">{label}:</span> {reason}
-                              {fix ? <div className="text-[10px] text-muted mt-0.5">{fix}</div> : null}
-                            </div>
-                            {fix ? (
-                              <CopyButton
-                                text={fix}
-                                label="Copy fix"
-                                className="shrink-0 text-[10px] px-1 py-0.5 bg-chip text-ink rounded border border-line hover:border-accent"
-                              />
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <span className="text-muted">—</span>
-                  )}
+                <td className="px-1 py-1 text-right">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onOpen(s); }}
+                    aria-label={`${n ? `${n} ${n === 1 ? "fix" : "fixes"}` : "Details"} for ${s.title || "(untitled)"}`}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
+                      n ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-chip text-muted"
+                    } hover:border-accent`}
+                  >
+                    {n ? <Icon name="TriangleAlert" size={11} /> : null}
+                    {n ? n : "View"}
+                  </button>
                 </td>
               </tr>
             );
@@ -174,6 +148,95 @@ function SessionTable({
   );
 }
 
+function SessionModal({
+  session: s,
+  burns,
+  onClose,
+}: {
+  session: ActiveRow | null;
+  burns?: Report["burns"];
+  onClose: () => void;
+}) {
+  const stats: [string, string][] = s
+    ? [
+        ["Burn rate", burnText(s, burns)],
+        ["Provider share", `${sharePct(Number(s.rateShare) || 0)} of ${sourceLabel(s.source)}`],
+        ["Context", fmt(s.context)],
+        ["Peak", fmt(s.peak)],
+        ["Turns", String(s.turns)],
+        ["Age", `${Number(s.hours || 0).toFixed(1)} h`],
+        ["Idle", (s.idle || 0) < 1 ? "now" : Math.round(s.idle) + " m"],
+      ]
+    : [];
+  return (
+    <Modal
+      open={s != null}
+      onClose={onClose}
+      title={s?.title || "(untitled)"}
+      description={
+        s ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <SourceBadge source={s.source} />
+            <span>{s.project ?? "?"}</span>
+            <span>·</span>
+            <span>{s.model || "—"}</span>
+          </div>
+        ) : null
+      }
+      footer={
+        s ? (
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span className="min-w-0 break-all text-muted">{s.fullId || s.id}</span>
+            <CopyButton
+              text={s.fullId || s.id}
+              label="Copy ID"
+              className="shrink-0 px-3 py-1 bg-chip rounded border border-line hover:border-accent"
+            />
+          </div>
+        ) : null
+      }
+    >
+      {s ? (
+        <div className="space-y-4 text-xs">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
+            {stats.map(([k, v]) => (
+              <div key={k}>
+                <dt className="text-[10px] uppercase tracking-wide text-muted">{k}</dt>
+                <dd>{v}</dd>
+              </div>
+            ))}
+          </dl>
+          <div>
+            <h3 className="mb-1.5 text-[10px] uppercase tracking-wide text-muted">Issues ({s.flags?.length ?? 0})</h3>
+            {s.flags?.length ? (
+              <ul className="space-y-2">
+                {s.flags.map((f) => {
+                  const { label, reason, fix } = parseFlag(f);
+                  return (
+                    <li key={f} className="flex items-start justify-between gap-3 rounded-lg bg-accent/10 p-2.5">
+                      <div className="min-w-0">
+                        <div className="text-accent"><span className="font-semibold">{label}:</span> <span>{reason}</span></div>
+                        {fix ? <div className="mt-0.5 text-muted">{fix}</div> : null}
+                      </div>
+                      <CopyButton
+                        text={sessionFixPrompt(s, f)}
+                        label="Copy fix"
+                        className="shrink-0 px-2.5 py-1 bg-chip text-ink rounded-full border border-line hover:border-accent"
+                      />
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="text-muted">No issues flagged for this session.</p>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
 export function ActiveSessions({
   sessions,
   burns,
@@ -181,11 +244,13 @@ export function ActiveSessions({
   sessions: Report["active"];
   burns?: Report["burns"];
 }) {
+  const [selected, setSelected] = useState<ActiveRow | null>(null);
   if (!sessions.length) {
     return <p className="text-sm text-muted">No session had a turn in the last 30 minutes.</p>;
   }
   const attention = sessions.filter((s) => (s.flags?.length ?? 0) > 0);
   const others = sessions.filter((s) => !s.flags || s.flags.length === 0);
+  const close = () => setSelected(null);
 
   return (
     <div className="space-y-4">
@@ -195,7 +260,7 @@ export function ActiveSessions({
           Needs attention ({attention.length})
         </h3>
         {attention.length ? (
-          <SessionTable sessions={attention} burns={burns} />
+          <SessionTable sessions={attention} burns={burns} onOpen={setSelected} />
         ) : (
           <p className="text-xs text-muted py-1">No active sessions have triggered leak flags.</p>
         )}
@@ -205,11 +270,12 @@ export function ActiveSessions({
           Other active sessions ({others.length})
         </h3>
         {others.length ? (
-          <SessionTable sessions={others} burns={burns} />
+          <SessionTable sessions={others} burns={burns} onOpen={setSelected} head={!attention.length} />
         ) : (
           <p className="text-xs text-muted py-1">No other active sessions.</p>
         )}
       </div>
+      <SessionModal session={selected} burns={burns} onClose={close} />
     </div>
   );
 }

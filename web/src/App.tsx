@@ -93,7 +93,9 @@ export function App() {
           <span>· {days}-day window</span>
         </div>
       </header>
-      <main className="mt-3">{bodies[tab]}</main>
+      <main className="mt-3">
+        {report || filePage ? bodies[tab] : <p className="text-sm text-muted py-6">Loading report…</p>}
+      </main>
     </div>
   );
 }

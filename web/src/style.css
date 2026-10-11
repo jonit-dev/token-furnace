@@ -7,3 +7,29 @@
 html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 0.875rem; overflow-wrap: anywhere; }
 .glow { filter: drop-shadow(0 0 6px rgba(249, 115, 22, 0.45)); }
+
+/* Compact session rows: one grid line per session, flags on a full-width line below. */
+.session-table-container { container-type: inline-size; }
+.session-table, .session-table thead, .session-table tbody { display: block; }
+.session-table tr {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6rem 3.5rem 4.5rem 3rem 2.6rem 2.6rem 3.6rem;
+  align-items: center;
+}
+.session-table th, .session-table td { min-width: 0; }
+.session-table th { white-space: nowrap; }
+@container (max-width: 640px) {
+  .session-table thead { display: none; }
+  .session-table tr { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 0.25rem; }
+  .session-table td:first-child { grid-column: span 2; }
+  .session-table td[data-label] { text-align: left; }
+  .session-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    white-space: normal;
+  }
+  .session-table td[data-label="Provider burn share"] { grid-column: span 2; }
+  .session-table td[data-label="Provider burn share"] > div { max-width: 8rem; }
+}

@@ -178,6 +178,8 @@ export interface ActiveSession {
   id: string;
   fullId?: string;
   title: string | null;
+  /** Transcript file of the session, when the source knows it. */
+  path?: string | null;
   share: number;
   turns: number;
   peak: number;

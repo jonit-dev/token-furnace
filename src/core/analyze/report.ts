@@ -366,6 +366,7 @@ export function buildReport(input: ReportInput): RawReport | null {
           id: (session || "?").slice(0, 8),
           fullId: session || undefined,
           title: titles.get(key) ?? null,
+          path: paths.get(key) ?? null,
           share: share(sessionData[0]),
           turns: sessionData[1],
           peak: sessionData[2],

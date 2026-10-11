@@ -99,7 +99,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", okFetch(report));
     render(<App />);
     const table = screen.getByRole("table");
-    // The title shows twice per row (cell and the Details block), so count, not getByText.
+    // The title shows twice per row (cell and the modal title), so count, not getByText.
     const present = (text: string) => within(table).getAllByText(text).length;
     expect(present("Claude active")).toBeGreaterThan(0);
     expect(present("Codex active")).toBeGreaterThan(0);
