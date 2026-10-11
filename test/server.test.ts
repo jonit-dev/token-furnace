@@ -3,7 +3,7 @@
 import { request } from "node:http";
 import { connect } from "node:net";
 import { networkInterfaces } from "node:os";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -271,11 +271,16 @@ describe("configuration repair endpoint", () => {
 
   it("lists only repairs that would still change a file", async () => {
     const home = mkdtempSync(join(tmpdir(), "tf-server-pending-"));
+    mkdirSync(join(home, ".claude", "projects"), { recursive: true });
+    mkdirSync(join(home, ".codex", "sessions"), { recursive: true });
     const app = compose({ HOME: home }, { noCache: true });
     const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
     const pending = async () => ((await (await fetch(`${server.url}/api/fix-config`)).json()) as { pending: string[] }).pending;
     try {
       expect(await pending()).toHaveLength(9);
+      rmSync(join(home, ".codex"), { recursive: true });
+      expect((await pending()).every((id) => id.startsWith("claude-"))).toBe(true); // Claude-only: no Codex repairs
+      mkdirSync(join(home, ".codex", "sessions"), { recursive: true });
       const done = await fetch(`${server.url}/api/fix-config`, { method: "POST", headers: { "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Repairs": "claude-context,claude-workers,codex-context" } });
       expect(done.status).toBe(200);
       expect(await pending()).toEqual(["claude-tools", "claude-model", "claude-depth", "codex-workers", "codex-effort", "codex-depth"]);

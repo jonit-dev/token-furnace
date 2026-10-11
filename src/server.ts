@@ -179,7 +179,9 @@ function reportController(app: App, options: ServeOptions, page: string) {
   class ReportController {
     @Get("/api/fix-config")
     pendingFixes(@Res() res: Response) {
-      return res.set("Cache-Control", "no-store").json({ pending: pendingRepairs(app.env) });
+      const live = app.reports.live("all"); // repairs for agents that are not installed are not offered
+      const pending = pendingRepairs(app.env).filter((id) => live.some((agent) => id.startsWith(`${agent}-`)));
+      return res.set("Cache-Control", "no-store").json({ pending });
     }
 
     @Post("/api/fix-config")
