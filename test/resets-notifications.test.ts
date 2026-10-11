@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Report } from "../src/core/model";
 import { assistant } from "./fixtures/build";
 import { compose, type App } from "../src/compose";
+import { BudgetService } from "../src/services/budget-service";
 import { notifyTick, startServer, type LiveServer } from "../src/server";
 import { forgetResets, parseFeed, resetsSnapshot, type ResetsFeed } from "../src/services/resets-client";
 import {
@@ -31,21 +32,39 @@ function directApp(env: NodeJS.ProcessEnv): App {
 
 function closeApps(): void {
   for (const app of apps.splice(0)) {
-    app.budgets.close();
-    app.control.close();
+    app.close();
   }
 }
 
 function expectPrivateSettings(path: string): void {
-  // Windows reports default POSIX mode bits; its ACL protects the user-created temp tree.
   if (process.platform === "win32") {
     expect(statSync(path).isFile()).toBe(true);
-    const script = "$path=$args[0]; $acl=Get-Acl -LiteralPath $path; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; [pscustomobject]@{sid=$sid; rules=@($acl.Access | ForEach-Object { [pscustomobject]@{identity=$_.IdentityReference.Value; inherited=$_.IsInherited} })} | ConvertTo-Json -Compress";
-    const acl = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) as { sid?: string; rules?: Array<{ identity?: string; inherited?: boolean }> | { identity?: string; inherited?: boolean } };
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "if($args.Count -ne 1){throw 'ACL path argument is missing.'}",
+      "$path=[IO.Path]::GetFullPath([string]$args[0])",
+      "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+      "if($null -eq $sid){throw 'Current Windows SID is unavailable.'}",
+      "$acl=$null; $extensions=$null",
+      "try{$acl=[IO.File]::GetAccessControl($path)}catch{Add-Type -AssemblyName System.IO.FileSystem.AccessControl; $extensions=[type]::GetType('System.Security.AccessControl.FileSystemAclExtensions, System.IO.FileSystem.AccessControl'); if($null -eq $extensions){throw}; $acl=$extensions.GetMethod('GetAccessControl',[type[]]@([IO.FileInfo])).Invoke($null,@([IO.FileInfo]::new($path)))}",
+      "$rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))",
+      "[pscustomobject]@{sid=$sid.Value; protected=$acl.AreAccessRulesProtected; rules=@($rules | ForEach-Object {[pscustomobject]@{identity=$_.IdentityReference.Value; inherited=$_.IsInherited; rights=$_.FileSystemRights.ToString(); type=$_.AccessControlType.ToString(); inheritance=$_.InheritanceFlags.ToString(); propagation=$_.PropagationFlags.ToString()}})} | ConvertTo-Json -Compress -Depth 6",
+    ].join("; ");
+    const acl = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) as {
+      sid?: string;
+      protected?: boolean;
+      rules?: Array<{ identity?: string; inherited?: boolean; rights?: string; type?: string; inheritance?: string; propagation?: string }>
+        | { identity?: string; inherited?: boolean; rights?: string; type?: string; inheritance?: string; propagation?: string };
+    };
     const rules = Array.isArray(acl.rules) ? acl.rules : acl.rules ? [acl.rules] : [];
+    expect(acl.protected).toBe(true);
     expect(rules).toHaveLength(1);
     expect(rules[0]?.identity).toBe(acl.sid);
     expect(rules[0]?.inherited).toBe(false);
+    expect(rules[0]?.rights).toContain("FullControl");
+    expect(rules[0]?.type).toBe("Allow");
+    expect(rules[0]?.inheritance).toBe("None");
+    expect(rules[0]?.propagation).toBe("None");
     return;
   }
   expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -487,6 +506,16 @@ describe("the live server", () => {
     const onDisk = JSON.parse(readFileSync(settingsPath(env), "utf8"));
     expect(onDisk.ntfy.token).toBe("tk_secret_value");
     expectPrivateSettings(settingsPath(env));
+    const budgets = new BudgetService(env);
+    try {
+      budgets.savePolicies([{
+        scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 10,
+        deadline: "2099-10-11T12:00:00.000Z",
+      }], 0);
+      expectPrivateSettings(budgets.settingsPath);
+    } finally {
+      budgets.close();
+    }
 
     const read = await call(server, "/api/notifications");
     expect(JSON.stringify(read.body)).not.toContain("tk_secret_value");

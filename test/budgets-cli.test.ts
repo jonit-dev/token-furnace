@@ -71,8 +71,7 @@ describe("budget CLI", () => {
       expect((JSON.parse(output.pop()!) as { allow: boolean; reason: string }).allow).toBe(false);
     } finally {
       process.stdout.write = original;
-      app.budgets.close();
-      app.control.close();
+      app.close();
     }
   });
 
@@ -101,8 +100,7 @@ describe("budget CLI", () => {
       expect(JSON.parse(output.pop()!)).toMatchObject({ decision: "block", allow: false });
     } finally {
       process.stdout.write = original;
-      app.budgets.close();
-      app.control.close();
+      app.close();
     }
   });
 
@@ -126,8 +124,7 @@ describe("budget CLI", () => {
       expect(JSON.parse(output.pop()!)).toMatchObject({ allow: false });
     } finally {
       process.stdout.write = original;
-      app.budgets.close();
-      app.control.close();
+      app.close();
     }
   });
 });

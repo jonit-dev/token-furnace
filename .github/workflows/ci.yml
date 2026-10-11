@@ -25,6 +25,33 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - name: Diagnose Windows ACL runtime
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          [ordered]@{
+            PowerShell = $PSVersionTable.PSVersion.ToString()
+            Edition = $PSVersionTable.PSEdition
+            PSHome = $PSHOME
+            PSModulePath = $env:PSModulePath
+            GetAclCommand = (Get-Command Get-Acl -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+          } | ConvertTo-Json -Compress
+          $module = Get-Module -ListAvailable Microsoft.PowerShell.Security | Select-Object Name, Version, Path
+          $module | ConvertTo-Json -Compress
+          try {
+            Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+            Write-Output 'Import-Module Microsoft.PowerShell.Security: success'
+          } catch {
+            Write-Output ('Import-Module Microsoft.PowerShell.Security: ' + $_.Exception.ToString())
+          }
+          try {
+            $bound = & powershell.exe -NoProfile -NonInteractive -Command 'if($args.Count -ne 1){throw "ACL argument binding failed."}; [IO.Path]::GetFullPath([string]$args[0])' 'token-furnace-acl-argument-check'
+            Write-Output ('powershell.exe -Command argument binding: ' + ($bound -join ''))
+          } catch {
+            Write-Output ('powershell.exe -Command argument binding failed: ' + $_.Exception.ToString())
+          }
       - run: npm run typecheck
       - run: npm test
       - run: npm run smoke

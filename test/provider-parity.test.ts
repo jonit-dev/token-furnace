@@ -2,13 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { compose } from "../src/compose";
+import { compose, type App } from "../src/compose";
 import { DatabaseSync } from "node:sqlite";
-import { SqliteSessionRepository } from "../src/repo/sqlite-repo";
 import { CodexSource } from "../src/sources/codex";
 
 const now = new Date("2026-10-10T12:00:00Z");
 const roots: string[] = [];
+const apps: App[] = [];
 const usage = { input_tokens: 400_000, cached_input_tokens: 300_000, output_tokens: 200, reasoning_output_tokens: 100, total_tokens: 400_200 };
 const token = (total = 400_200) => ({ type: "event_msg", timestamp: now.toISOString(), payload: {
   type: "token_count", info: { last_token_usage: usage, total_token_usage: { ...usage, total_tokens: total } },
@@ -30,7 +30,16 @@ function fixture(records: unknown[]) {
   return { root, home, env, path, parsed: () => new CodexSource(env).parse(path) };
 }
 
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+function appFor(env: NodeJS.ProcessEnv, opts?: { noCache?: boolean }): App {
+  const app = compose(env, opts);
+  apps.push(app);
+  return app;
+}
+
+afterEach(() => {
+  for (const app of apps.splice(0)) app.close();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe("Codex provider parity", () => {
   it("reparses unchanged transcripts from the old parser cache", async () => {
@@ -46,12 +55,12 @@ describe("Codex provider parity", () => {
     const [file] = new CodexSource(env).files();
     db.prepare("INSERT INTO files (path, source, mtime_ns, size) VALUES (?, ?, ?, ?)").run(file.path, "codex", file.mtimeMs, file.size);
     db.close();
-    const app = compose(env);
+    const app = appFor(env);
     try {
       await app.reports.refresh();
       expect(app.reports.getReport(7, "all", { now, weeklyBudget: null })?.turns).toBe(1);
       expect(app.repo.changed([file])).toEqual([]);
-    } finally { (app.repo as SqliteSessionRepository).close(); }
+    } finally { app.close(); }
   });
 
   it.each([
@@ -123,7 +132,7 @@ describe("Codex provider parity", () => {
     const f = fixture([prompt, token()]);
     mkdirSync(join(f.env.CLAUDE_CONFIG_DIR, "projects"), { recursive: true });
     writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, "settings.json"), '{"autoCompactWindow":400000}');
-    const app = compose(f.env, { noCache: true });
+    const app = appFor(f.env, { noCache: true });
     await app.reports.refresh();
     const report = app.reports.getReport(7, "all", { now, weeklyBudget: null })!;
     expect(report.active.map((s) => s.source)).toEqual(["codex"]);
@@ -137,7 +146,7 @@ describe("Codex provider parity", () => {
 
   it("reports whole-window hot spend as a percentage rather than a token count", async () => {
     const f = fixture([prompt, token()]);
-    const app = compose(f.env, { noCache: true });
+    const app = appFor(f.env, { noCache: true });
     await app.reports.refresh();
     const report = app.reports.getReport(7, "all", { now, weeklyBudget: null })!;
     const row = report.baseline.find((r) => r.source === "codex" && r.name === "Spend on turns over 300k")!;

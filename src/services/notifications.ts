@@ -10,14 +10,14 @@
  * returned message never carries the destination URL or the token.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Report, Source } from "../core/model";
 import { isSessionSpike } from "../core/analyze/burn";
 import { eventKey, type ResetsFeed, type ResetEvent } from "./resets-client";
 import { usageCachePath } from "./usage-client";
+import { writePrivateFile } from "./private-file";
 import type { Env } from "../sources/agent-source";
 
 export const LEAD_MIN = 1;
@@ -197,23 +197,7 @@ const object = (value: unknown): Record<string, unknown> | null =>
 
 /** Write through a temporary file in the same directory, then rename. Mode 0600, never world readable. */
 export function saveSettings(env: Env, settings: NotificationSettings): void {
-  const path = settingsPath(env);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-    if (process.platform === "win32") enforceWindowsPrivateFile(temporary);
-    renameSync(temporary, path);
-    if (process.platform !== "win32") chmodSync(path, 0o600);
-  } catch (error) {
-    if (existsSync(temporary)) unlinkSync(temporary);
-    throw error;
-  }
-}
-
-function enforceWindowsPrivateFile(path: string): void {
-  const script = "$path=$args[0]; $acl=Get-Acl -LiteralPath $path; $acl.SetAccessRuleProtection($true,$false); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; if($null -eq $sid){throw 'Current Windows SID is unavailable.'}; foreach($entry in @($acl.Access)){ $acl.PurgeAccessRules($entry.IdentityReference) }; $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $path -AclObject $acl";
-  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { stdio: ["ignore", "ignore", "pipe"] });
+  writePrivateFile(settingsPath(env), `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 export interface DeliveryResult {

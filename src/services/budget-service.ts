@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -16,6 +16,7 @@ import {
 } from "../core/budgets";
 import type { Source } from "../core/model";
 import type { Env } from "../sources/agent-source";
+import { writePrivateFile } from "./private-file";
 
 export type StopScope = BudgetScope;
 
@@ -618,10 +619,7 @@ export class BudgetService {
   }
 
   private writeSettings(settings: StoredSettings): void {
-    const temporary = `${this.settingsPath}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-    try { chmodSync(temporary, 0o600); } catch { /* best effort on Windows */ }
-    renameSync(temporary, this.settingsPath);
+    writePrivateFile(this.settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   }
 
   private writeTransaction<T>(fn: () => T): T {

@@ -313,7 +313,7 @@ async function scenarioAdmission(source, workspace, url, warmup) {
   if (!warmup?.ok) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `Native warmup did not complete; no admission result was fabricated. ${warmup?.detail ?? "adapter setup did not run"}` };
   const target = targets.get(source);
   if (!target?.capabilities?.resume) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `${source} did not advertise a supported native resume route; no synthetic resume result was accepted.` };
-  const artifacts = scenarioArtifacts(workspace, source, "budget-admission", ["child", "background", "resume", "blocked-child", "blocked-background"]);
+  const artifacts = scenarioArtifacts(workspace, source, "budget-admission", ["child", "background", "resume", "blocked-child", "blocked-resume", "blocked-background"]);
   const prompt = delegationPrompt(source, artifacts.child, artifacts.background, artifacts.resume, "BUDGET_ELIGIBLE");
   const task = await runNative(target, workspace, prompt, 120_000, null);
   if (taskUnavailable(task)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task was unavailable: ${safeTail(task.output)}` };
@@ -330,7 +330,7 @@ async function scenarioAdmission(source, workspace, url, warmup) {
   if (!hasMeasuredUsage(source, task.startedAt)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: "The eligible native task did not leave attributable measured usage in the shared budget store." };
   const exhausted = await setSourcePolicy(url, source, 1);
   if (!exhausted.ok) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "Could not persist the deliberately exhausted Manual policy." };
-  const blockedTask = await runNative(target, workspace, delegationPrompt(source, artifacts.blockedChild, artifacts.blockedBackground, artifacts.blockedChild, "BUDGET_BLOCKED"), 60_000, null);
+  const blockedTask = await runNative(target, workspace, delegationPrompt(source, artifacts.blockedChild, artifacts.blockedBackground, artifacts.blockedResume, "BUDGET_BLOCKED"), 60_000, null);
   const denied = decisionEvidence(source, blockedTask.requestId, blockedTask.startedAt, false);
   if (taskUnavailable(blockedTask)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The exhausted native request was unavailable, not a denial: ${safeTail(blockedTask.output)}` };
   if (!denied || !nativeSessionEvidence(source, blockedTask) || blockedTask.timedOut || blockedTask.signal || existsSync(artifacts.blockedChild) || existsSync(artifacts.blockedBackground)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The exhausted request lacked a correlated native deny decision or created a child side effect." };

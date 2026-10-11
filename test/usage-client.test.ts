@@ -2,12 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { App } from "../src/compose";
 
 const TOKEN = "unit-test-token";
 const CLOCK = 1_800_000_000_000;
 
 let roots: string[] = [];
-let apps: { repo: unknown }[] = [];
+let apps: App[] = [];
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function tempRoot(prefix: string): string {
@@ -48,7 +49,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  for (const app of apps) (app.repo as { close?: () => void }).close?.();
+  for (const app of apps) app.close();
   apps = [];
   for (const dir of roots) rmSync(dir, { recursive: true, force: true });
   roots = [];

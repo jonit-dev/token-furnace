@@ -47,6 +47,13 @@ function waitForExit(child: ChildProcess): Promise<void> {
 }
 
 describe("AgentControl", () => {
+  it("does not spawn a POSIX owner-SID lookup while constructing the controller", () => {
+    const inspect = vi.fn(() => ({ pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }));
+    const control = makeControl({ inspect, currentUid: 7, currentPid: 9000, storePath: testStore() });
+    if (process.platform !== "win32") expect(inspect).not.toHaveBeenCalled();
+    control.close();
+  });
+
   it("does not signal a PID whose start identity changed", async () => {
     const signal = vi.fn();
     const inspect = vi.fn((): ProcessIdentity => ({ pid: 4321, processStartTime: 11, ownerUid: 7, parentPid: 1 }));

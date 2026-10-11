@@ -141,7 +141,9 @@ export class AgentControl {
     this.currentOwner = options.currentOwner === undefined
       ? process.platform === "win32" && env.USERDOMAIN && env.USERNAME ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME ?? env.USER ?? null
       : options.currentOwner;
-    this.currentOwnerSid = options.currentOwnerSid === undefined ? this.inspectProcess(this.currentPid)?.ownerSid ?? null : options.currentOwnerSid;
+    this.currentOwnerSid = options.currentOwnerSid === undefined
+      ? process.platform === "win32" ? this.inspectProcess(this.currentPid)?.ownerSid ?? null : null
+      : options.currentOwnerSid;
     this.env = env;
     const state = env.TOKEN_FURNACE_STATE_HOME || env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state");
     const storePath = options.storePath ?? options.statePath ?? join(state, "token-furnace", "control.sqlite");
@@ -413,8 +415,8 @@ export class AgentControl {
     }
   }
 
-  private verifyProcessIdentity(expected: ProcessIdentity): boolean {
-    const identity = this.inspectProcess(expected.pid);
+  private verifyProcessIdentity(expected: ProcessIdentity, observed = this.inspectProcess(expected.pid)): boolean {
+    const identity = observed;
     if (!identity || !sameProcessIdentity(identity, expected)) return false;
     if (expected.pid === this.currentPid || this.protectsCurrentProcess(expected.pid)) return false;
     if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return false;
@@ -436,9 +438,10 @@ export class AgentControl {
     const queue = [...(children.get(target.pid) ?? [])];
     while (queue.length) {
       const identity = queue.shift()!;
-      if (!sameProcessOwner(identity, target)) return null;
-      if (!this.verifyProcessIdentity(identity)) return null;
-      result.push(identity);
+      const observed = this.inspectProcess(identity.pid);
+      if (!observed || !sameProcessOwner(observed, target)) return null;
+      if (!this.verifyProcessIdentity(identity, observed)) return null;
+      result.push(observed);
       queue.push(...(children.get(identity.pid) ?? []));
     }
     return result;
@@ -963,13 +966,16 @@ function readWebSocketFrame(buffer: Buffer): { opcode: number; payload: Buffer; 
 function discoverNativeProcesses(list: () => ProcessIdentity[], inspect: (pid: number) => ProcessIdentity | null, currentPid: number): { targets: ControlTarget[]; unverified: ControlPreview["unverified"] } {
   const targets: ControlTarget[] = [];
   const unverified: ControlPreview["unverified"] = [];
-  for (const identity of list()) {
+  const listed = list();
+  const byPid = new Map(listed.map((identity) => [identity.pid, identity]));
+  for (const identity of listed) {
     if (identity.pid === currentPid) continue;
-    const env = readProcEnv(identity.pid);
+    const identitySource = sourceForIdentity(identity);
+    const env = identitySource || isShellExecutable(identity.executable ?? "") ? readProcEnv(identity.pid) : {};
     const markedSource = env.TOKEN_FURNACE_SOURCE;
-    const source = validSource(markedSource) ? markedSource : sourceForIdentity(identity);
+    const source = validSource(markedSource) ? markedSource : identitySource;
     if (!source) continue;
-    const owner = resolveNativeProcess(identity, source, inspect);
+    const owner = resolveNativeProcess(identity, source, inspect, byPid);
     if (markedSource === "claude" || markedSource === "codex" || markedSource === "opencode") {
       if (owner) targets.push(targetFromProcess(owner, source, { ...env, ...readProcEnv(owner.pid) }));
       else unverified.push({
@@ -992,13 +998,13 @@ function discoverNativeProcesses(list: () => ProcessIdentity[], inspect: (pid: n
   return { targets, unverified };
 }
 
-function resolveNativeProcess(start: ProcessIdentity, source: Source, inspect: (pid: number) => ProcessIdentity | null): ProcessIdentity | null {
+function resolveNativeProcess(start: ProcessIdentity, source: Source, inspect: (pid: number) => ProcessIdentity | null, listed: Map<number, ProcessIdentity> = new Map()): ProcessIdentity | null {
   const seen = new Set<number>();
   let current: ProcessIdentity | null = start;
   while (current && current.pid > 1 && !seen.has(current.pid)) {
     seen.add(current.pid);
     if (sourceForIdentity(current) === source && !isShellExecutable(current.executable ?? "")) return current;
-    current = current.parentPid ? inspect(current.parentPid) : null;
+    current = current.parentPid ? listed.get(current.parentPid) ?? inspect(current.parentPid) : null;
   }
   return null;
 }
@@ -1105,7 +1111,7 @@ function inspectProcess(pid: number): ProcessIdentity | null {
 }
 
 function listProcessIdentities(): ProcessIdentity[] {
-  if (process.platform === "win32") return listWindowsProcesses(false);
+  if (process.platform === "win32") return listWindowsProcesses(false, false);
   if (process.platform === "darwin") return listPsProcesses();
   try {
     return readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).map(Number).map(inspectProcess).filter((value): value is ProcessIdentity => value !== null);
@@ -1113,41 +1119,30 @@ function listProcessIdentities(): ProcessIdentity[] {
 }
 
 function listNativeProcessIdentities(): ProcessIdentity[] {
-  if (process.platform === "win32") return listWindowsProcesses(true);
+  if (process.platform === "win32") return listWindowsProcesses(true, true);
   return listProcessIdentities();
 }
 
 function inspectPsProcess(pid: number): ProcessIdentity | null {
   try {
-    const output = execFileSync("ps", ["-p", String(pid), "-o", "pid=,ppid=,uid=,lstart=,comm="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    const identity = parsePsLine(output);
-    if (identity) identity.commandLine = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return identity;
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "pid=,ppid=,uid=,lstart=,comm=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return parsePsLine(output);
   } catch { return null; }
 }
 
 function listPsProcesses(): ProcessIdentity[] {
   try {
-    const identityOutput = execFileSync("ps", ["-axo", "pid=,ppid=,uid=,lstart=,comm="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const commandOutput = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const commands = new Map<number, string>();
-    for (const line of commandOutput.split(/\r?\n/)) {
-      const match = /^\s*(\d+)\s+(.+)$/.exec(line);
-      if (match) commands.set(Number(match[1]), match[2].trim());
-    }
-    return identityOutput.split(/\r?\n/).map((line) => parsePsLine(line.trim())).filter((value): value is ProcessIdentity => value !== null).map((identity) => {
-      identity.commandLine = commands.get(identity.pid) ?? null;
-      return identity;
-    });
+    const output = execFileSync("ps", ["-axo", "pid=,ppid=,uid=,lstart=,comm=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return output.split(/\r?\n/).map((line) => parsePsLine(line.trim())).filter((value): value is ProcessIdentity => value !== null);
   } catch { return []; }
 }
 
 function parsePsLine(line: string): ProcessIdentity | null {
-  const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/.exec(line);
+  const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(.{24})\s+(\S+)(?:\s+(.*))?$/.exec(line);
   if (!match) return null;
   const processStartTime = Date.parse(match[4].trim());
   if (!Number.isFinite(processStartTime)) return null;
-  return { pid: Number(match[1]), parentPid: Number(match[2]), ownerUid: Number(match[3]), processStartTime, executable: match[5].trim() };
+  return { pid: Number(match[1]), parentPid: Number(match[2]), ownerUid: Number(match[3]), processStartTime, executable: match[5].trim(), commandLine: match[6]?.trim() || null };
 }
 
 function inspectWindowsProcess(pid: number): ProcessIdentity | null {
@@ -1158,17 +1153,20 @@ function inspectWindowsProcess(pid: number): ProcessIdentity | null {
   } catch { return null; }
 }
 
-function listWindowsProcesses(nativeOnly: boolean): ProcessIdentity[] {
+function listWindowsProcesses(nativeOnly: boolean, includeOwners = true): ProcessIdentity[] {
   try {
-    const script = windowsProcessScript("Get-CimInstance Win32_Process", nativeOnly);
+    const script = windowsProcessScript("Get-CimInstance Win32_Process", nativeOnly, includeOwners);
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     return parseWindowsOutput(output);
   } catch { return []; }
 }
 
-function windowsProcessScript(query: string, nativeOnly = false): string {
+function windowsProcessScript(query: string, nativeOnly = false, includeOwners = true): string {
   const filter = nativeOnly ? " | Where-Object { $_.ExecutablePath -match '(?i)claude|codex|opencode' -or $_.CommandLine -match '(?i)claude|codex|opencode' }" : "";
-  return `$rows=@(${query}${filter} | ForEach-Object { try { $owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ return }; [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } } catch { } }); $rows | ConvertTo-Json -Compress`;
+  const owner = includeOwners
+    ? "$owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ return };"
+    : "$owner=$null; $sid=$null;";
+  return `$rows=@(${query}${filter} | ForEach-Object { try { ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } } catch { } }); $rows | ConvertTo-Json -Compress`;
 }
 
 function parseWindowsOutput(output: string): ProcessIdentity[] {

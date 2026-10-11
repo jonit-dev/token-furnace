@@ -288,11 +288,7 @@ export class SqliteSessionRepository implements SessionRepository {
 
   close(): void {
     if (this.db) {
-      try {
-        this.db.close();
-      } catch {
-        // ignore
-      }
+      this.db.close();
       this.db = null;
     }
   }

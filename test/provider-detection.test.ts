@@ -3,8 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
-import { compose } from "../src/compose";
-import { SqliteSessionRepository } from "../src/repo/sqlite-repo";
+import { compose, type App } from "../src/compose";
 import { ClaudeSource } from "../src/sources/claude";
 import { CodexSource } from "../src/sources/codex";
 import { OpenCodeSource } from "../src/sources/opencode";
@@ -12,9 +11,19 @@ import { buildFull } from "./fixtures/build";
 
 const now = new Date("2026-10-10T20:00:00Z");
 const roots: string[] = [];
+const apps: App[] = [];
 const PROVIDERS = ["claude", "codex", "opencode"] as const;
 
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+function appFor(env: NodeJS.ProcessEnv, opts?: { noCache?: boolean }): App {
+  const app = compose(env, opts);
+  apps.push(app);
+  return app;
+}
+
+afterEach(() => {
+  for (const app of apps.splice(0)) app.close();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 /** A synthetic HOME with all three providers at their default roots. */
 function setupHome(): string {
@@ -62,7 +71,7 @@ it("detects default roots under a synthetic HOME, including the OpenCode XDG pat
   expect(new ClaudeSource(env).base()).toBe(join(home, ".claude"));
   expect(new CodexSource(env).base()).toBe(join(home, ".codex"));
   expect(new OpenCodeSource(env).base()).toBe(join(home, ".local", "share", "opencode"));
-  const app = compose(env, { noCache: true });
+  const app = appFor(env, { noCache: true });
   await app.reports.refresh();
   expect(Object.keys(app.reports.getReport(7, "all", options)!.burns).sort()).toEqual([...PROVIDERS]);
 });
@@ -81,20 +90,22 @@ it("lets explicit CLAUDE_CONFIG_DIR, CODEX_HOME and OPENCODE_DATA_DIR override d
   expect(new CodexSource(env).base()).toBe(codexDir);
   expect(new OpenCodeSource(env).base()).toBe(opencodeDir); // OPENCODE_DATA_DIR beats XDG_DATA_HOME
   expect(new OpenCodeSource({ ...envFor(home), XDG_DATA_HOME: xdg }).base()).toBe(join(xdg, "opencode"));
-  const app = compose(env, { noCache: true });
+  const app = appFor(env, { noCache: true });
   await app.reports.refresh();
   expect(Object.keys(app.reports.getReport(7, "all", options)!.burns).sort()).toEqual([...PROVIDERS]);
+  app.close();
   mkdirSync(xdg, { recursive: true });
   renameSync(opencodeDir, join(xdg, "opencode"));
   const xdgEnv = { ...envFor(home), CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexDir, OPENCODE_DATA_DIR: undefined, XDG_DATA_HOME: xdg };
-  const xdgApp = compose(xdgEnv, { noCache: true });
+  const xdgApp = appFor(xdgEnv, { noCache: true });
   await xdgApp.reports.refresh();
   expect(xdgApp.reports.getReport(7, "opencode", options)!.total).toBeGreaterThan(0);
+  xdgApp.close();
 });
 
 it("reports all three providers with burns and timelines, and each filter matches its isolated-provider report", async () => {
   const home = setupHome();
-  const app = compose(envFor(home), { noCache: true });
+  const app = appFor(envFor(home), { noCache: true });
   await app.reports.refresh();
   const all = app.reports.getReport(7, "all", options)!;
   expect(all.turns).toBeGreaterThan(0);
@@ -110,7 +121,7 @@ it("reports all three providers with burns and timelines, and each filter matche
     const others = PROVIDERS.filter((p) => p !== source);
     const soloEnv = envFor(home);
     for (const other of others) soloEnv[OVERRIDE[other]] = join(home, `missing-${other}`);
-    const solo = compose(soloEnv, { noCache: true });
+    const solo = appFor(soloEnv, { noCache: true });
     await solo.reports.refresh();
     const soloReport = solo.reports.getReport(7, source, options)!;
     expect(filtered.total).toBe(soloReport.total);
@@ -121,10 +132,11 @@ it("reports all three providers with burns and timelines, and each filter matche
 
 it("removing OpenCode preserves the Claude and Codex totals", async () => {
   const home = setupHome();
-  const app = compose(envFor(home), { noCache: true });
+  const app = appFor(envFor(home), { noCache: true });
   await app.reports.refresh();
   const claude = app.reports.getReport(7, "claude", options)!.total;
   const codex = app.reports.getReport(7, "codex", options)!.total;
+  app.close();
   rmSync(join(home, ".local"), { recursive: true, force: true });
   await app.reports.refresh();
   expect(app.reports.getReport(7, "all", options)!.burns.opencode).toBeUndefined();
@@ -134,11 +146,11 @@ it("removing OpenCode preserves the Claude and Codex totals", async () => {
 
 it("preserves all three providers across a persistent warm cache", async () => {
   const env = envFor(setupHome());
-  const first = compose(env);
+  const first = appFor(env);
   await first.reports.refresh();
   const before = first.reports.getReport(7, "all", options)!;
-  (first.repo as SqliteSessionRepository).close();
-  const second = compose(env);
+  first.close();
+  const second = appFor(env);
   await second.reports.refresh();
   expect(second.reports.progress.filesTotal).toBe(0);
   const after = second.reports.getReport(7, "all", options)!;
@@ -146,5 +158,5 @@ it("preserves all three providers across a persistent warm cache", async () => {
   expect(after.total).toBe(before.total);
   expect(after.turns).toBe(before.turns);
   for (const source of PROVIDERS) expect(after.timelines?.[source]?.length).toBe(before.timelines?.[source]?.length);
-  (second.repo as SqliteSessionRepository).close();
+  second.close();
 });

@@ -47,7 +47,11 @@ export function compose(env: Env = process.env, opts?: { noCache?: boolean }): A
     control,
     now: () => new Date(effective.TOKEN_FURNACE_NOW || Date.now()),
     close: () => {
-      try { budgets?.close(); } finally { control.close(); }
+      try { budgets?.close(); }
+      finally {
+        try { control.close(); }
+        finally { repo.close(); }
+      }
     },
   };
 }
