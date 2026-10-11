@@ -29,11 +29,23 @@ let runtimeBinDir;
 let sharedConfigHome;
 let sharedStateHome;
 let sharedCacheHome;
+let activeServerEnv;
 
 if (process.argv.includes("--self-test")) {
   const timedOut = finishNativeResult({ status: 1, signal: "SIGTERM" }, true, "", "contract", 0);
-  if (!timedOut.timedOut || !taskUnavailable(timedOut) || nativeAttemptPasses(timedOut)) {
-    console.error("qualification contract failed: timed-out native work was treated as usable");
+  const claudeArgs = nativeArgs({ source: "claude" }, "/tmp", "prompt", {});
+  const resumeArgs = nativeArgs({ source: "claude" }, "/tmp", "prompt", { resumeSessionId: "native-session" });
+  const codexArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", { resumeSessionId: "thread" });
+  const codexFreshArgs = nativeArgs({ source: "codex" }, "/tmp", "prompt", {});
+  const openCodeArgs = nativeArgs({ source: "opencode" }, "/tmp", "prompt", { resumeSessionId: "session" });
+  const ids = extractNativeSessionIds('{"type":"system","session_id":"native-session"}', "claude");
+  const codexIds = extractNativeSessionIds('{"type":"thread.started","thread_id":"thread"}', "codex");
+  const openCodeIds = extractNativeSessionIds('{"sessionID":"session"}', "opencode");
+  const first = scenarioArtifacts("/tmp", "claude", "provider-stop", ["matching"]);
+  const second = scenarioArtifacts("/tmp", "claude", "provider-stop", ["matching"]);
+  const gated = delayedPrompt(first.matching, "MATCHING", first.barrier);
+  if (!timedOut.timedOut || !taskUnavailable(timedOut) || nativeAttemptPasses(timedOut) || claudeArgs.includes("--no-session-persistence") || !claudeArgs.includes("--output-format") || !resumeArgs.includes("--resume") || !codexArgs.includes("resume") || codexArgs.includes("-C") || !codexFreshArgs.includes("-C") || !codexArgs.includes("--json") || !openCodeArgs.includes("--session") || !openCodeArgs.includes("--format") || !ids.includes("native-session") || !codexIds.includes("thread") || !openCodeIds.includes("session") || first.matching === second.matching || !gated.includes(first.barrier) || !gated.toLowerCase().includes("only after")) {
+    console.error("qualification contract failed: native timeout, persistence, resume, identity, or barrier contract regressed");
     process.exitCode = 1;
   } else {
     console.log("qualification contract ok");
@@ -111,8 +123,11 @@ function discoverTarget(source) {
   const version = spawnSync(command, ["--version"], { encoding: "utf8", env: isolatedEnv(source, home), timeout: 10_000 });
   if (version.error || version.status !== 0) return { blocked: `${source}: native executable could not be discovered` };
   const firstLine = String(version.stdout || version.stderr).trim().split("\n")[0] || "version unavailable";
+  const helpArgs = source === "codex" ? ["exec", "--help"] : source === "opencode" ? ["run", "--help"] : ["--help"];
+  const help = spawnSync(command, helpArgs, { encoding: "utf8", env: isolatedEnv(source, home), timeout: 10_000 });
+  const capabilities = nativeCapabilities(source, `${help.stdout || ""}\n${help.stderr || ""}`);
   console.log(`DISCOVERED ${source}: ${firstLine}`);
-  return { source, home, command };
+  return { source, home, command, capabilities };
 }
 
 async function qualify() {
@@ -124,6 +139,12 @@ async function qualify() {
   sharedConfigHome = join(shared, "config");
   sharedStateHome = join(shared, "state");
   sharedCacheHome = join(shared, "cache");
+  activeServerEnv = {
+    ...isolatedEnv(requested[0], targets.get(requested[0]).home, workspace),
+    CLAUDE_CONFIG_DIR: targets.get("claude")?.home,
+    CODEX_HOME: targets.get("codex")?.home,
+    OPENCODE_DATA_DIR: targets.get("opencode")?.home,
+  };
   for (const path of [sharedConfigHome, sharedStateHome, sharedCacheHome]) mkdirSync(path, { recursive: true });
   const warmups = new Map();
   for (const source of requested) {
@@ -135,22 +156,16 @@ async function qualify() {
     }
     const sentinel = join(workspace, `${source}-warmup.sentinel`);
     const warmup = await runNative(target, workspace, `Create the file ${sentinel} containing exactly BUDGET_WARMUP and then stop.`, 120_000);
-    warmups.set(source, { ok: warmup.status === 0 && existsSync(sentinel), detail: safeTail(warmup.output) });
+    warmups.set(source, { ok: nativeAttemptPasses(warmup) && existsSync(sentinel) && nativeSessionEvidence(source, warmup), detail: safeTail(warmup.output) });
   }
-  const serverEnv = {
-    ...isolatedEnv(requested[0], targets.get(requested[0]).home, workspace),
-    CLAUDE_CONFIG_DIR: targets.get("claude")?.home,
-    CODEX_HOME: targets.get("codex")?.home,
-    OPENCODE_DATA_DIR: targets.get("opencode")?.home,
-  };
-  let server = await startServer(serverEnv);
+  let server = await startServer(activeServerEnv);
   servers.push(server);
 
   const modeResult = await scenarioModePolicy(server.url, browser, workspace);
   const oldServer = server;
   await stopChild(oldServer.child);
   servers.splice(servers.indexOf(oldServer), 1);
-  server = await startServer(serverEnv, true);
+  server = await startServer(activeServerEnv, true);
   servers.push(server);
   const persisted = await scenarioState(server.url);
   if (modeResult.status === "PASS" && requested.some((source) => !persisted?.policies?.some((policy) => policy.scope?.kind === "source" && policy.scope.source === source && policy.mode === "manual" && policy.limit === 1000))) {
@@ -183,9 +198,9 @@ async function scenarioModePolicy(url, browser, workspace) {
   if (!browser) return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: "No supported Chromium browser was discovered." };
   const offSource = requested[0];
   const offSentinel = join(workspace, "mode-off-minimal.sentinel");
-  const offTask = await runNative(targets.get(offSource), workspace, `Create ${offSentinel} containing exactly MODE_OFF and then stop.`, 120_000);
+  const offTask = await runNative(targets.get(offSource), workspace, `Create ${offSentinel} containing exactly MODE_OFF and then stop.`, 120_000, null);
   if (taskUnavailable(offTask)) return { status: "BLOCKED", scenario: "mode-and-policy-wiring", detail: `Default Off minimal task was unavailable: ${safeTail(offTask.output)}` };
-  if (offTask.status !== 0 || offTask.timedOut || offTask.signal || !existsSync(offSentinel) || !decisionEvidence(offSource, offTask.requestId, offTask.startedAt, true)) {
+  if (!nativeSessionEvidence(offSource, offTask) || offTask.status !== 0 || offTask.timedOut || offTask.signal || !existsSync(offSentinel) || !decisionEvidence(offSource, offTask.requestId, offTask.startedAt, true)) {
     return { status: "FAIL", scenario: "mode-and-policy-wiring", detail: "The real default-Off task did not create its sentinel with a correlated allow decision." };
   }
   const result = await driveBudgetsBrowser(browser, `${url}/#budgets`);
@@ -262,6 +277,30 @@ function modelCandidates(state) {
   return candidates;
 }
 
+function mergeModelCandidates(existing, discovered) {
+  const result = [...existing];
+  const seen = new Set(result.map((candidate) => `${candidate.provider}/${candidate.model}`));
+  for (const candidate of discovered) {
+    const key = `${candidate.provider}/${candidate.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(candidate);
+  }
+  return result;
+}
+
+async function discoverNativeModels(target, workspace) {
+  if (target.source !== "opencode") return [];
+  const result = await run(target.command, ["models"], { cwd: workspace, env: isolatedEnv(target.source, target.home, workspace), timeout: 30_000 });
+  if (result.status !== 0 || result.timedOut) return [];
+  const models = new Set();
+  for (const match of String(result.output || "").matchAll(/\b([A-Za-z0-9._-]+)\/([A-Za-z0-9._:@-]+)\b/g)) models.add(`${match[1]}/${match[2]}`);
+  return [...models].map((displayModel) => {
+    const slash = displayModel.indexOf("/");
+    return { source: target.source, provider: displayModel.slice(0, slash), model: displayModel.slice(slash + 1), displayModel };
+  });
+}
+
 async function stopPreview(url, token, scope) {
   return postJson(`${url}/api/budgets/stop-preview`, token, { scope });
 }
@@ -273,32 +312,43 @@ async function unlockScope(url, token, scope) {
 async function scenarioAdmission(source, workspace, url, warmup) {
   if (!warmup?.ok) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `Native warmup did not complete; no admission result was fabricated. ${warmup?.detail ?? "adapter setup did not run"}` };
   const target = targets.get(source);
-  const sentinel = join(workspace, `${source}-eligible-child.sentinel`);
-  const background = join(workspace, `${source}-eligible-background.sentinel`);
-  const prompt = delegationPrompt(source, sentinel, background, "BUDGET_ELIGIBLE");
-  const task = await runNative(target, workspace, prompt, 120_000);
+  if (!target?.capabilities?.resume) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `${source} did not advertise a supported native resume route; no synthetic resume result was accepted.` };
+  const artifacts = scenarioArtifacts(workspace, source, "budget-admission", ["child", "background", "resume", "blocked-child", "blocked-background"]);
+  const prompt = delegationPrompt(source, artifacts.child, artifacts.background, artifacts.resume, "BUDGET_ELIGIBLE");
+  const task = await runNative(target, workspace, prompt, 120_000, null);
+  if (taskUnavailable(task)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task was unavailable: ${safeTail(task.output)}` };
+  if (!nativeAttemptPasses(task)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: `The real ${source} delegation task ran but did not complete: ${safeTail(task.output)}` };
   const allowed = decisionEvidence(source, task.requestId, task.startedAt, true);
-  if (task.timedOut || task.signal || task.status !== 0 || !existsSync(sentinel) || !existsSync(background) || !allowed) {
-    return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `Real ${source} minimal task did not complete with a sentinel; upstream access or native task capability is unavailable. ${safeTail(task.output)}` };
+  if (!allowed || !nativeSessionEvidence(source, task) || !nativeChildEvidence(source, task) || !existsSync(artifacts.child) || !existsSync(artifacts.background)) {
+    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The eligible request lacked correlated native parent/child session evidence, durable allow evidence, or child side effects." };
+  }
+  const resumed = await resumeNative(target, workspace, task.nativeSessionId, resumePrompt(source, artifacts.resume, "BUDGET_RESUMED"), 120_000, null);
+  if (taskUnavailable(resumed)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The native session could not be resumed: ${safeTail(resumed.output)}` };
+  if (!nativeAttemptPasses(resumed) || !resumed.nativeSessionIds.includes(task.nativeSessionId) || !nativeSessionEvidence(source, resumed) || !existsSync(artifacts.resume)) {
+    return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The eligible native session did not resume through the same observed session or create its resume side effect." };
   }
   if (!hasMeasuredUsage(source, task.startedAt)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: "The eligible native task did not leave attributable measured usage in the shared budget store." };
   const exhausted = await setSourcePolicy(url, source, 1);
   if (!exhausted.ok) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "Could not persist the deliberately exhausted Manual policy." };
-  const blockedSentinel = join(workspace, `${source}-blocked-child.sentinel`);
-  const blockedTask = await runNative(target, workspace, delegationPrompt(source, blockedSentinel, join(workspace, `${source}-blocked-background.sentinel`), "BUDGET_BLOCKED"), 60_000);
+  const blockedTask = await runNative(target, workspace, delegationPrompt(source, artifacts.blockedChild, artifacts.blockedBackground, artifacts.blockedChild, "BUDGET_BLOCKED"), 60_000, null);
   const denied = decisionEvidence(source, blockedTask.requestId, blockedTask.startedAt, false);
   if (taskUnavailable(blockedTask)) return { status: "BLOCKED", scenario: `budget-admission:${source}`, detail: `The exhausted native request was unavailable, not a denial: ${safeTail(blockedTask.output)}` };
-  if (!denied || blockedTask.status === 0 || existsSync(blockedSentinel)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The exhausted request lacked a correlated native deny decision or created a child side effect." };
-  return { status: "PASS", scenario: `budget-admission:${source}`, detail: "Native delegation, nested/background sentinel, measured usage exhaustion, correlated denial, and absent child side effect were observed." };
+  if (!denied || !nativeSessionEvidence(source, blockedTask) || blockedTask.timedOut || blockedTask.signal || existsSync(artifacts.blockedChild) || existsSync(artifacts.blockedBackground)) return { status: "FAIL", scenario: `budget-admission:${source}`, detail: "The exhausted request lacked a correlated native deny decision or created a child side effect." };
+  return { status: "PASS", scenario: `budget-admission:${source}`, detail: "Native delegation, nested/background child sessions, same-session resume, measured usage exhaustion, correlated denial, and absent child side effects were observed." };
 }
 
-function delegationPrompt(source, childSentinel, backgroundSentinel, marker) {
+function delegationPrompt(source, childSentinel, backgroundSentinel, resumeSentinel, marker) {
   const route = source === "codex"
     ? "Use the native Codex code-mode or spawn_agent/delegate route, including a namespaced child if the installed client supports it."
     : source === "claude"
       ? "Use the native Claude Agent/Task delegation route, not a direct shell write."
       : "Use the installed OpenCode child/background delegation route; do not write the files directly from the parent.";
-  return `${route} Delegate a tiny child task that writes exactly ${marker} to ${childSentinel}. Start a background or nested child that writes exactly ${marker}_BACKGROUND to ${backgroundSentinel}, wait for both children, and resume the first child if it pauses. Then stop. A missing native delegation path is an unavailable qualification result, not permission to write these files directly.`;
+  return `${route} Delegate a tiny native child task that writes exactly ${marker} to ${childSentinel}. Start a background or nested native child that writes exactly ${marker}_BACKGROUND to ${backgroundSentinel}, wait for both children, and stop the parent session without writing ${resumeSentinel}; the harness will resume this same native session. A missing native delegation path is an unavailable qualification result, not permission to write these files directly.`;
+}
+
+function resumePrompt(source, sentinel, marker) {
+  const route = source === "codex" ? "Resume the existing native thread" : source === "claude" ? "Resume the existing Claude session" : "Continue the existing OpenCode session";
+  return `${route} identified by the harness. Do not start a new session or use a direct shell write. Create ${sentinel} containing exactly ${marker}, then stop.`;
 }
 
 function decisionEvidence(source, requestId, startedAt, allowed) {
@@ -324,6 +374,129 @@ function hasMeasuredUsage(source, startedAt) {
   }
 }
 
+function nativeCapabilities(source, help) {
+  const text = String(help || "");
+  return {
+    resume: source === "claude" ? /--resume\s+<session-id>|--resume\b/.test(text) : source === "codex" ? /\bresume\b/.test(text) : /--session\b/.test(text),
+    sharedModelHost: source === "opencode" && /--attach\b/.test(text) && /--session\b/.test(text),
+  };
+}
+
+function extractNativeSessionIds(output, source) {
+  const ids = new Set();
+  const wanted = source === "claude"
+    ? new Set(["session_id", "sessionId"])
+    : source === "codex"
+      ? new Set(["thread_id", "threadId", "session_id", "sessionId"])
+      : new Set(["sessionID", "sessionId", "session_id"]);
+  const visit = (value, depth = 0) => {
+    if (!value || typeof value !== "object" || depth > 8) return;
+    for (const [key, child] of Object.entries(value)) {
+      if (wanted.has(key) && typeof child === "string" && child.trim()) ids.add(child.trim());
+      visit(child, depth + 1);
+    }
+  };
+  for (const line of String(output || "").split(/\r?\n/)) {
+    try { visit(JSON.parse(line)); } catch { /* diagnostics may surround JSONL events */ }
+  }
+  return [...ids];
+}
+
+function controlNativeRows(source, sessionIds, startedAt) {
+  if (!sharedStateHome || !sessionIds?.length) return [];
+  let db;
+  try {
+    db = new DatabaseSync(join(sharedStateHome, "token-furnace", "control.sqlite"));
+    return db.prepare("SELECT id, session_id, pid, process_start_time, updated_at FROM targets WHERE source = ? AND session_id IS NOT NULL AND updated_at >= ? ORDER BY updated_at DESC").all(source, Math.max(0, (startedAt ?? 0) - 5_000)).filter((row) => sessionIds.includes(row.session_id));
+  } catch {
+    return [];
+  } finally {
+    db?.close();
+  }
+}
+
+function nativeIdentityCandidates() {
+  if (!sharedStateHome) return [];
+  let db;
+  try {
+    db = new DatabaseSync(join(sharedStateHome, "token-furnace", "control.sqlite"));
+    const rows = db.prepare("SELECT source, provider, account, model, session_id FROM targets WHERE session_id IS NOT NULL AND provider IS NOT NULL AND model IS NOT NULL ORDER BY updated_at DESC").all();
+    const seen = new Set();
+    return rows.flatMap((row) => {
+      const key = `${row.source}:${row.provider}/${row.model}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ source: row.source, provider: row.provider, account: row.account ?? null, model: row.model, displayModel: `${row.provider}/${row.model}` }];
+    });
+  } catch {
+    return [];
+  } finally {
+    db?.close();
+  }
+}
+
+function nativeSessionEvidence(source, result) {
+  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
+  return ids.length > 0 && controlNativeRows(source, ids, result?.startedAt).length > 0;
+}
+
+function nativeSessionObserved(source, result) {
+  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
+  return ids.length > 0;
+}
+
+function nativeChildEvidence(source, result) {
+  const ids = result?.nativeSessionIds?.length ? result.nativeSessionIds : extractNativeSessionIds(result?.output, source);
+  const rows = controlNativeRows(source, ids, result?.startedAt);
+  return new Set(rows.map((row) => row.session_id)).size >= 2;
+}
+
+function scenarioArtifacts(workspace, source, scenario, names) {
+  const tag = `${source}-${scenario}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const artifacts = Object.fromEntries(names.map((name) => [name, join(workspace, `${tag}-${name}.sentinel`)]));
+  artifacts.barrier = join(workspace, `${tag}-barrier`);
+  for (const name of names) artifacts[`${name}Barrier`] = join(workspace, `${tag}-${name}-barrier`);
+  return artifacts;
+}
+
+function releaseBarrier(path) {
+  writeFileSync(path, "RELEASED\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+}
+
+function workerSessionId(worker) {
+  return worker?.sessionIds?.()[0] ?? null;
+}
+
+function workerNativeEvidence(source, worker) {
+  const ids = worker?.sessionIds?.() ?? [];
+  return ids.length > 0 && controlNativeRows(source, ids, worker.startedAt).length > 0;
+}
+
+function previewHasSafetyArrays(value) {
+  return Array.isArray(value?.targets) && Array.isArray(value?.unverified) && Array.isArray(value?.collateral);
+}
+
+function previewMatchesWorker(target, candidate, worker, hostPid = null) {
+  const sessionIds = worker?.sessionIds?.() ?? [];
+  return target.source === candidate.source && target.provider === candidate.provider && (
+    sessionIds.includes(target.id) ||
+    (candidate.source === "opencode" && hostPid !== null && target.pid === hostPid) ||
+    (candidate.source !== "opencode" && target.pid === worker.child.pid)
+  );
+}
+
+async function restartQualificationServer() {
+  if (!activeServerEnv) return null;
+  const current = servers.at(-1);
+  if (current) {
+    await stopChild(current.child);
+    servers.pop();
+  }
+  const next = await startServer(activeServerEnv, true);
+  servers.push(next);
+  return next;
+}
+
 function taskUnavailable(result) {
   return Boolean(result?.timedOut || result?.signal || /(?:login|auth|credential|not found|unknown option|unavailable|timed out)/i.test(result?.output ?? ""));
 }
@@ -334,20 +507,28 @@ async function scenarioProviderStop(source, url, workspace, browser) {
   if (!state) return { status: "BLOCKED", scenario, detail: "Budget API was unavailable." };
   const reset = await resetPolicies(url);
   if (!reset.ok) return { status: "FAIL", scenario, detail: "Could not clear prior admission policies before the stop scenario." };
-  const candidates = identityCandidates(state);
+  const candidates = nativeIdentityCandidates();
   const matching = candidates.find((candidate) => candidate.source === source);
   const matchingCandidates = matching ? candidates.filter((candidate) => candidate.provider === matching.provider) : [];
   const unrelated = candidates.find((candidate) => candidate.provider !== matching?.provider);
-  if (!matching || matchingCandidates.length < 2 || !unrelated) return { status: "BLOCKED", scenario, detail: "Two real harnesses with the same observed upstream provider and an unrelated provider control were not available." };
-  const matchingWorkers = matchingCandidates.map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(join(workspace, `provider-stop-matching-${index}.sentinel`), `PROVIDER_STOP_MATCHING_${index}`), 30_000, candidate));
-  const unrelatedSentinel = join(workspace, "provider-stop-unrelated.sentinel");
-  const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(unrelatedSentinel, "PROVIDER_STOP_UNRELATED"), 30_000, unrelated);
+  if (!matching || new Set(matchingCandidates.map((candidate) => candidate.source)).size < 2 || !unrelated) return { status: "BLOCKED", scenario, detail: "Two real harnesses with the same observed upstream provider and an unrelated provider control were not available." };
+  const artifacts = scenarioArtifacts(workspace, source, "provider-stop", [...matchingCandidates.map((_, index) => `matching${index}`), "unrelated", "unrelatedPost", "blocked", "recovered"]);
+  const matchingWorkers = matchingCandidates.map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(artifacts[`matching${index}`], `PROVIDER_STOP_MATCHING_${index}`, artifacts[`matching${index}Barrier`]), 30_000, candidate));
+  const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(artifacts.unrelated, "PROVIDER_STOP_UNRELATED", artifacts.unrelatedBarrier), 30_000, unrelated);
   nativeWorkers.push(...matchingWorkers.map((worker) => worker.child), unrelatedWorker.child);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (matchingWorkers.some((worker) => worker.child.exitCode !== null) || unrelatedWorker.child.exitCode !== null) return { status: "BLOCKED", scenario, detail: "A real provider-stop worker was not still running at the native stop boundary." };
+  const boundaryWorkers = [...matchingWorkers, unrelatedWorker];
+  if (boundaryWorkers.some((worker) => worker.child.exitCode !== null)) {
+    const output = boundaryWorkers.map((worker) => worker.output()).join(" ");
+    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario, detail: `A provider-stop native route was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario, detail: "A provider-stop native task completed before the confirmation boundary." };
+  }
+  if (boundaryWorkers.some((worker, index) => existsSync(index < matchingWorkers.length ? artifacts[`matching${index}`] : artifacts.unrelated))) return { status: "FAIL", scenario, detail: "A stop sentinel existed before confirmation, so the boundary was not attributable." };
+  if (boundaryWorkers.some((worker, index) => !workerNativeEvidence(index < matchingCandidates.length ? matchingCandidates[index].source : unrelated.source, worker))) return { status: "FAIL", scenario, detail: "A live provider-stop worker lacked an observed native session/control registration." };
+  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
   const preview = await stopPreview(url, state.mutationToken, { kind: "provider", provider: matching.provider });
   if (!preview.ok) return { status: "FAIL", scenario, detail: `Provider stop preview failed: ${safeTail(preview.value?.error)}` };
-  const selected = matchingCandidates.every((candidate, index) => (preview.value?.targets ?? []).some((target) => target.source === candidate.source && target.provider === candidate.provider && (candidate.source === "opencode" || target.pid === matchingWorkers[index].child.pid)));
+  if (!previewHasSafetyArrays(preview.value)) return { status: "FAIL", scenario, detail: "Provider preview omitted affected, unverified, or collateral entries." };
+  const selected = matchingCandidates.every((candidate, index) => (preview.value?.targets ?? []).some((target) => previewMatchesWorker(target, candidate, matchingWorkers[index])));
   if (!selected) return { status: "BLOCKED", scenario, detail: "The real matching worker did not appear in the verified provider preview." };
   const browserStop = await driveStopBrowser(browser, url, `button[aria-label="Stop upstream provider ${matching.provider} in all harnesses"]`, matching.provider);
   if (!browserStop.ok) return { status: browserStop.ran ? "FAIL" : "BLOCKED", scenario, detail: browserStop.detail };
@@ -355,28 +536,30 @@ async function scenarioProviderStop(source, url, workspace, browser) {
   const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "provider" && stop.scope.provider === matching.provider)?.operationId;
   const operation = operationId ? await getJson(`${url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
   if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario, detail: "The UI confirmation did not produce a completed provider stop operation." };
-  const selectedTargetIds = (preview.value?.targets ?? []).filter((target) => matchingCandidates.some((candidate) => candidate.source === target.source && candidate.provider === target.provider)).map((target) => target.id);
+  const selectedTargetIds = (preview.value?.targets ?? []).filter((target) => matchingCandidates.some((candidate, index) => previewMatchesWorker(target, candidate, matchingWorkers[index]))).map((target) => target.id);
   if (!selectedTargetIds.length || !selectedTargetIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario, detail: "The provider stop operation lacked correlated cancelled/terminated outcomes for every preview target." };
+  releaseBarrier(artifacts.unrelatedBarrier);
   const matchingResults = await Promise.all(matchingWorkers.map((worker) => worker.wait(8_000)));
-  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
   const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  if (matchingResults.some((result, index) => result.timedOut || result.status === 0 || matchingWorkers[index].child.exitCode === null) || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(unrelatedSentinel)) {
+  if (matchingResults.some((result, index) => result.timedOut || result.signal || matchingWorkers[index].child.exitCode === null) || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) {
     return { status: "FAIL", scenario, detail: "The verified matching worker did not exit or the original unrelated provider worker failed to advance after the stop." };
   }
-  const unrelatedPostSentinel = join(workspace, "provider-stop-unrelated-post.sentinel");
-  const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${unrelatedPostSentinel} containing exactly PROVIDER_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
+  const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${artifacts.unrelatedPost} containing exactly PROVIDER_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
   if (taskUnavailable(unrelatedPost)) return { status: "BLOCKED", scenario, detail: `The unrelated provider did not have a usable post-stop control: ${safeTail(unrelatedPost.output)}` };
-  if (unrelatedPost.timedOut || unrelatedPost.signal || unrelatedPost.status !== 0 || !existsSync(unrelatedPostSentinel)) return { status: "FAIL", scenario, detail: "The unrelated provider did not produce a post-stop sentinel." };
-  const blockedSentinel = join(workspace, "provider-stop-blocked.sentinel");
-  const blocked = await runNative(targets.get(matching.source), workspace, `Create ${blockedSentinel} containing exactly PROVIDER_STOP_BLOCKED.`, 60_000, matching);
+  if (unrelatedPost.timedOut || unrelatedPost.signal || unrelatedPost.status !== 0 || !existsSync(artifacts.unrelatedPost) || !nativeSessionEvidence(unrelated.source, unrelatedPost)) return { status: "FAIL", scenario, detail: "The original unrelated provider control did not produce a new attributable post-stop sentinel." };
+  const restarted = await restartQualificationServer();
+  if (!restarted) return { status: "FAIL", scenario, detail: "Token Furnace could not restart before latch persistence verification." };
+  url = restarted.url;
+  const restartedState = await scenarioState(url);
+  if (!restartedState) return { status: "FAIL", scenario, detail: "Budget state was unavailable after the provider-stop restart." };
+  const blocked = await runNative(targets.get(matching.source), workspace, `Create ${artifacts.blocked} containing exactly PROVIDER_STOP_BLOCKED.`, 60_000, matching);
   if (taskUnavailable(blocked)) return { status: "BLOCKED", scenario, detail: `The post-stop matching-provider launch was unavailable, not a denial: ${safeTail(blocked.output)}` };
-  if (blocked.timedOut || blocked.signal || blocked.status === 0 || existsSync(blockedSentinel) || !decisionEvidence(matching.source, blocked.requestId, blocked.startedAt, false)) return { status: "FAIL", scenario, detail: "A fresh matching-provider launch lacked a correlated native denial or created a child side effect." };
-  const unlocked = await unlockScope(url, state.mutationToken, { kind: "provider", provider: matching.provider });
+  if (blocked.timedOut || blocked.signal || existsSync(artifacts.blocked) || !nativeSessionEvidence(matching.source, blocked) || !decisionEvidence(matching.source, blocked.requestId, blocked.startedAt, false)) return { status: "FAIL", scenario, detail: "A fresh matching-provider launch lacked a correlated native denial or created a child side effect after restart." };
+  const unlocked = await unlockScope(url, restartedState.mutationToken, { kind: "provider", provider: matching.provider });
   if (!unlocked.ok) return { status: "FAIL", scenario, detail: "Provider unlock failed after the verified stop." };
-  const recoveredSentinel = join(workspace, "provider-stop-recovered.sentinel");
-  const recovered = await runNative(targets.get(matching.source), workspace, `Create ${recoveredSentinel} containing exactly PROVIDER_STOP_RECOVERED and then stop.`, 120_000, matching);
-  return !recovered.timedOut && !recovered.signal && recovered.status === 0 && existsSync(recoveredSentinel) && Boolean(decisionEvidence(matching.source, recovered.requestId, recovered.startedAt, true))
-    ? { status: "PASS", scenario, detail: "Real matching provider worker exited, unrelated provider worker stayed alive, latch denied a fresh launch, and unlock recovered it." }
+  const recovered = await runNative(targets.get(matching.source), workspace, `Create ${artifacts.recovered} containing exactly PROVIDER_STOP_RECOVERED and then stop.`, 120_000, matching);
+  return !recovered.timedOut && !recovered.signal && recovered.status === 0 && existsSync(artifacts.recovered) && nativeSessionEvidence(matching.source, recovered) && Boolean(decisionEvidence(matching.source, recovered.requestId, recovered.startedAt, true))
+    ? { status: "PASS", scenario, detail: "Real matching provider workers exited, the original unrelated control advanced after a released post-confirmation barrier, the latch survived restart, and explicit unlock recovered a fresh native task." }
     : { status: "FAIL", scenario, detail: "Explicit provider unlock did not permit a fresh native task." };
 }
 
@@ -386,24 +569,31 @@ async function scenarioModelStop(source, url, workspace, browser) {
   if (!state) return { status: "BLOCKED", scenario, detail: "Budget API was unavailable." };
   const reset = await resetPolicies(url);
   if (!reset.ok) return { status: "FAIL", scenario, detail: "Could not clear prior admission policies before the model scenario." };
-  const candidates = modelCandidates(state);
-  const matching = candidates.find((candidate) => candidate.source === source);
-  const unrelated = candidates.find((candidate) => candidate.source === matching?.source && candidate.model !== matching.model);
-  if (!matching || !unrelated) return { status: "BLOCKED", scenario, detail: "Two canonical models in one actual native host were not available for selective cancellation." };
-  if (source !== "opencode") return { status: "BLOCKED", scenario, detail: "This source has no supported same-host mixed-model route in the installed native client; separate processes are not accepted as model-stop evidence." };
-  const target = targets.get(matching.source);
-  const otherTarget = targets.get(unrelated.source);
+  const target = targets.get(source);
+  if (!target?.capabilities?.sharedModelHost) return { status: "BLOCKED", scenario, detail: `${source} did not advertise an installed shared-host model route; separate processes are not accepted as model-stop evidence.` };
+  let candidates = mergeModelCandidates([], modelCandidates(state).filter((candidate) => candidate.source === source));
+  if (candidates.length < 2) candidates = mergeModelCandidates(candidates, await discoverNativeModels(target, workspace));
+  const matching = candidates[0];
+  const unrelated = candidates.find((candidate) => candidate.model !== matching?.model && candidate.provider === matching?.provider) ?? candidates.find((candidate) => candidate.model !== matching?.model);
+  if (!matching || !unrelated) return { status: "BLOCKED", scenario, detail: "Two canonical models from the same actual native host were not discoverable; no second historical model was required when the native client exposed a model catalog." };
   const host = await startOpenCodeHost(target, workspace);
   if (!host) return { status: "BLOCKED", scenario, detail: "OpenCode did not expose a real shared native server for mixed-model work." };
   nativeWorkers.push(host.child);
-  const matchingWorker = startNative(target, workspace, delayedPrompt(join(workspace, "model-stop-matching.sentinel"), "MODEL_STOP_MATCHING"), 30_000, { ...matching, hostEndpoint: host.url });
-  const unrelatedWorker = startNative(otherTarget, workspace, delayedPrompt(join(workspace, "model-stop-unrelated.sentinel"), "MODEL_STOP_UNRELATED"), 30_000, { ...unrelated, hostEndpoint: host.url });
+  const artifacts = scenarioArtifacts(workspace, source, "model-stop", ["matching", "unrelated", "unrelatedPost", "resumeBypass", "switchBypass", "bypass", "other", "recovered"]);
+  const matchingWorker = startNative(target, workspace, delayedPrompt(artifacts.matching, "MODEL_STOP_MATCHING", artifacts.matchingBarrier), 30_000, { ...matching, hostEndpoint: host.url });
+  const unrelatedWorker = startNative(target, workspace, delayedPrompt(artifacts.unrelated, "MODEL_STOP_UNRELATED", artifacts.unrelatedBarrier), 30_000, { ...unrelated, hostEndpoint: host.url });
   nativeWorkers.push(matchingWorker.child, unrelatedWorker.child);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (matchingWorker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "BLOCKED", scenario, detail: "A real mixed-model worker was not still running at the native stop boundary." };
+  if (matchingWorker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) {
+    const output = `${matchingWorker.output()} ${unrelatedWorker.output()}`;
+    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario, detail: `Mixed-model native work was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario, detail: "A mixed-model native task completed before the confirmation boundary." };
+  }
+  if (existsSync(artifacts.matching) || existsSync(artifacts.unrelated) || !workerNativeEvidence(source, matchingWorker) || !workerNativeEvidence(source, unrelatedWorker)) return { status: "FAIL", scenario, detail: "The mixed-model boundary lacked unique pre-confirmation or native session evidence." };
+  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
   const preview = await stopPreview(url, state.mutationToken, { kind: "model", provider: matching.provider, model: matching.model });
   if (!preview.ok) return { status: "FAIL", scenario, detail: `Model stop preview failed: ${safeTail(preview.value?.error)}` };
-  const selected = (preview.value?.targets ?? []).some((item) => item.model === matching.model && item.source === source && item.pid === host.child.pid);
+  if (!previewHasSafetyArrays(preview.value)) return { status: "FAIL", scenario, detail: "Model preview omitted affected, unverified, or collateral entries." };
+  const selected = (preview.value?.targets ?? []).some((item) => item.model === matching.model && item.source === source && item.pid === host.child.pid && previewMatchesWorker(item, matching, matchingWorker, host.child.pid));
   if (!selected) return { status: "BLOCKED", scenario, detail: "The real matching model worker did not appear in the verified preview." };
   const browserStop = await driveStopBrowser(browser, url, `button[aria-label="Stop model ${matching.provider}/${matching.model}"]`, matching.model);
   if (!browserStop.ok) return { status: browserStop.ran ? "FAIL" : "BLOCKED", scenario, detail: browserStop.detail };
@@ -411,28 +601,35 @@ async function scenarioModelStop(source, url, workspace, browser) {
   const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "model" && stop.scope.provider === matching.provider && stop.scope.model === matching.model)?.operationId;
   const operation = operationId ? await getJson(`${url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
   if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario, detail: "The UI confirmation did not produce a completed model stop operation." };
-  const matchingTargetIds = (preview.value?.targets ?? []).filter((target) => target.source === source && target.model === matching.model).map((target) => target.id);
+  const matchingTargetIds = (preview.value?.targets ?? []).filter((target) => previewMatchesWorker(target, matching, matchingWorker, host.child.pid)).map((target) => target.id);
   if (!matchingTargetIds.length || !matchingTargetIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario, detail: "The model stop operation lacked a correlated cancelled/terminated outcome for the matching preview target." };
+  releaseBarrier(artifacts.unrelatedBarrier);
   const matchingResult = await matchingWorker.wait(8_000);
-  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
   const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  if (matchingResult.timedOut || matchingResult.status === 0 || matchingWorker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(join(workspace, "model-stop-unrelated.sentinel"))) {
+  if (matchingResult.timedOut || matchingResult.signal || matchingWorker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) {
     return { status: "FAIL", scenario: "model-stop", detail: "Selective model cancellation did not stop the matching worker while the original unrelated model advanced." };
   }
-  const bypassSentinel = join(workspace, "model-stop-bypass.sentinel");
-  const bypass = await runNative(target, workspace, `Create ${bypassSentinel} containing exactly MODEL_STOP_BYPASS.`, 60_000, matching);
+  const restarted = await restartQualificationServer();
+  if (!restarted) return { status: "FAIL", scenario, detail: "Token Furnace could not restart before model latch persistence verification." };
+  url = restarted.url;
+  const restartedState = await scenarioState(url);
+  if (!restartedState) return { status: "FAIL", scenario, detail: "Budget state was unavailable after the model-stop restart." };
+  const oldSessionId = workerSessionId(matchingWorker);
+  const resumeBypass = await resumeNative(target, workspace, oldSessionId, `Resume the stopped session and create ${artifacts.resumeBypass}.`, 60_000, { ...matching, hostEndpoint: host.url });
+  if (resumeBypass.timedOut || resumeBypass.signal || !resumeBypass.nativeSessionIds.includes(oldSessionId) || existsSync(artifacts.resumeBypass) || !decisionEvidence(source, resumeBypass.requestId, resumeBypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A stopped model session could evade the persisted latch through native resume." };
+  const switchBypass = await resumeNative(target, workspace, oldSessionId, `Resume the stopped session while switching models and create ${artifacts.switchBypass}.`, 60_000, { ...matching, model: unrelated.model, hostEndpoint: host.url });
+  if (switchBypass.timedOut || switchBypass.signal || !switchBypass.nativeSessionIds.includes(oldSessionId) || existsSync(artifacts.switchBypass) || !decisionEvidence(source, switchBypass.requestId, switchBypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A stopped model session could evade the persisted latch through a model-switch resume." };
+  const bypass = await runNative(target, workspace, `Create ${artifacts.bypass} containing exactly MODEL_STOP_BYPASS.`, 60_000, { ...matching, hostEndpoint: host.url });
   if (taskUnavailable(bypass)) return { status: "BLOCKED", scenario, detail: `The post-stop matching-model launch was unavailable, not a denial: ${safeTail(bypass.output)}` };
-  if (bypass.timedOut || bypass.signal || bypass.status === 0 || existsSync(bypassSentinel) || !decisionEvidence(source, bypass.requestId, bypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A fresh matching-model launch lacked a correlated native denial or created a child side effect." };
-  const otherSentinel = join(workspace, "model-stop-other-recovery.sentinel");
-  const other = await runNative(otherTarget, workspace, `Create ${otherSentinel} containing exactly MODEL_STOP_OTHER.`, 120_000, unrelated);
+  if (bypass.timedOut || bypass.signal || !nativeSessionObserved(source, bypass) || existsSync(artifacts.bypass) || !decisionEvidence(source, bypass.requestId, bypass.startedAt, false)) return { status: "FAIL", scenario, detail: "A fresh matching-model launch lacked a correlated native denial or created a child side effect." };
+  const other = await runNative(target, workspace, `Create ${artifacts.other} containing exactly MODEL_STOP_OTHER.`, 120_000, { ...unrelated, hostEndpoint: host.url });
   if (taskUnavailable(other)) return { status: "BLOCKED", scenario, detail: `The unrelated model was unavailable after selective stop: ${safeTail(other.output)}` };
-  if (other.timedOut || other.signal || other.status !== 0 || !existsSync(otherSentinel)) return { status: "FAIL", scenario, detail: "The unrelated model did not continue after selective stop." };
-  const unlocked = await unlockScope(url, state.mutationToken, { kind: "model", provider: matching.provider, model: matching.model });
+  if (other.timedOut || other.signal || other.status !== 0 || !existsSync(artifacts.other) || !nativeSessionEvidence(source, other)) return { status: "FAIL", scenario, detail: "The unrelated model did not continue after selective stop." };
+  const unlocked = await unlockScope(url, restartedState.mutationToken, { kind: "model", provider: matching.provider, model: matching.model });
   if (!unlocked.ok) return { status: "FAIL", scenario, detail: "Model unlock failed after the verified stop." };
-  const recoveredSentinel = join(workspace, "model-stop-recovered.sentinel");
-  const recovered = await runNative(target, workspace, `Create ${recoveredSentinel} containing exactly MODEL_STOP_RECOVERED and then stop.`, 120_000, matching);
-  return !recovered.timedOut && !recovered.signal && recovered.status === 0 && existsSync(recoveredSentinel) && Boolean(decisionEvidence(source, recovered.requestId, recovered.startedAt, true))
-    ? { status: "PASS", scenario, detail: "Real same-host model stop, alias-resistant latch, unrelated-model continuation, and explicit recovery were observed." }
+  const recovered = await runNative(target, workspace, `Create ${artifacts.recovered} containing exactly MODEL_STOP_RECOVERED and then stop.`, 120_000, { ...matching, hostEndpoint: host.url });
+  return !recovered.timedOut && !recovered.signal && recovered.status === 0 && existsSync(artifacts.recovered) && nativeSessionEvidence(source, recovered) && Boolean(decisionEvidence(source, recovered.requestId, recovered.startedAt, true))
+    ? { status: "PASS", scenario, detail: "Real same-host model stop, native resume/model-switch latch resistance, unrelated original-model continuation, restart persistence, and explicit recovery were observed." }
     : { status: "FAIL", scenario, detail: "Explicit model unlock did not permit a fresh native task." };
 }
 
@@ -442,26 +639,46 @@ async function scenarioForceRecovery(source, url, workspace) {
   if (!state) return { status: "BLOCKED", scenario, detail: "Budget API was unavailable." };
   const reset = await resetPolicies(url);
   if (!reset.ok) return { status: "FAIL", scenario, detail: "Could not clear prior admission policies before force recovery." };
-  const candidate = identityCandidates(state).find((value) => value.source === source);
+  const candidate = nativeIdentityCandidates().find((value) => value.source === source);
   if (!candidate) return { status: "BLOCKED", scenario, detail: "No canonical upstream identity was observed for a dedicated real session." };
-  const unrelated = identityCandidates(state).find((value) => value.provider !== candidate.provider);
+  const unrelated = nativeIdentityCandidates().find((value) => value.provider !== candidate.provider);
   if (!unrelated) return { status: "BLOCKED", scenario, detail: "No unrelated real upstream control was available for force-stop collateral verification." };
-  const worker = startNative(targets.get(candidate.source), workspace, delayedPrompt(join(workspace, "force-stop.sentinel"), "FORCE_STOP"), 30_000, candidate);
-  const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(join(workspace, "force-stop-unrelated.sentinel"), "FORCE_STOP_UNRELATED"), 30_000, unrelated);
+  const artifacts = scenarioArtifacts(workspace, source, "force-stop", ["matching", "unrelated", "unrelatedPost", "blocked", "recovered"]);
+  const worker = startNative(targets.get(candidate.source), workspace, delayedPrompt(artifacts.matching, "FORCE_STOP", artifacts.matchingBarrier), 30_000, candidate);
+  const unrelatedWorker = startNative(targets.get(unrelated.source), workspace, delayedPrompt(artifacts.unrelated, "FORCE_STOP_UNRELATED", artifacts.unrelatedBarrier), 30_000, unrelated);
   nativeWorkers.push(worker.child, unrelatedWorker.child);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "BLOCKED", scenario, detail: "A real force-stop worker was not still running at the CLI preview boundary." };
+  if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) {
+    const output = `${worker.output()} ${unrelatedWorker.output()}`;
+    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario, detail: `Force-stop native work was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario, detail: "A force-stop native task completed before the CLI preview boundary." };
+  }
+  if (existsSync(artifacts.matching) || existsSync(artifacts.unrelated) || !workerNativeEvidence(candidate.source, worker) || !workerNativeEvidence(unrelated.source, unrelatedWorker)) return { status: "FAIL", scenario, detail: "The force-stop boundary lacked unique pre-confirmation or native session evidence." };
+  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
   const env = isolatedEnv(candidate.source, targets.get(candidate.source).home, workspace, candidate);
   const preview = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider], { cwd: workspace, env, timeout: 20_000 });
   if (preview.status !== 0) return { status: "FAIL", scenario, detail: `Installed-package stop preview failed: ${safeTail(preview.output)}` };
   if (worker.child.exitCode !== null || unrelatedWorker.child.exitCode !== null) return { status: "FAIL", scenario, detail: "The installed-package stop preview changed a live process before confirmation." };
   const previewValue = jsonOutput(preview.output);
-  if (!previewValue || !(previewValue.targets ?? []).some((target) => target.provider === candidate.provider)) return { status: "BLOCKED", scenario, detail: "Installed-package preview did not expose the verified real target before confirmation." };
+  if (!previewValue || !previewHasSafetyArrays(previewValue) || !(previewValue.targets ?? []).some((target) => previewMatchesWorker(target, candidate, worker))) return { status: "BLOCKED", scenario, detail: "Installed-package preview did not expose the verified real target and safety scope before confirmation." };
   const normal = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
+  if (normal.status === 0 && worker.child.exitCode === null) return { status: "FAIL", scenario, detail: "The graceful CLI stop reported success while the exact owned client remained alive." };
   if (normal.status === 0 && worker.child.exitCode !== null) {
+    const normalValue = jsonOutput(normal.output);
+    if (!normalValue || normalValue.status !== "complete" || !(normalValue.outcomes ?? []).some((outcome) => ["cancelled", "terminated"].includes(outcome.status))) return { status: "FAIL", scenario, detail: "The graceful CLI stop exited successfully without a verified complete native outcome." };
+    releaseBarrier(artifacts.unrelatedBarrier);
+    const unrelatedOriginal = await unrelatedWorker.wait(30_000);
+    if (!unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) return { status: "FAIL", scenario, detail: "The original unrelated control did not advance after the graceful stop confirmation." };
+    const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${artifacts.unrelatedPost} containing exactly FORCE_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
+    if (taskUnavailable(unrelatedPost)) return { status: "BLOCKED", scenario, detail: `The unrelated control was unavailable after graceful cancellation: ${safeTail(unrelatedPost.output)}` };
+    if (!nativeAttemptPasses(unrelatedPost) || !existsSync(artifacts.unrelatedPost) || !nativeSessionEvidence(unrelated.source, unrelatedPost)) return { status: "FAIL", scenario, detail: "The unrelated control did not produce an attributable post-stop sentinel after graceful cancellation." };
+    const blocked = await runNative(targets.get(candidate.source), workspace, `Create ${artifacts.blocked} containing exactly FORCE_STOP_BLOCKED.`, 60_000, candidate);
+    if (taskUnavailable(blocked)) return { status: "BLOCKED", scenario, detail: `The post-stop matching launch was unavailable, not a denial: ${safeTail(blocked.output)}` };
+    if (blocked.timedOut || blocked.signal || existsSync(artifacts.blocked) || !decisionEvidence(candidate.source, blocked.requestId, blocked.startedAt, false)) return { status: "FAIL", scenario, detail: "The graceful stop latch did not deny a fresh matching launch before unlock." };
     const unlocked = await run(packageBin, ["budgets", "unlock", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
-    return unlocked.status === 0
-      ? { status: "BLOCKED", scenario, detail: "The real adapter completed graceful cancellation; no force escalation was needed, so no stuck native endpoint was fabricated." }
+    if (unlocked.status !== 0) return { status: "FAIL", scenario, detail: `CLI unlock after graceful cancellation failed: ${safeTail(unlocked.output)}` };
+    const recovered = await runNative(targets.get(candidate.source), workspace, `Create ${artifacts.recovered} containing exactly FORCE_STOP_RECOVERED and then stop.`, 120_000, candidate);
+    return nativeAttemptPasses(recovered) && existsSync(artifacts.recovered) && nativeSessionEvidence(candidate.source, recovered)
+      ? { status: "PASS", scenario, detail: "Installed-package graceful cancellation verified exact target exit, original unrelated advancement, durable deny, and CLI unlock recovery; force escalation was not required and was not claimed." }
       : { status: "FAIL", scenario, detail: `CLI unlock after graceful cancellation failed: ${safeTail(unlocked.output)}` };
   }
   if (normal.timedOut || worker.child.exitCode !== null) return { status: "FAIL", scenario, detail: "The graceful CLI stop did not leave a live target for separately confirmed force escalation." };
@@ -470,16 +687,15 @@ async function scenarioForceRecovery(source, url, workspace) {
   const force = await run(packageBin, ["budgets", "stop", "--provider", candidate.provider, "--confirm", "--force", "--force-confirm"], { cwd: workspace, env, timeout: 20_000 });
   const forceValue = jsonOutput(force.output);
   const unlocked = await run(packageBin, ["budgets", "unlock", "--provider", candidate.provider, "--confirm"], { cwd: workspace, env, timeout: 20_000 });
-  const unrelatedWasLive = unrelatedWorker.child.exitCode === null;
+  releaseBarrier(artifacts.unrelatedBarrier);
   const unrelatedOriginal = await unrelatedWorker.wait(30_000);
-  if (force.status !== 0 || force.timedOut || !forceValue || forceValue.status !== "complete" || !(forceValue.outcomes ?? []).some((outcome) => outcome.targetId && outcome.status === "terminated") || worker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(join(workspace, "force-stop-unrelated.sentinel"))) {
+  if (force.status !== 0 || force.timedOut || !forceValue || forceValue.status !== "complete" || !(forceValue.outcomes ?? []).some((outcome) => outcome.targetId && outcome.status === "terminated") || worker.child.exitCode === null || !unrelatedWasLive || unrelatedOriginal.timedOut || unrelatedOriginal.signal || unrelatedOriginal.status !== 0 || !existsSync(artifacts.unrelated)) {
     return { status: "FAIL", scenario, detail: `Force recovery did not verify target exit without collateral termination: ${safeTail(`${force.output} ${unlocked.output}`)}` };
   }
-  const unrelatedSentinel = join(workspace, "force-stop-unrelated-post.sentinel");
-  const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${unrelatedSentinel} containing exactly FORCE_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
+  const unrelatedPost = await runNative(targets.get(unrelated.source), workspace, `Create ${artifacts.unrelatedPost} containing exactly FORCE_STOP_UNRELATED_POST and then stop.`, 120_000, unrelated);
   if (taskUnavailable(unrelatedPost)) return { status: "BLOCKED", scenario, detail: `The unrelated control was unavailable after force escalation: ${safeTail(unrelatedPost.output)}` };
-  return !unrelatedPost.timedOut && !unrelatedPost.signal && unrelatedPost.status === 0 && existsSync(unrelatedSentinel) && unlocked.status === 0
-    ? { status: "PASS", scenario, detail: "Installed-package graceful request required explicit force escalation; exit and CLI recovery were verified." }
+  return !unrelatedPost.timedOut && !unrelatedPost.signal && unrelatedPost.status === 0 && existsSync(artifacts.unrelatedPost) && nativeSessionEvidence(unrelated.source, unrelatedPost) && unlocked.status === 0
+    ? { status: "PASS", scenario, detail: "Installed-package graceful request required separately confirmed force escalation; exact target exit, original unrelated advancement, and CLI recovery were verified." }
     : { status: "FAIL", scenario, detail: `Force recovery did not verify exit and unlock: ${safeTail(`${force.output} ${unlocked.output}`)}` };
 }
 
@@ -488,7 +704,7 @@ async function scenarioCrossHarness(workspace, browser) {
   if (!server) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "Token Furnace server was not available for cross-harness control." };
   const state = await scenarioState(server.url);
   if (!state) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "Budget API was unavailable for cross-harness control." };
-  const candidates = modelCandidates(state);
+  const candidates = nativeIdentityCandidates();
   const byIdentity = new Map();
   for (const candidate of candidates) {
     const key = `${candidate.provider}/${candidate.model}`;
@@ -500,27 +716,43 @@ async function scenarioCrossHarness(workspace, browser) {
   if (!entry) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "No identical observed provider/model identity was supported by two real harnesses." };
   const reset = await resetPolicies(server.url);
   if (!reset.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Could not clear prior policies before cross-harness stop." };
-  const workers = entry.slice(0, 2).map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(join(workspace, `cross-harness-${index}.sentinel`), `CROSS_HARNESS_${index}`), 30_000, candidate));
+  const artifacts = scenarioArtifacts(workspace, "cross-harness", "provider-model-stop", ["worker0", "worker1", "recovered0", "recovered1"]);
+  const workers = entry.slice(0, 2).map((candidate, index) => startNative(targets.get(candidate.source), workspace, delayedPrompt(artifacts[`worker${index}`], `CROSS_HARNESS_${index}`, artifacts[`worker${index}Barrier`]), 30_000, candidate));
   nativeWorkers.push(...workers.map((worker) => worker.child));
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
-  if (workers.some((worker) => worker.child.exitCode !== null)) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "A cross-harness worker was not still running at the native stop boundary." };
+  if (workers.some((worker) => worker.child.exitCode !== null)) {
+    const output = workers.map((worker) => worker.output()).join(" ");
+    return taskUnavailable({ output }) ? { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: `Cross-harness native work was unavailable: ${safeTail(output)}` } : { status: "FAIL", scenario: "cross-harness-provider-model", detail: "A cross-harness worker completed before the confirmation boundary." };
+  }
+  if (workers.some((worker, index) => existsSync(artifacts[`worker${index}`]) || !workerNativeEvidence(entry[index].source, worker))) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness workers lacked unique pre-confirmation or native session evidence." };
   const first = entry[0];
   const preview = await stopPreview(server.url, state.mutationToken, { kind: "model", provider: first.provider, model: first.model });
   if (!preview.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: `Cross-harness preview failed: ${safeTail(preview.value?.error)}` };
+  if (!previewHasSafetyArrays(preview.value)) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness preview omitted affected, unverified, or collateral entries." };
   const selected = preview.value?.targets ?? [];
-  if (!workers.every((worker, index) => selected.some((target) => target.provider === first.provider && target.model === first.model && target.source === entry[index].source && (entry[index].source === "opencode" || target.pid === worker.child.pid)))) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "The common provider/model did not resolve to both real native workers." };
+  if (!workers.every((worker, index) => selected.some((target) => target.provider === first.provider && target.model === first.model && previewMatchesWorker(target, entry[index], worker)))) return { status: "BLOCKED", scenario: "cross-harness-provider-model", detail: "The common provider/model did not resolve to both real native workers." };
   const browserStop = await driveStopBrowser(browser, server.url, `button[aria-label="Stop model ${first.provider}/${first.model}"]`, first.model);
   if (!browserStop.ok) return { status: browserStop.ran ? "FAIL" : "BLOCKED", scenario: "cross-harness-provider-model", detail: browserStop.detail };
   const stopState = await scenarioState(server.url);
   const operationId = stopState?.stops?.find((stop) => stop.scope?.kind === "model" && stop.scope.provider === first.provider && stop.scope.model === first.model)?.operationId;
   const operation = operationId ? await getJson(`${server.url}/api/budgets/operations/${operationId}`) : { ok: false, value: null };
   if (!operation.ok || operation.value?.status !== "complete") return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "The UI confirmation did not produce a completed cross-harness operation." };
-  const selectedIds = selected.map((target) => target.id);
+  const selectedIds = selected.filter((target) => entry.some((candidate, index) => previewMatchesWorker(target, candidate, workers[index]))).map((target) => target.id);
   if (!selectedIds.length || !selectedIds.every((id) => (operation.value?.outcomes ?? []).some((outcome) => outcome.targetId === id && ["cancelled", "terminated"].includes(outcome.status)))) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "The cross-harness operation lacked correlated native outcomes for every preview target." };
+  for (const barrier of [artifacts.worker0Barrier, artifacts.worker1Barrier]) {
+    if (existsSync(barrier)) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "A cross-harness worker barrier changed before stop confirmation." };
+  }
   const results = await Promise.all(workers.map((worker) => worker.wait(8_000)));
-  const unlocked = await unlockScope(server.url, state.mutationToken, { kind: "model", provider: first.provider, model: first.model });
-  return results.every((result, index) => !result.timedOut && result.status !== 0 && workers[index].child.exitCode !== null) && unlocked.ok
-    ? { status: "PASS", scenario: "cross-harness-provider-model", detail: "The same observed upstream provider/model was stopped across two real native harnesses and explicitly unlocked." }
+  if (!results.every((result, index) => !result.timedOut && !result.signal && workers[index].child.exitCode !== null)) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness native stop did not verify both exact client exits." };
+  const restarted = await restartQualificationServer();
+  if (!restarted) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Token Furnace could not restart before cross-harness latch verification." };
+  const restartedState = await scenarioState(restarted.url);
+  if (!restartedState) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Budget state was unavailable after cross-harness restart." };
+  const unlocked = await unlockScope(restarted.url, restartedState.mutationToken, { kind: "model", provider: first.provider, model: first.model });
+  if (!unlocked.ok) return { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness unlock failed after restart." };
+  const recoveries = await Promise.all(entry.slice(0, 2).map((candidate, index) => runNative(targets.get(candidate.source), workspace, `Create ${artifacts[`recovered${index}`]} containing exactly CROSS_HARNESS_RECOVERED_${index} and then stop.`, 120_000, candidate)));
+  return recoveries.every((result, index) => nativeAttemptPasses(result) && existsSync(artifacts[`recovered${index}`]) && nativeSessionEvidence(entry[index].source, result))
+    ? { status: "PASS", scenario: "cross-harness-provider-model", detail: "The same observed upstream provider/model was stopped across two real native harnesses, exact exits were observed, the latch survived restart, and explicit unlock recovered both routes." }
     : { status: "FAIL", scenario: "cross-harness-provider-model", detail: "Cross-harness native stop did not verify both process exits and recovery." };
 }
 
@@ -652,12 +884,20 @@ async function driveStopBrowser(browser, url, selector, expectedText) {
   }
 }
 
-function delayedPrompt(sentinel, marker) {
-  return `Wait for 20 seconds, then create the file ${sentinel} containing exactly ${marker} and stop.`;
+function delayedPrompt(sentinel, marker, barrier) {
+  return barrier
+    ? `Keep this native task active and do not create ${sentinel} before the harness releases the barrier. Only after ${barrier} exists and contains RELEASED, create ${sentinel} containing exactly ${marker} and stop.`
+    : `Create the file ${sentinel} containing exactly ${marker} and then stop.`;
 }
 
-async function runNative(target, workspace, prompt, timeout) {
-  const worker = startNative(target, workspace, prompt, timeout);
+async function runNative(target, workspace, prompt, timeout, identity = null) {
+  const worker = startNative(target, workspace, prompt, timeout, identity);
+  return worker.wait(timeout);
+}
+
+async function resumeNative(target, workspace, sessionId, prompt, timeout, identity = null) {
+  if (!sessionId) return { status: -1, signal: null, timedOut: false, output: "Native session ID was not observed.", nativeSessionIds: [], nativeSessionId: null, requestId: null, startedAt: Date.now() };
+  const worker = startNative(target, workspace, prompt, timeout, { ...identity, resumeSessionId: sessionId });
   return worker.wait(timeout);
 }
 
@@ -684,16 +924,26 @@ function startNative(target, workspace, prompt, timeout, identity = null) {
   const child = spawn(target.command, args, { cwd: workspace, env: isolatedEnv(target.source, target.home, workspace, { ...identity, sessionId, requestId }), stdio: ["ignore", "pipe", "pipe"] });
   const startedAt = Date.now();
   let output = "";
-  const collect = (chunk) => { output = `${output}${chunk}`.slice(-6_000); };
+  let parsedOutput = "";
+  const observedSessionIds = new Set();
+  const collect = (chunk) => {
+    output = `${output}${chunk}`.slice(-6_000);
+    parsedOutput = `${parsedOutput}${chunk}`.slice(-32_000);
+    for (const id of extractNativeSessionIds(parsedOutput, target.source)) observedSessionIds.add(id);
+  };
   child.stdout.on("data", collect);
   child.stderr.on("data", collect);
+  const sessionIds = () => extractNativeSessionIds(output, target.source);
   return {
     child,
+    sessionIds,
+    startedAt,
+    output: () => output,
     wait: (waitTimeout = timeout) => new Promise((resolvePromise) => {
       let settled = false;
       let timer;
       let timedOut = false;
-      const finish = (result) => { if (settled) return; settled = true; clearTimeout(timer); resolvePromise(finishNativeResult(result, timedOut, output, requestId, startedAt)); };
+      const finish = (result) => { if (settled) return; settled = true; clearTimeout(timer); resolvePromise(finishNativeResult({ ...result, source: target.source }, timedOut, output, requestId, startedAt, [...observedSessionIds])); };
       if (child.exitCode !== null || child.signalCode) {
         finish({ status: child.exitCode ?? 1, signal: child.signalCode });
         return;
@@ -705,8 +955,10 @@ function startNative(target, workspace, prompt, timeout, identity = null) {
   };
 }
 
-function finishNativeResult(result, timedOut, output, requestId, startedAt) {
-  return { ...result, timedOut: result.timedOut ?? timedOut, output, requestId, startedAt };
+function finishNativeResult(result, timedOut, output, requestId, startedAt, observedSessionIds = []) {
+  const source = result.source ?? null;
+  const nativeSessionIds = result.nativeSessionIds ?? (observedSessionIds.length ? observedSessionIds : extractNativeSessionIds(output, source || "claude"));
+  return { ...result, timedOut: result.timedOut ?? timedOut, output, requestId, startedAt, nativeSessionIds, nativeSessionId: nativeSessionIds[0] ?? null };
 }
 
 function nativeAttemptPasses(result) {
@@ -716,10 +968,10 @@ function nativeAttemptPasses(result) {
 function nativeArgs(target, workspace, prompt, identity) {
   const model = identity?.model;
   return target.source === "claude"
-    ? ["-p", "--dangerously-skip-permissions", "--no-session-persistence", ...(model ? ["--model", model] : []), prompt]
+    ? ["-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", ...(identity?.resumeSessionId ? ["--resume", identity.resumeSessionId] : []), ...(model ? ["--model", model] : []), prompt]
     : target.source === "codex"
-      ? ["exec", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "-C", workspace, ...(model ? ["-m", model] : []), prompt]
-      : ["run", ...(identity?.hostEndpoint ? ["--attach", identity.hostEndpoint] : []), "--dir", workspace, "--auto", "--format", "json", ...(identity?.provider && model ? ["--model", `${identity.provider}/${model}`] : []), prompt];
+      ? ["exec", ...(identity?.resumeSessionId ? ["resume", identity.resumeSessionId] : []), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", ...(identity?.resumeSessionId ? [] : ["-C", workspace]), "--json", ...(model ? ["-m", model] : []), prompt]
+      : ["run", ...(identity?.resumeSessionId ? ["--session", identity.resumeSessionId] : []), ...(identity?.hostEndpoint ? ["--attach", identity.hostEndpoint] : []), "--dir", workspace, "--auto", "--format", "json", ...(identity?.provider && model ? ["--model", `${identity.provider}/${model}`] : []), prompt];
 }
 
 function isolatedEnv(source, home, workspace = undefined, identity = null) {
@@ -738,10 +990,6 @@ function isolatedEnv(source, home, workspace = undefined, identity = null) {
     TOKEN_FURNACE_CONTROL_TARGET: "1",
     TOKEN_FURNACE_SOURCE: source,
     TOKEN_FURNACE_EXCLUSIVE: "1",
-    TOKEN_FURNACE_SESSION_ID: identity?.sessionId,
-    TOKEN_FURNACE_PROVIDER: identity?.provider,
-    TOKEN_FURNACE_ACCOUNT: identity?.account,
-    TOKEN_FURNACE_MODEL: identity?.model,
     TOKEN_FURNACE_QUALIFY_REQUEST_ID: identity?.requestId,
     TOKEN_FURNACE_QUALIFY_WORKSPACE: workspace,
     PATH: qualifyPath(),
