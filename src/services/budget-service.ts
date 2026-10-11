@@ -358,8 +358,12 @@ export class BudgetService {
       const loaded = this.readSettings();
       const identity = input.identity;
       if (loaded.error) return this.decision(input, false, loaded.error, null, []);
-      const stopped = this.activeStops().find((stop) => stopMatches(stop.scope, identity));
+      const stops = this.activeStops();
+      const stopped = stops.find((stop) => stopMatches(stop.scope, identity));
       if (stopped) return this.decision(input, false, "Emergency stop is active for this scope.", null, []);
+      if (stops.some((stop) => stopRequiresResolvedIdentity(stop.scope, identity))) {
+        return this.decision(input, false, "Emergency stop requires resolved provider/model identity.", null, []);
+      }
       const enabled = loaded.settings.policies.filter((policy) => policy.mode !== "off");
       const unresolved = enabled.some((policy) =>
         (policy.scope.kind === "provider" && !identity.provider) ||
@@ -665,6 +669,12 @@ function stopMatches(scope: StopScope, identity: BudgetIdentity): boolean {
   if (scope.kind === "provider") return Boolean(identity.provider) && canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider);
   return Boolean(identity.provider && identity.model) &&
     (canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider) && canonicalIdentity(scope.model) === canonicalIdentity(identity.model));
+}
+
+function stopRequiresResolvedIdentity(scope: StopScope, identity: BudgetIdentity): boolean {
+  if (scope.kind === "source") return false;
+  if (!identity.provider) return true;
+  return scope.kind === "model" && canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider) && !identity.model;
 }
 
 function retrySqliteInitialization<T>(fn: () => T): T {

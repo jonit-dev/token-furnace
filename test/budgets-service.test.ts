@@ -84,6 +84,28 @@ describe("BudgetService", () => {
     reopened.close();
   });
 
+  it("does not let unresolved identities bypass provider or matching-model stops", () => {
+    const { service } = setup();
+    const providerPreview = service.previewStop({ kind: "provider", provider: "anthropic" }, []);
+    expect(service.commitStop(providerPreview.id, providerPreview.fingerprint, []).status).toBe("partial");
+
+    const unresolved = service.admit({ identity: { source: "claude", provider: null, model: null }, estimatedCost: 1, now });
+    expect(unresolved.allowed).toBe(false);
+    expect(unresolved.reason).toMatch(/resolved provider\/model identity/i);
+    expect(service.admit({ identity: { source: "claude", provider: "openai", model: "gpt-6.1" }, estimatedCost: 1, now }).allowed).toBe(true);
+    service.unlock({ kind: "provider", provider: "anthropic" });
+
+    const modelPreview = service.previewStop({ kind: "model", provider: "anthropic", model: "claude-sonnet-4-5" }, []);
+    expect(service.commitStop(modelPreview.id, modelPreview.fingerprint, []).status).toBe("partial");
+    expect(service.admit({ identity: { source: "claude", provider: "anthropic", model: null }, estimatedCost: 1, now }).allowed).toBe(false);
+    expect(service.admit({ identity: { source: "claude", provider: "openai", model: "gpt-6.1" }, estimatedCost: 1, now }).allowed).toBe(true);
+    expect(service.admit({ identity: { source: "claude", provider: "anthropic", model: "claude-sonnet-4-5" }, estimatedCost: 1, now }).allowed).toBe(false);
+    service.unlock({ kind: "model", provider: "anthropic", model: "claude-sonnet-4-5" });
+    expect(service.admit({ identity: { source: "claude", provider: "anthropic", model: "claude-sonnet-4-5" }, estimatedCost: 1, now }).allowed).toBe(true);
+    expect(service.admit({ identity: { source: "claude", provider: null, model: null }, estimatedCost: 1, now }).allowed).toBe(true);
+    service.close();
+  });
+
   it("uses the authoritative reset window for Auto and reserves overlapping admissions", () => {
     const { service } = setup();
     service.setMeters([{
