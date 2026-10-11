@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentControl, parsePsProcesses, type ControlTarget, type ProcessIdentity } from "../src/services/agent-control";
@@ -69,6 +70,37 @@ function target(overrides: Partial<ControlTarget> = {}): ControlTarget {
 function waitForExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode) return Promise.resolve();
   return new Promise((resolve) => child.once("exit", () => resolve()));
+}
+
+function waitForOutput(child: ChildProcess, expected: string, timeoutMs = 2_000): Promise<void> {
+  const stdout = child.stdout;
+  if (!stdout) return Promise.reject(new Error("child has no stdout pipe"));
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timer = setTimeout(() => finish(new Error(`timed out waiting for ${expected}`)), timeoutMs);
+    const finish = (error?: Error) => {
+      clearTimeout(timer);
+      stdout.off("data", onData);
+      child.off("exit", onExit);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onData = (chunk: Buffer) => {
+      output += chunk.toString();
+      if (output.split(/\r?\n/).includes(expected)) finish();
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(new Error(`child exited before ${expected}: ${code ?? signal}`));
+    stdout.on("data", onData);
+    child.once("exit", onExit);
+  });
+}
+
+async function ping(child: ChildProcess, label: string): Promise<void> {
+  if (!child.stdin) throw new Error("child has no stdin pipe");
+  const token = `${label}-${randomUUID()}`;
+  const waiting = waitForOutput(child, `pong:ping:${token}`);
+  child.stdin.write(`ping:${token}\n`);
+  await waiting;
 }
 
 type WindowsStopTiming = { name: string; startedAt: number; stages: Record<string, number> };
@@ -513,7 +545,7 @@ describe("AgentControl", () => {
   it("force-stops a real owned child while an unrelated sibling remains live", async () => {
     const timing = windowsStopTiming("force-stops a real owned child");
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const unrelated = spawn(process.execPath, ["-e", "const readline=require('node:readline'); const rl=readline.createInterface({input:process.stdin}); rl.on('line', line => { if (line.startsWith('ping:')) process.stdout.write('pong:' + line + '\\n'); });"], { stdio: ["pipe", "pipe", "ignore"] });
     const control = makeControl({ currentUid: typeof process.getuid === "function" ? process.getuid() : null, graceMs: 1_000, storePath: testStore() });
     markWindowsStopStage(timing, "controlConstruction");
     try {
@@ -533,11 +565,13 @@ describe("AgentControl", () => {
       expect(identity.ownerUid !== null || identity.ownerIdentity || identity.ownerSid).toBeTruthy();
       expect(control.register({ ...target({ id: "real-child", pid: child.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
       markWindowsStopStage(timing, "registration");
+      await ping(unrelated, "real-child-before-stop");
       const outcome = await control.cancel({ ...target({ id: "real-child", pid: child.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
       markWindowsStopStage(timing, "cancelAndVerification");
       if (process.platform === "win32") console.info(`TOKEN_FURNACE_WINDOWS_STOP_OUTCOME ${JSON.stringify(outcome)}`);
       expect(outcome.status, JSON.stringify(outcome)).toBe("terminated");
       await waitForExit(child);
+      await ping(unrelated, "real-child-after-stop");
       expect(unrelated.exitCode).toBeNull();
     } finally {
       markWindowsStopStage(timing, "cleanupStart");
@@ -553,7 +587,7 @@ describe("AgentControl", () => {
   it("force-stops a real owned child tree while an unrelated sibling remains live", async () => {
     const timing = windowsStopTiming("force-stops a real owned child tree");
     const tree = spawn(process.execPath, ["-e", "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); process.stdout.write(String(child.pid)); setInterval(()=>{},1000)"], { stdio: ["ignore", "pipe", "ignore"] });
-    const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const unrelated = spawn(process.execPath, ["-e", "const readline=require('node:readline'); const rl=readline.createInterface({input:process.stdin}); rl.on('line', line => { if (line.startsWith('ping:')) process.stdout.write('pong:' + line + '\\n'); });"], { stdio: ["pipe", "pipe", "ignore"] });
     const control = makeControl({ currentUid: typeof process.getuid === "function" ? process.getuid() : null, graceMs: 1_000, storePath: testStore() });
     markWindowsStopStage(timing, "controlConstruction");
     let grandchildPid: number | null = null;
@@ -584,12 +618,14 @@ describe("AgentControl", () => {
       expect(grandchildPid).toBeDefined();
       expect(control.register({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
       markWindowsStopStage(timing, "registration");
+      await ping(unrelated, "real-tree-before-stop");
       const outcome = await control.cancel({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
       markWindowsStopStage(timing, "cancelAndVerification");
       if (process.platform === "win32") console.info(`TOKEN_FURNACE_WINDOWS_STOP_OUTCOME ${JSON.stringify(outcome)}`);
       expect(outcome.status, JSON.stringify(outcome)).toBe("terminated");
       await waitForExit(tree);
       expect(control.processIdentity(grandchildPid!)).toBeNull();
+      await ping(unrelated, "real-tree-after-stop");
       expect(unrelated.exitCode).toBeNull();
     } finally {
       markWindowsStopStage(timing, "cleanupStart");

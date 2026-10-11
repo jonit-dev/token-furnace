@@ -1,9 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { compose } from "../src/compose";
 import { startServer, type LiveServer } from "../src/server";
+import type { ControlTarget } from "../src/services/agent-control";
 
 const roots: string[] = [];
 const servers: LiveServer[] = [];
@@ -12,17 +14,52 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-async function boot() {
+function syntheticTarget(): ControlTarget {
+  return {
+    id: "http-synthetic-target",
+    source: "claude",
+    provider: "anthropic",
+    model: "claude-opus",
+    pid: 424242,
+    processStartTime: 1,
+    ownerUid: 7,
+    ownerSid: "S-1-5-21-http-test",
+    executable: "/usr/bin/token-furnace-http-test-agent",
+    exclusive: true,
+  };
+}
+
+async function boot(withTarget = false) {
   const root = mkdtempSync(join(tmpdir(), "tf-budget-http-"));
   roots.push(root);
   const app = compose({ HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state") }, { noCache: true });
-  vi.spyOn(app.control, "preview").mockReturnValue({ targets: [], unverified: [], collateral: [] });
+  const target = withTarget ? syntheticTarget() : null;
+  vi.spyOn(app.control, "preview").mockReturnValue({ targets: target ? [target] : [], unverified: [], collateral: [] });
+  const stop = vi.spyOn(app.control, "stop").mockResolvedValue(target ? [{ targetId: target.id, status: "terminated" }] : []);
   const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
   servers.push(server);
   const initial = await fetch(`${server.url}/api/budgets`);
   const raw = await initial.text();
   const body = raw.trimStart().startsWith("{") ? JSON.parse(raw) as { mutationToken: string; revision: number } : { mutationToken: "", revision: -1 };
-  return { server, initial, body };
+  return { server, initial, body, stop };
+}
+
+function postWithHost(url: string, headers: Record<string, string>, body: string): Promise<number> {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: parsed.hostname,
+      port: Number(parsed.port),
+      path: parsed.pathname,
+      method: "POST",
+      headers: { ...headers, host: "evil.example" },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode ?? 0));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
 }
 
 describe("budget HTTP controls", () => {
@@ -95,6 +132,99 @@ describe("budget HTTP controls", () => {
       body: JSON.stringify({ expectedRevision: 1, policies: [] }),
     });
     expect(crossSite.status).toBe(403);
+  });
+
+  it("rejects untrusted mutation requests without changing policy or cancelling a target", async () => {
+    const { server, body, stop } = await boot(true);
+    const validHeaders = { "content-type": "application/json", "x-token-furnace-mutation": body.mutationToken, origin: server.url };
+    const payload = JSON.stringify({ expectedRevision: 0, policies: [] });
+    const before = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+    const rejected = [
+      { name: "host", headers: { ...validHeaders, host: "evil.example" }, expected: 403 },
+      { name: "origin", headers: { ...validHeaders, origin: "https://evil.example" }, expected: 403 },
+      { name: "token", headers: { ...validHeaders, "x-token-furnace-mutation": "wrong-token" }, expected: 403 },
+      { name: "content type", headers: { ...validHeaders, "content-type": "text/plain" }, expected: 415 },
+    ];
+    for (const attempt of rejected) {
+      const status = attempt.name === "host"
+        ? await postWithHost(`${server.url}/api/budgets`, attempt.headers, payload)
+        : (await fetch(`${server.url}/api/budgets`, { method: "POST", headers: attempt.headers, body: payload })).status;
+      expect(status, attempt.name).toBe(attempt.expected);
+    }
+    const unsupported = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST",
+      headers: validHeaders,
+      body: JSON.stringify({ scope: { kind: "unsupported", source: "claude" } }),
+    });
+    expect(unsupported.status).toBe(400);
+    const after = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+    expect(after.revision).toBe(before.revision);
+    expect(after.policies).toEqual(before.policies);
+    expect(after.stops).toEqual(before.stops);
+    expect(stop).not.toHaveBeenCalled();
+
+    const previewResponse = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST", headers: validHeaders, body: JSON.stringify({ scope: { kind: "provider", provider: "anthropic" } }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json() as { id: string; fingerprint: string };
+    const committed = await fetch(`${server.url}/api/budgets/stop`, {
+      method: "POST", headers: validHeaders, body: JSON.stringify({ previewId: preview.id, fingerprint: preview.fingerprint, outcomes: [] }),
+    });
+    expect(committed.status).toBe(200);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects stale, altered, and replayed stop confirmations without extra cancellation", async () => {
+    const { server, body, stop } = await boot(true);
+    const headers = { "content-type": "application/json", "x-token-furnace-mutation": body.mutationToken, origin: server.url };
+    const previewResponse = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST", headers, body: JSON.stringify({ scope: { kind: "provider", provider: "anthropic" } }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json() as { id: string; fingerprint: string };
+    const altered = await fetch(`${server.url}/api/budgets/stop`, {
+      method: "POST", headers, body: JSON.stringify({ previewId: preview.id, fingerprint: `${preview.fingerprint}-altered`, outcomes: [] }),
+    });
+    expect(altered.status).toBe(409);
+    expect(stop).not.toHaveBeenCalled();
+
+    const saved = await fetch(`${server.url}/api/budgets`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ expectedRevision: 0, policies: [{
+        scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 100,
+        deadline: "2099-10-11T12:00:00.000Z",
+      }] }),
+    });
+    expect(saved.status).toBe(200);
+    const stale = await fetch(`${server.url}/api/budgets/stop`, {
+      method: "POST", headers, body: JSON.stringify({ previewId: preview.id, fingerprint: preview.fingerprint, outcomes: [] }),
+    });
+    expect(stale.status).toBe(409);
+    expect(stop).not.toHaveBeenCalled();
+    const afterStale = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; stops: unknown[] };
+    expect(afterStale.revision).toBe(1);
+    expect(afterStale.stops).toEqual([]);
+
+    const freshPreviewResponse = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST", headers, body: JSON.stringify({ scope: { kind: "provider", provider: "anthropic" } }),
+    });
+    expect(freshPreviewResponse.status).toBe(200);
+    const freshPreview = await freshPreviewResponse.json() as { id: string; fingerprint: string };
+    const first = await fetch(`${server.url}/api/budgets/stop`, {
+      method: "POST", headers, body: JSON.stringify({ previewId: freshPreview.id, fingerprint: freshPreview.fingerprint, outcomes: [] }),
+    });
+    expect(first.status).toBe(200);
+    expect(stop).toHaveBeenCalledTimes(1);
+    const replay = await fetch(`${server.url}/api/budgets/stop`, {
+      method: "POST", headers, body: JSON.stringify({ previewId: freshPreview.id, fingerprint: freshPreview.fingerprint, outcomes: [] }),
+    });
+    expect(replay.status).toBe(409);
+    expect(stop).toHaveBeenCalledTimes(1);
+    const afterReplay = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; stops: unknown[] };
+    expect(afterReplay.revision).toBe(1);
+    expect(afterReplay.stops).toHaveLength(1);
   });
 
   it("keeps stop preview read-only and persists commit, operation, and unlock", async () => {
