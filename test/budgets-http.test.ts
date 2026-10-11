@@ -134,7 +134,12 @@ describe("budget HTTP controls", () => {
     expect(crossSite.status).toBe(403);
   });
 
-  it("rejects untrusted mutation requests without changing policy or cancelling a target", async () => {
+  it.each([
+    { name: "host", header: "host", value: "evil.example", expected: 403, rawHost: true },
+    { name: "origin", header: "origin", value: "https://evil.example", expected: 403, rawHost: false },
+    { name: "token", header: "x-token-furnace-mutation", value: "wrong-token", expected: 403, rawHost: false },
+    { name: "content type", header: "content-type", value: "text/plain", expected: 415, rawHost: false },
+  ])("rejects untrusted $name policy and stop mutations", async ({ name, header, value, expected, rawHost }) => {
     const { server, body, stop } = await boot(true);
     const validHeaders = { "content-type": "application/json", "x-token-furnace-mutation": body.mutationToken, origin: server.url };
     const payload = JSON.stringify({ expectedRevision: 0, policies: [] });
@@ -145,6 +150,10 @@ describe("budget HTTP controls", () => {
     const preview = await previewResponse.json() as { id: string; fingerprint: string };
     const stopPayload = JSON.stringify({ previewId: preview.id, fingerprint: preview.fingerprint, force: true, forceConfirm: true, outcomes: [] });
     const before = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+    const attemptHeaders = { ...validHeaders, [header]: value };
+    const postStatus = (url: string, requestBody: string) => rawHost
+      ? postWithHost(url, attemptHeaders, requestBody)
+      : fetch(url, { method: "POST", headers: attemptHeaders, body: requestBody }).then((response) => response.status);
     const expectUnchanged = async (label: string) => {
       const after = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
       expect(after.revision, label).toBe(before.revision);
@@ -152,36 +161,38 @@ describe("budget HTTP controls", () => {
       expect(after.stops, label).toEqual(before.stops);
       expect(stop, label).not.toHaveBeenCalled();
     };
-    const rejected = [
-      { name: "host", headers: { ...validHeaders, host: "evil.example" }, expected: 403 },
-      { name: "origin", headers: { ...validHeaders, origin: "https://evil.example" }, expected: 403 },
-      { name: "token", headers: { ...validHeaders, "x-token-furnace-mutation": "wrong-token" }, expected: 403 },
-      { name: "content type", headers: { ...validHeaders, "content-type": "text/plain" }, expected: 415 },
-    ];
-    for (const attempt of rejected) {
-      const policyStatus = attempt.name === "host"
-        ? await postWithHost(`${server.url}/api/budgets`, attempt.headers, payload)
-        : (await fetch(`${server.url}/api/budgets`, { method: "POST", headers: attempt.headers, body: payload })).status;
-      expect(policyStatus, `${attempt.name} policy`).toBe(attempt.expected);
-      const stopStatus = attempt.name === "host"
-        ? await postWithHost(`${server.url}/api/budgets/stop`, attempt.headers, stopPayload)
-        : (await fetch(`${server.url}/api/budgets/stop`, { method: "POST", headers: attempt.headers, body: stopPayload })).status;
-      expect(stopStatus, `${attempt.name} stop`).toBe(attempt.expected);
-      await expectUnchanged(attempt.name);
-    }
-    const unsupported = await fetch(`${server.url}/api/budgets/stop-preview`, {
-      method: "POST",
-      headers: validHeaders,
-      body: JSON.stringify({ scope: { kind: "unsupported", source: "claude" } }),
-    });
-    expect(unsupported.status).toBe(400);
-    await expectUnchanged("unsupported selector");
+    const policyStatus = await postStatus(`${server.url}/api/budgets`, payload);
+    expect(policyStatus, `${name} policy`).toBe(expected);
+    const stopStatus = await postStatus(`${server.url}/api/budgets/stop`, stopPayload);
+    expect(stopStatus, `${name} stop`).toBe(expected);
+    await expectUnchanged(name);
     const committed = await fetch(`${server.url}/api/budgets/stop`, {
       method: "POST", headers: validHeaders, body: stopPayload,
     });
     expect(committed.status).toBe(200);
     expect(stop).toHaveBeenCalledTimes(1);
     expect(stop.mock.calls[0]?.[1]).toBe(true);
+  });
+
+  it("rejects an unsupported stop selector without changing state or cancelling", async () => {
+    const { server, body, stop } = await boot(true);
+    const headers = { "content-type": "application/json", "x-token-furnace-mutation": body.mutationToken, origin: server.url };
+    const preview = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST", headers, body: JSON.stringify({ scope: { kind: "provider", provider: "anthropic" } }),
+    });
+    expect(preview.status).toBe(200);
+    const before = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+    const unsupported = await fetch(`${server.url}/api/budgets/stop-preview`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ scope: { kind: "unsupported", source: "claude" } }),
+    });
+    expect(unsupported.status).toBe(400);
+    const after = await (await fetch(`${server.url}/api/budgets`)).json() as { revision: number; policies: unknown[]; stops: unknown[] };
+    expect(after.revision).toBe(before.revision);
+    expect(after.policies).toEqual(before.policies);
+    expect(after.stops).toEqual(before.stops);
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("rejects stale, altered, and replayed stop confirmations without extra cancellation", async () => {
