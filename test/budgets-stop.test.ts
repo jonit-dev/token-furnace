@@ -162,6 +162,33 @@ describe("AgentControl", () => {
     expect(identities.has(4333)).toBe(true);
   });
 
+  it("accepts a native tree signal that already removed the verified descendants", async () => {
+    const identities = new Map<number, ProcessIdentity>([
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
+      [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 }],
+      [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321 }],
+    ]);
+    const signal = vi.fn((pid: number) => {
+      if (pid === 4321) {
+        identities.delete(4321);
+        identities.delete(4322);
+      }
+    });
+    const control = makeControl({
+      currentPid: 9000,
+      currentUid: 7,
+      signal,
+      inspect: (pid) => identities.get(pid) ?? null,
+      listProcesses: () => [...identities.values()],
+      graceMs: 0,
+      storePath: testStore(),
+    });
+    const outcome = await control.cancel(target({ pid: 4321, processStartTime: 10, exclusive: true }), true);
+    expect(outcome.status).toBe("terminated");
+    expect(signal).toHaveBeenCalledTimes(1);
+    expect(signal).toHaveBeenCalledWith(4321, "SIGKILL");
+  });
+
   it("uses the owning OpenCode session and Basic auth before aborting", async () => {
     let busy = true;
     let aborts = 0;

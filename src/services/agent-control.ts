@@ -308,7 +308,10 @@ export class AgentControl {
       if (descendants === null) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant could not be verified for process fallback." });
       this.signalProcess(target.pid, force ? "SIGKILL" : "SIGTERM");
       for (const descendant of descendants) {
-        if (!this.verifyProcessIdentity(descendant)) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant changed identity before termination." });
+        const inspected = this.inspectSafely(descendant.pid);
+        if (!inspected.available) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant identity lookup is unavailable." });
+        if (!inspected.identity) continue;
+        if (!this.verifyProcessIdentity(descendant, inspected.identity)) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "An owned descendant changed identity before termination." });
         this.signalProcess(descendant.pid, force ? "SIGKILL" : "SIGTERM");
       }
       const terminal = await this.waitForProcessExit(target, descendants);
@@ -1282,7 +1285,7 @@ function windowsProcessScript(query: string, nativeOnly = false, includeOwners =
   const owner = includeOwners
     ? "$owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ throw \"CIM owner lookup failed for PID $($_.ProcessId).\" };"
     : "$owner=$null; $sid=$null;";
-  return `$rows=@(${query}${filter} | ForEach-Object { ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } }); $rows | ConvertTo-Json -Compress`;
+  return `$ErrorActionPreference='Stop'; $rows=@(${query}${filter} | ForEach-Object { ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } }); $rows | ConvertTo-Json -Compress`;
 }
 
 function parseWindowsOutput(output: string): ProcessIdentity[] {
