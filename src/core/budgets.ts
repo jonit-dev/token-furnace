@@ -31,6 +31,7 @@ export interface BudgetMeter {
   resetAt: Date;
   observedAt: Date;
   authoritative: boolean;
+  window?: string;
 }
 
 export interface BudgetIdentity {

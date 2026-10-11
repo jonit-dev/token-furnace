@@ -149,14 +149,15 @@ injects an escalation prompt at the 4th, 7th, and 10th edit.
 
 Open the live dashboard's **Budgets** tab at `#budgets`. New installs start **Off**, which only
 observes usage. **Auto** derives percentage-points per hour from an authoritative quota and its
-reset; **Manual** accepts a positive weighted-token pace. Saving a policy does not clear measured
-usage, reservations, or emergency latches. Use **Enable enforcement** only after reviewing the
-adapter preview; unsupported native paths stay labelled **Partial coverage**.
+reset; **Manual** accepts a positive weighted-token pace or a cumulative weighted-token allowance
+with an explicit deadline. Saving a policy does not clear measured usage, reservations, or
+emergency latches. Use **Enable enforcement** only after reviewing the adapter preview; native
+coverage remains qualification-gated.
 
 Provider and model stops are separate from budgets. A stop writes its durable latch before asking a
 verified same-user adapter to cancel work. Preview, confirmation, native outcome, force escalation,
-and unlock all use the same state as the CLI. The control database lives under
-`$XDG_STATE_HOME/token-furnace/` (or `$HOME/.local/state/token-furnace/`); policy settings live under
+and unlock all use the same state as the CLI. Durable control ownership/results and budget state live
+under `$XDG_STATE_HOME/token-furnace/` (or `$HOME/.local/state/token-furnace/`); policy settings live under
 `$XDG_CONFIG_HOME/token-furnace/` (or `$HOME/.config/token-furnace/`).
 
 Native qualification must use dedicated disposable homes and authenticated upstreams. Run

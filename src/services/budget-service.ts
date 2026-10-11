@@ -24,6 +24,8 @@ export interface BudgetSourceDescriptor {
   label: string;
   installed: boolean;
   models?: string[];
+  /** Only identities observed from native telemetry or authoritative meters. */
+  providers?: string[];
 }
 
 export interface BudgetSourceStatus extends BudgetSourceDescriptor {
@@ -72,6 +74,7 @@ export interface StopPreview {
   fingerprint: string;
   scope: StopScope;
   targetIds: string[];
+  targetProof?: string;
   revision: number;
   expiresAt: string;
 }
@@ -99,6 +102,7 @@ interface StoredMeter {
   reset_at: number;
   observed_at: number;
   authoritative: number;
+  window: string | null;
 }
 
 const DEFAULT_SOURCES: BudgetSourceDescriptor[] = [
@@ -117,7 +121,8 @@ CREATE TABLE IF NOT EXISTS meters (
   used_percentage REAL NOT NULL,
   reset_at INTEGER NOT NULL,
   observed_at INTEGER NOT NULL,
-  authoritative INTEGER NOT NULL
+  authoritative INTEGER NOT NULL,
+  window TEXT
 );
 CREATE TABLE IF NOT EXISTS usage_events (
   event_id TEXT PRIMARY KEY,
@@ -130,6 +135,7 @@ CREATE INDEX IF NOT EXISTS usage_scope_at ON usage_events(scope_key, at);
 CREATE TABLE IF NOT EXISTS reservations (
   reservation_id TEXT NOT NULL,
   scope_key TEXT NOT NULL,
+  request_id TEXT,
   amount REAL NOT NULL,
   unit TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -161,6 +167,7 @@ CREATE TABLE IF NOT EXISTS stop_previews (
   fingerprint TEXT NOT NULL,
   scope_json TEXT NOT NULL,
   target_ids_json TEXT NOT NULL,
+  target_proof TEXT NOT NULL DEFAULT '',
   revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
@@ -194,6 +201,10 @@ export class BudgetService {
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 2500;");
     this.db.exec(DDL);
+    try { this.db.exec("ALTER TABLE meters ADD COLUMN window TEXT"); } catch { /* existing v1 database already has it */ }
+    try { this.db.exec("ALTER TABLE reservations ADD COLUMN request_id TEXT"); } catch { /* existing database already has it */ }
+    try { this.db.exec("ALTER TABLE stop_previews ADD COLUMN target_proof TEXT NOT NULL DEFAULT ''"); } catch { /* existing database already has it */ }
+    this.db.exec("CREATE INDEX IF NOT EXISTS reservation_request_status ON reservations(request_id, status)");
     try { chmodSync(this.dbPath, 0o600); } catch { /* best effort on Windows */ }
   }
 
@@ -238,16 +249,27 @@ export class BudgetService {
   setMeters(meters: BudgetMeter[]): void {
     this.writeTransaction(() => {
       const statement = this.db.prepare(`INSERT INTO meters
-        (id, source, provider, account, used_percentage, reset_at, observed_at, authoritative)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, source, provider, account, used_percentage, reset_at, observed_at, authoritative, window)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET source=excluded.source, provider=excluded.provider,
         account=excluded.account, used_percentage=excluded.used_percentage, reset_at=excluded.reset_at,
-        observed_at=excluded.observed_at, authoritative=excluded.authoritative`);
+        observed_at=excluded.observed_at, authoritative=excluded.authoritative, window=excluded.window`);
       for (const meter of meters) {
         statement.run(meter.id, meter.source, canonicalIdentity(meter.provider), canonicalIdentity(meter.account),
-          meter.usedPercentagePoints, meter.resetAt.getTime(), meter.observedAt.getTime(), meter.authoritative ? 1 : 0);
+          meter.usedPercentagePoints, meter.resetAt.getTime(), meter.observedAt.getTime(), meter.authoritative ? 1 : 0, meter.window ?? null);
       }
     });
+  }
+
+  observedProviders(): Map<Source, string[]> {
+    const result = new Map<Source, string[]>();
+    for (const meter of this.meters()) {
+      if (!meter.provider) continue;
+      const values = result.get(meter.source) ?? [];
+      if (!values.includes(meter.provider)) values.push(meter.provider);
+      result.set(meter.source, values.sort());
+    }
+    return result;
   }
 
   snapshot(sources: BudgetSourceDescriptor[] = DEFAULT_SOURCES): BudgetSnapshot {
@@ -264,8 +286,8 @@ export class BudgetService {
         const policy = loaded.settings.policies.find((candidate) => candidate.scope.kind === "source" && candidate.scope.source === source.source) ?? null;
         const meter = meters.find((candidate) => candidate.source === source.source) ?? null;
         const active = stops.some((stop) => stop.scope.kind === "source" && stop.scope.source === source.source);
-        const pace = policy?.mode === "auto" && meter ? autoPace(meter, now) : policy?.mode === "manual" ? policy.limit : null;
-        const allowance = policy?.mode === "auto" && meter ? pace : policy?.mode === "manual" ? policy.limit : null;
+        const pace = policy?.mode === "auto" && meterIsAdmissible(meter, now) ? autoPace(meter, now) : policy?.mode === "manual" ? policy.limit : null;
+        const allowance = policy?.mode === "auto" && meterIsAdmissible(meter, now) ? pace : policy?.mode === "manual" ? policy.limit : null;
         const blockedWork = this.blockedCount(source.source);
         const status: BudgetSourceStatus["status"] = active
           ? "Emergency stopped"
@@ -286,6 +308,7 @@ export class BudgetService {
           coverage: policy?.mode && policy.mode !== "off" ? "Partial coverage" : "Watching",
           status,
           models: source.models ?? [],
+          providers: source.providers ?? [],
         };
       }),
     };
@@ -298,6 +321,15 @@ export class BudgetService {
         .run(input.eventId, policyKey(input.scope), input.amount, input.unit ?? "tokens-total", (input.at ?? this.now()).getTime());
       return Number(result.changes) > 0;
     });
+  }
+
+  seedRecentUsage(events: Array<{ scope: BudgetScope; amount: number; eventId: string; at: Date }>): number {
+    let inserted = 0;
+    for (const event of events) {
+      if (this.recordUsage({ ...event, unit: "tokens-total" })) inserted++;
+      if (this.recordUsage({ ...event, unit: "tokens-per-hour", eventId: `${event.eventId}:hour` })) inserted++;
+    }
+    return inserted;
   }
 
   admit(input: AdmissionRequest): AdmissionDecision {
@@ -315,11 +347,11 @@ export class BudgetService {
       if (unresolved) return this.decision(input, false, "Enabled provider/model budget requires resolved identity.", null, []);
       const policies = enabled.filter((policy) => policyMatches(policy, identity));
       if (!policies.length) return this.decision(input, true, "Budget is Off.", null, []);
-      if (!Number.isFinite(input.estimatedCost) || (input.estimatedCost ?? 0) <= 0) {
-        return this.decision(input, false, "Enabled budget requires a positive estimated cost.", null, policies.map((policy) => policyKey(policy.scope)));
-      }
-      const estimatedCost = Number(input.estimatedCost);
       const matched = policies.map((policy) => policyKey(policy.scope));
+      if (input.requestId) {
+        const existing = this.db.prepare("SELECT reservation_id FROM reservations WHERE request_id = ? AND status = 'reserved' LIMIT 1").get(input.requestId) as { reservation_id: string } | undefined;
+        if (existing) return { allowed: true, reason: "Already admitted.", retryAt: null, reservationId: existing.reservation_id, matched };
+      }
       const reservations: Array<{ scopeKey: string; amount: number; unit: string }> = [];
       let retryAt: Date | null = null;
       for (const policy of policies) {
@@ -329,14 +361,23 @@ export class BudgetService {
         const meter = this.meterFor(policy, identity);
         const unit = policy.mode === "auto" ? "percentage-per-hour" : policy.unit;
         const limit = policy.mode === "auto" ? (meter ? autoPace(meter, now) : null) : policy.limit;
-        if (policy.unit === "percentage-per-hour" && !meter) {
-          return this.decision(input, false, "Percentage budget meter is unavailable.", policy.deadline, matched);
+        if ((policy.mode === "auto" || policy.unit === "percentage-per-hour") && !identity.account) {
+          return this.decision(input, false, "Enabled quota budget requires a verified account identity.", policy.deadline, matched);
+        }
+        if ((policy.mode === "auto" || policy.unit === "percentage-per-hour") && !meterIsAdmissible(meter, now)) {
+          return this.decision(input, false, "Authoritative budget meter is unavailable, stale, or unconfirmed.", policy.deadline, matched);
         }
         if (limit === null || limit === undefined) {
           return this.decision(input, false, "Budget meter is unavailable or stale.", policy.deadline, matched);
         }
         if (input.costUnit && input.costUnit !== unit) {
           return this.decision(input, false, `Estimated cost unit does not match ${unit}.`, policy.deadline, matched);
+        }
+        const estimatedCost = validCost(input.estimatedCost) && (!input.costUnit || input.costUnit === unit)
+          ? Number(input.estimatedCost)
+          : this.estimateFor(policy, identity, unit, now);
+        if (estimatedCost === null) {
+          return this.decision(input, false, "Enabled budget has no attributable recent usage to estimate this request.", policy.deadline, matched);
         }
         const key = policyKey(policy.scope);
         const start = policy.unit === "tokens-total" ? this.policyStartedAt(key) : now.getTime() - 3_600_000;
@@ -350,8 +391,8 @@ export class BudgetService {
       }
       const reservationId = randomUUID();
       for (const reservation of reservations) {
-        this.db.prepare("INSERT INTO reservations (reservation_id, scope_key, amount, unit, created_at, status) VALUES (?, ?, ?, ?, ?, 'reserved')")
-          .run(reservationId, reservation.scopeKey, reservation.amount, reservation.unit, now.getTime());
+        this.db.prepare("INSERT INTO reservations (reservation_id, scope_key, request_id, amount, unit, created_at, status) VALUES (?, ?, ?, ?, ?, ?, 'reserved')")
+          .run(reservationId, reservation.scopeKey, input.requestId ?? null, reservation.amount, reservation.unit, now.getTime());
       }
       this.logDecision(input, true, "Admitted.");
       return { allowed: true, reason: "Admitted.", retryAt: retryAt?.toISOString() ?? null, reservationId, matched };
@@ -364,33 +405,41 @@ export class BudgetService {
     });
   }
 
-  reconcile(reservationId: string, actualAmount: number, eventId = `${reservationId}:usage`): void {
-    if (!Number.isFinite(actualAmount) || actualAmount < 0) return;
+  releaseRequest(requestId: string): void {
+    if (!requestId) return;
     this.writeTransaction(() => {
-      const rows = this.db.prepare("SELECT scope_key, unit, status FROM reservations WHERE reservation_id = ?").all(reservationId) as Array<{ scope_key: string; unit: string; status: string }>;
-      for (const row of rows) {
-        if (row.status === "reserved") {
-          this.db.prepare("UPDATE reservations SET status = 'completed' WHERE reservation_id = ? AND scope_key = ?").run(reservationId, row.scope_key);
-          this.db.prepare("INSERT OR IGNORE INTO usage_events (event_id, scope_key, amount, unit, at) VALUES (?, ?, ?, ?, ?)")
-            .run(`${eventId}:${row.scope_key}`, row.scope_key, actualAmount, row.unit, this.now().getTime());
-        }
-      }
+      this.db.prepare("UPDATE reservations SET status = 'released' WHERE request_id = ? AND status = 'reserved'").run(requestId);
     });
   }
 
-  previewStop(scope: StopScope, targetIds: string[] = []): StopPreview {
+  reconcile(reservationId: string, actualAmount: number, eventId = `${reservationId}:usage`): void {
+    if (!Number.isFinite(actualAmount) || actualAmount < 0) return;
+    this.writeTransaction(() => {
+      this.reconcileRows(reservationId, actualAmount, eventId);
+    });
+  }
+
+  reconcileRequest(requestId: string, actualAmount: number, eventId: string): void {
+    if (!requestId || !Number.isFinite(actualAmount) || actualAmount < 0) return;
+    this.writeTransaction(() => {
+      const rows = this.db.prepare("SELECT DISTINCT reservation_id FROM reservations WHERE request_id = ? AND status = 'reserved'").all(requestId) as Array<{ reservation_id: string }>;
+      for (const row of rows) this.reconcileRows(row.reservation_id, actualAmount, eventId);
+    });
+  }
+
+  previewStop(scope: StopScope, targetIds: string[] = [], targetProof = ""): StopPreview {
     const normalized = normalizeScope(scope);
     const ids = [...new Set(targetIds.filter((id) => typeof id === "string" && id.length > 0))].sort();
-    const fingerprint = fingerprintOf(normalized, ids);
+    const fingerprint = fingerprintOf(normalized, ids, targetProof);
     const now = this.now();
     const preview: StopPreview = {
-      id: randomUUID(), fingerprint, scope: normalized, targetIds: ids,
+      id: randomUUID(), fingerprint, scope: normalized, targetIds: ids, targetProof,
       revision: this.settings().revision, expiresAt: new Date(now.getTime() + 5 * 60_000).toISOString(),
     };
     this.writeTransaction(() => {
       this.db.prepare(`INSERT INTO stop_previews
-        (id, fingerprint, scope_json, target_ids_json, revision, created_at, expires_at, used)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0)`).run(preview.id, fingerprint, JSON.stringify(normalized), JSON.stringify(ids), preview.revision, now.getTime(), Date.parse(preview.expiresAt));
+        (id, fingerprint, scope_json, target_ids_json, target_proof, revision, created_at, expires_at, used)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`).run(preview.id, fingerprint, JSON.stringify(normalized), JSON.stringify(ids), targetProof, preview.revision, now.getTime(), Date.parse(preview.expiresAt));
     });
     return preview;
   }
@@ -419,7 +468,7 @@ export class BudgetService {
   preview(id: string): StopPreview | null {
     if (!id) return null;
     const row = this.db.prepare("SELECT * FROM stop_previews WHERE id = ?").get(id) as {
-      id: string; fingerprint: string; scope_json: string; target_ids_json: string; revision: number; expires_at: number; used: number;
+      id: string; fingerprint: string; scope_json: string; target_ids_json: string; target_proof: string; revision: number; expires_at: number; used: number;
     } | undefined;
     if (!row || row.used || row.expires_at <= this.now().getTime()) return null;
     return {
@@ -427,6 +476,7 @@ export class BudgetService {
       fingerprint: row.fingerprint,
       scope: JSON.parse(row.scope_json) as StopScope,
       targetIds: JSON.parse(row.target_ids_json) as string[],
+      targetProof: row.target_proof,
       revision: row.revision,
       expiresAt: new Date(row.expires_at).toISOString(),
     };
@@ -473,16 +523,36 @@ export class BudgetService {
 
   private meterFor(policy: BudgetPolicy, identity: BudgetIdentity): BudgetMeter | null {
     const meters = this.meters();
+    const provider = policy.scope.kind === "source" ? identity.provider : policy.scope.provider;
     return meters.find((meter) => meter.source === identity.source &&
-      (!identity.provider || !meter.provider || canonicalIdentity(meter.provider) === canonicalIdentity(identity.provider))) ??
-      meters.find((meter) => meter.source === identity.source && (policy.scope.kind === "source" || canonicalIdentity(meter.provider) === canonicalIdentity(policy.scope.provider))) ?? null;
+      canonicalIdentity(meter.provider) === canonicalIdentity(provider) &&
+      (!identity.account || canonicalIdentity(meter.account) === canonicalIdentity(identity.account))) ?? null;
+  }
+
+  private estimateFor(policy: BudgetPolicy, _identity: BudgetIdentity, unit: string, now: Date): number | null {
+    const key = policyKey(policy.scope);
+    const rows = this.db.prepare(`SELECT amount FROM usage_events
+      WHERE scope_key = ? AND unit = ? AND at >= ? ORDER BY amount DESC LIMIT 32`)
+      .all(key, unit, now.getTime() - 86_400_000) as Array<{ amount: number }>;
+    const values = rows.map((row) => Number(row.amount)).filter((amount) => Number.isFinite(amount) && amount > 0);
+    return values.length ? values[0] : null;
+  }
+
+  private reconcileRows(reservationId: string, actualAmount: number, eventId: string): void {
+    const rows = this.db.prepare("SELECT scope_key, unit, status FROM reservations WHERE reservation_id = ?").all(reservationId) as Array<{ scope_key: string; unit: string; status: string }>;
+    for (const row of rows) {
+      if (row.status !== "reserved") continue;
+      this.db.prepare("UPDATE reservations SET status = 'completed' WHERE reservation_id = ? AND scope_key = ? AND status = 'reserved'").run(reservationId, row.scope_key);
+      this.db.prepare("INSERT OR IGNORE INTO usage_events (event_id, scope_key, amount, unit, at) VALUES (?, ?, ?, ?, ?)")
+        .run(`${eventId}:${row.scope_key}`, row.scope_key, actualAmount, row.unit, this.now().getTime());
+    }
   }
 
   private meters(): BudgetMeter[] {
     return (this.db.prepare("SELECT * FROM meters").all() as unknown as StoredMeter[]).map((row) => ({
       id: row.id, source: row.source, provider: row.provider, account: row.account,
       usedPercentagePoints: row.used_percentage,
-      resetAt: new Date(row.reset_at), observedAt: new Date(row.observed_at), authoritative: Boolean(row.authoritative),
+      resetAt: new Date(row.reset_at), observedAt: new Date(row.observed_at), authoritative: Boolean(row.authoritative), window: row.window ?? undefined,
     }));
   }
 
@@ -540,19 +610,28 @@ export class BudgetService {
   }
 }
 
+function validCost(value: number | undefined): boolean {
+  return Number.isFinite(value) && (value ?? 0) > 0;
+}
+
+function meterIsAdmissible(meter: BudgetMeter | null, now: Date): meter is BudgetMeter {
+  return Boolean(meter && meter.authoritative && meter.account && meter.window && Number.isFinite(meter.observedAt.getTime()) &&
+    meter.observedAt.getTime() <= now.getTime() && now.getTime() - meter.observedAt.getTime() <= 5 * 60_000);
+}
+
 function normalizeScope(scope: StopScope): StopScope {
   if (scope.kind === "source") return scope;
   if (scope.kind === "provider") return { kind: "provider", provider: canonicalIdentity(scope.provider)! };
   return { kind: "model", provider: canonicalIdentity(scope.provider)!, model: canonicalIdentity(scope.model)! };
 }
 
-function fingerprintOf(scope: StopScope, targetIds: string[]): string {
-  return createHash("sha256").update(JSON.stringify({ scope, targetIds })).digest("hex");
+function fingerprintOf(scope: StopScope, targetIds: string[], targetProof = ""): string {
+  return createHash("sha256").update(JSON.stringify({ scope, targetIds, targetProof })).digest("hex");
 }
 
 function stopMatches(scope: StopScope, identity: BudgetIdentity): boolean {
   if (scope.kind === "source") return scope.source === identity.source;
-  if (scope.kind === "provider") return !identity.provider || canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider);
-  return !identity.provider || !identity.model ||
+  if (scope.kind === "provider") return Boolean(identity.provider) && canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider);
+  return Boolean(identity.provider && identity.model) &&
     (canonicalIdentity(scope.provider) === canonicalIdentity(identity.provider) && canonicalIdentity(scope.model) === canonicalIdentity(identity.model));
 }

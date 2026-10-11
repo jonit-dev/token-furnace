@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { compose } from "../src/compose";
-import { main } from "../src/cli";
+import { main, runBudgetHook } from "../src/cli";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -45,5 +45,64 @@ describe("budget CLI", () => {
     const missing = await run(["budgets", "unlock", "--provider", "anthropic"]);
     expect(missing.code).toBe(2);
     expect(missing.error).toMatch(/confirm/i);
+  });
+
+  it("returns reservation IDs and reconciles attributable usage exactly once", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-hook-"));
+    roots.push(root);
+    const app = compose({ HOME: root }, { noCache: true });
+    app.budgets.savePolicies([{
+      scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 100,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    try {
+      expect(runBudgetHook(JSON.stringify({ estimatedCost: 20, costUnit: "tokens-total", requestId: "turn-1" }), app, "claude")).toBe(0);
+      const admitted = JSON.parse(output.pop()!) as { allow: boolean; reservationId: string };
+      expect(admitted.allow).toBe(true);
+      expect(admitted.reservationId).toMatch(/[0-9a-f-]{20}/);
+      expect(runBudgetHook(JSON.stringify({ phase: "complete", reservationId: admitted.reservationId, actualCost: 15, eventId: "turn-1" }), app, "claude")).toBe(0);
+      expect(runBudgetHook(JSON.stringify({ phase: "complete", reservationId: admitted.reservationId, actualCost: 15, eventId: "turn-1" }), app, "claude")).toBe(0);
+      expect(runBudgetHook(JSON.stringify({ estimatedCost: 85, costUnit: "tokens-total", requestId: "turn-2" }), app, "claude")).toBe(0);
+      expect((JSON.parse(output.pop()!) as { allow: boolean }).allow).toBe(true);
+      expect(runBudgetHook(JSON.stringify({ estimatedCost: 1, costUnit: "tokens-total", requestId: "turn-3" }), app, "claude")).toBe(0);
+      expect((JSON.parse(output.pop()!) as { allow: boolean; reason: string }).allow).toBe(false);
+    } finally {
+      process.stdout.write = original;
+      app.budgets.close();
+      app.control.close();
+    }
+  });
+
+  it("maps native Claude lifecycle payloads to the shared reservation", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-native-hook-"));
+    roots.push(root);
+    const app = compose({ HOME: root }, { noCache: true });
+    app.budgets.savePolicies([{
+      scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 10,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    try {
+      runBudgetHook(JSON.stringify({ hook_event_name: "PreToolUse", tool_use_id: "native-tool", estimatedCost: 5, costUnit: "tokens-total" }), app, "claude");
+      expect((JSON.parse(output.pop()!) as { allow: boolean }).allow).toBe(true);
+      runBudgetHook(JSON.stringify({ hook_event_name: "PostToolUse", tool_use_id: "native-tool" }), app, "claude");
+      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, reason: expect.stringMatching(/completion/i) });
+      runBudgetHook(JSON.stringify({ estimatedCost: 5, costUnit: "tokens-total", requestId: "completed-without-usage" }), app, "claude");
+      const completed = JSON.parse(output.pop()!) as { allow: boolean; reservationId: string };
+      expect(completed.allow).toBe(true);
+      runBudgetHook(JSON.stringify({ phase: "complete", completed: true, reservationId: completed.reservationId }), app, "claude");
+      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, reason: expect.stringMatching(/completion/i) });
+      runBudgetHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-session", estimatedCost: 20, costUnit: "tokens-total" }), app, "claude");
+      expect(JSON.parse(output.pop()!)).toMatchObject({ decision: "block", allow: false });
+    } finally {
+      process.stdout.write = original;
+      app.budgets.close();
+      app.control.close();
+    }
   });
 });

@@ -17,9 +17,10 @@ import type { Source, Week } from "./core/model";
 import { PROVIDERS } from "./core/providers";
 import type { BudgetScope } from "./core/budgets";
 import type { StopTargetOutcome } from "./services/budget-service";
+import { controlTargetProof } from "./services/agent-control";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { installBudgetAdapters, pendingRepairs, runFixConfig } from "./setup/agents";
-import { openCodeWeek, planWeek } from "./services/usage-client";
+import { openCodeWeek, planReading, planWeek } from "./services/usage-client";
 import { resetsSnapshot } from "./services/resets-client";
 import {
   deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
@@ -84,7 +85,7 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     port,
     close: () => new Promise((done) => {
       clearInterval(timer);
-      http.close(() => { app.budgets.close(); done(); });
+      http.close(() => { app.budgets.close(); app.control.close(); done(); });
     }),
   };
 }
@@ -206,7 +207,9 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
         return res.status(400).json({ error: "Expected a revision and a policy list." });
       }
       try {
-        return res.json(app.budgets.savePolicies(policies, expectedRevision));
+        const saved = app.budgets.savePolicies(policies, expectedRevision);
+        seedBudgetUsage(app);
+        return res.json(saved);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return res.status(/revision|stale/i.test(message) ? 409 : 400).json({ error: message });
@@ -223,18 +226,27 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
       return res.status(code === 0 ? 200 : 500).json({ ok: code === 0, output });
     }
 
+    @Post("/api/budgets/enable-preview")
+    previewBudgetAdapters(@Req() req: Request, @Res() res: Response) {
+      const denied = budgetWriteError(req, mutationToken);
+      if (denied) return res.status(denied.status).json({ error: denied.message });
+      let output = "";
+      const code = installBudgetAdapters(app.env, { apply: false }, { write: (text) => { output += text; } });
+      return res.status(code === 0 ? 200 : 500).json({ ok: code === 0, output });
+    }
+
     @Post("/api/budgets/stop-preview")
     stopPreview(@Req() req: Request, @Res() res: Response) {
       const denied = budgetWriteError(req, mutationToken);
       if (denied) return res.status(denied.status).json({ error: denied.message });
       try {
         const scope = stopScope(req.body?.scope);
-        const targets = app.control.discover(scope);
+        const control = app.control.preview(scope);
         return res.json({
-          ...app.budgets.previewStop(scope, targets.map((target) => target.id)),
-          targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, model: target.model })),
-          unverified: [],
-          collateral: [],
+          ...app.budgets.previewStop(scope, control.targets.map((target) => target.id), controlTargetProof(control.targets)),
+          targets: control.targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, account: target.account ?? null, model: target.model, pid: target.pid, processStartTime: target.processStartTime, ownerUid: target.ownerUid, executable: target.executable })),
+          unverified: control.unverified,
+          collateral: control.collateral,
         });
       } catch (error) {
         return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
@@ -248,8 +260,9 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
       const preview = app.budgets.preview(req.body?.previewId);
       if (!preview || preview.fingerprint !== req.body?.fingerprint) return res.status(409).json({ error: "Stop preview is stale or already used." });
       if (req.body?.force && req.body?.forceConfirm !== true) return res.status(400).json({ error: "Force stop requires a fresh explicit confirmation." });
-      const currentTargetIds = app.control.discover(preview.scope).map((target) => target.id).sort();
-      if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds)) {
+      const currentControl = app.control.preview(preview.scope);
+      const currentTargetIds = currentControl.targets.map((target) => target.id).sort();
+      if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds) || controlTargetProof(currentControl.targets) !== (preview.targetProof ?? controlTargetProof(currentControl.targets))) {
         return res.status(409).json({ error: "Stop preview targets changed; preview again." });
       }
       const initial: StopTargetOutcome[] = preview.targetIds.map((targetId) => ({ targetId, status: "requested" }));
@@ -384,7 +397,8 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
         return res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
       }
       const report = await build(req.query);
-      return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
+      // A fresh install has no report yet, but the control surface is still useful.
+      return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : page);
     }
   }
   return ReportController;
@@ -392,30 +406,82 @@ function reportController(app: App, options: ServeOptions, page: string, mutatio
 
 function budgetSources(app: App) {
   const models = new Map<Source, Set<string>>();
+  const providers = new Map<Source, Set<string>>();
   for (const session of app.repo.all()) {
     const sourceModels = models.get(session.source) ?? new Set<string>();
-    for (const turn of session.turns) if (turn.model.trim()) sourceModels.add(turn.model.trim());
+    const sourceProviders = providers.get(session.source) ?? new Set<string>();
+    for (const turn of session.turns) {
+      const model = turn.model.trim();
+      if (!model) continue;
+      sourceModels.add(model);
+      const slash = model.indexOf("/");
+      if (slash > 0) sourceProviders.add(model.slice(0, slash).trim().toLowerCase());
+    }
     models.set(session.source, sourceModels);
+    providers.set(session.source, sourceProviders);
+  }
+  for (const target of app.control.registered()) {
+    if (target.provider) {
+      const values = providers.get(target.source) ?? new Set<string>();
+      values.add(target.provider);
+      providers.set(target.source, values);
+    }
+  }
+  for (const [source, observed] of app.budgets.observedProviders()) {
+    const values = providers.get(source) ?? new Set<string>();
+    for (const provider of observed) values.add(provider);
+    providers.set(source, values);
   }
   return (Object.keys(PROVIDERS) as Source[]).map((source) => {
     const adapter = app.sources.find((candidate) => candidate.name === source);
-    return { source, label: PROVIDERS[source].label, installed: Boolean(adapter && existsSync(adapter.root())), models: [...(models.get(source) ?? [])].sort() };
+    return {
+      source,
+      label: PROVIDERS[source].label,
+      installed: Boolean(adapter && existsSync(adapter.root())),
+      models: [...(models.get(source) ?? [])].sort(),
+      providers: [...(providers.get(source) ?? [])].sort(),
+    };
   });
+}
+
+function seedBudgetUsage(app: App): void {
+  const events: Array<{ scope: BudgetScope; amount: number; eventId: string; at: Date }> = [];
+  for (const session of app.repo.all()) {
+    for (const [index, turn] of session.turns.entries()) {
+      const amount = turn.baseIn + turn.cacheRead + turn.cacheWrite + turn.output;
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      const eventId = `transcript:${session.path}:${index}:${turn.when.getTime()}`;
+      events.push({ scope: { kind: "source", source: session.source }, amount, eventId, at: turn.when });
+      const slash = turn.model.indexOf("/");
+      if (slash > 0 && slash < turn.model.length - 1) {
+        const provider = turn.model.slice(0, slash);
+        const model = turn.model.slice(slash + 1);
+        events.push({ scope: { kind: "provider", provider }, amount, eventId: `${eventId}:provider`, at: turn.when });
+        events.push({ scope: { kind: "model", provider, model }, amount, eventId: `${eventId}:model`, at: turn.when });
+      }
+    }
+  }
+  if (events.length) app.budgets.seedRecentUsage(events);
 }
 
 async function refreshBudgetMeters(app: App, network: boolean): Promise<void> {
   const now = app.now();
   const [plan, open] = await Promise.all([
-    planWeek(app.env, now, network),
+    planReading(app.env, now, network),
     openCodeWeek(app.env, now, network),
   ]);
-  const codex = app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
+  const codex = app.sources.find((source) => source.name === "codex")?.weekReading?.(now)
+    ?? app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
   const meters = [
-    plan ? { id: "anthropic:weekly", source: "claude" as const, provider: "anthropic", account: null, usedPercentagePoints: plan.used, resetAt: plan.resets, observedAt: now, authoritative: true } : null,
-    codex ? { id: "openai:weekly", source: "codex" as const, provider: "openai", account: null, usedPercentagePoints: codex.used, resetAt: codex.resets, observedAt: now, authoritative: true } : null,
-    open ? { id: "opencode-go:weekly", source: "opencode" as const, provider: "opencode-go", account: null, usedPercentagePoints: open.used, resetAt: open.resets, observedAt: now, authoritative: true } : null,
+    plan ? { id: "anthropic:weekly", source: "claude" as const, provider: "anthropic", account: plan.account ?? null, usedPercentagePoints: plan.used, resetAt: plan.resets, observedAt: validObservedAt(plan.observedAt), authoritative: plan.authoritative ?? true, window: plan.window } : null,
+    codex ? { id: "openai:weekly", source: "codex" as const, provider: "openai", account: codex.account ?? null, usedPercentagePoints: codex.used, resetAt: codex.resets, observedAt: validObservedAt(codex.observedAt), authoritative: codex.authoritative ?? true, window: codex.window } : null,
+    open ? { id: "opencode-go:weekly", source: "opencode" as const, provider: "opencode-go", account: open.account ?? null, usedPercentagePoints: open.used, resetAt: open.resets, observedAt: validObservedAt(open.observedAt), authoritative: open.authoritative ?? true, window: open.window } : null,
   ].filter((meter): meter is NonNullable<typeof meter> => meter !== null);
   if (meters.length) app.budgets.setMeters(meters);
+}
+
+function validObservedAt(value: Date | undefined): Date {
+  return value && Number.isFinite(value.getTime()) ? value : new Date(0);
 }
 
 function budgetWriteError(req: Request, mutationToken: string): { status: number; message: string } | null {

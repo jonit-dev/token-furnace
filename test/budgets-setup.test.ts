@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { installBudgetAdapters } from "../src/setup/agents";
+import { installBudgetAdapters, rollbackBudgetAdapters } from "../src/setup/agents";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -25,7 +25,12 @@ describe("budget adapter setup", () => {
     expect(after.hooks.PreToolUse).toEqual(expect.arrayContaining(before.hooks.PreToolUse));
     expect(JSON.stringify(after)).toContain("hook budget");
     expect(existsSync(join(claude, "settings.json.token-furnace-budget-backup"))).toBe(true);
-    expect(readFileSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"), "utf8")).toContain("stdin: new Blob");
+    expect(readFileSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"), "utf8")).toMatch(/stdin: new Blob|hasUsage/);
+    expect(JSON.parse(readFileSync(join(root, ".codex", "hooks.json"), "utf8")).hooks.UserPromptSubmit).toHaveLength(1);
+    expect(rollbackBudgetAdapters({ HOME: root }, { write: () => undefined })).toBe(0);
+    expect(readFileSync(join(claude, "settings.json"), "utf8")).toBe(JSON.stringify(before));
+    expect(existsSync(join(root, ".codex", "hooks.json"))).toBe(false);
+    expect(existsSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"))).toBe(false);
     expect(output.join("")).toMatch(/Claude|Partial/);
   });
 

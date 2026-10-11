@@ -42,7 +42,7 @@ export function compose(env: Env = process.env, opts?: { noCache?: boolean }): A
     get budgets() {
       return budgets ??= new BudgetService(effective);
     },
-    control: new AgentControl(),
+    control: new AgentControl({ env: effective }),
     now: () => new Date(effective.TOKEN_FURNACE_NOW || Date.now()),
   };
 }

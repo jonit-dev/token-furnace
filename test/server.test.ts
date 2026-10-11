@@ -45,6 +45,24 @@ function get(path: string, host = `127.0.0.1:${live.port}`): Promise<{ status: n
 }
 
 describe("serve", () => {
+  it("serves the Budgets application on a first run with no transcript history", async () => {
+    const emptyHome = mkdtempSync(join(tmpdir(), "tf-server-empty-"));
+    const emptyApp = compose({ HOME: emptyHome, XDG_CONFIG_HOME: join(emptyHome, "config"), XDG_STATE_HOME: join(emptyHome, "state") }, { noCache: true });
+    const emptyServer = await startServer(emptyApp, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    try {
+      let body = "";
+      for (let attempt = 0; attempt < 100 && !body.includes("Budgets"); attempt++) {
+        body = await (await fetch(`${emptyServer.url}/`)).text();
+        if (!body.includes("Budgets")) await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(body).toContain("Budgets");
+      expect(body).not.toContain("No assistant turns.");
+    } finally {
+      await emptyServer.close();
+      rmSync(emptyHome, { recursive: true, force: true });
+    }
+  });
+
   it("binds 127.0.0.1 only: the LAN address on that port is refused", async () => {
     const lan = Object.values(networkInterfaces())
       .flat()

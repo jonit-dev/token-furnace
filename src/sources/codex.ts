@@ -212,6 +212,10 @@ export class CodexSource implements AgentSource {
    * often a non-subscription (eval/tooling) session that logs no rate_limits at all.
    */
   week(now: Date): Week | null {
+    return this.weekReading(now);
+  }
+
+  weekReading(now: Date): Week | null {
     const files = [...this.files()].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 200);
     for (const file of files) {
       for (const line of tail(file.path, file.size).reverse()) {
@@ -224,10 +228,17 @@ export class CodexSource implements AgentSource {
         const resets = epoch(week?.resets_at);
         if (resets === null) continue;
         if (resets <= now.getTime()) break; // this file's newest reading ended; try an older one
+        const observedAt = parseTime(record?.timestamp) ?? new Date(file.mtimeMs);
+        const used = Number(week.used_percent);
+        if (!Number.isFinite(used) || !Number.isFinite(observedAt.getTime())) continue;
         return {
           start: new Date(resets - 7 * 86_400_000),
           resets: new Date(resets),
-          used: Number(week.used_percent),
+          used,
+          observedAt,
+          window: "7d",
+          account: typeof limits?.account_id === "string" ? limits.account_id : null,
+          authoritative: true,
         };
       }
     }

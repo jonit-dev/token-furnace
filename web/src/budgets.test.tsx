@@ -11,8 +11,8 @@ const snapshot = {
   stops: [],
   error: null,
   sources: [
-    { source: "claude", label: "Claude Code", installed: true, models: ["claude-opus"], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
-    { source: "codex", label: "Codex", installed: true, models: ["gpt-5"], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
+    { source: "claude", label: "Claude Code", installed: true, providers: ["anthropic"], models: ["claude-opus"], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
+    { source: "codex", label: "Codex", installed: true, providers: ["openai"], models: ["gpt-5"], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
     { source: "opencode", label: "OpenCode", installed: false, models: [], policy: null, meter: null, pace: null, allowance: null, blockedWork: 0, coverage: "Watching", status: "Watching" },
   ],
 };
@@ -58,8 +58,8 @@ describe("Budgets", () => {
   it("opens a separate provider stop confirmation", async () => {
     render(<Budgets />);
     const card = (await screen.findByText("Claude Code")).closest("section")!;
-    fireEvent.click(within(card).getByRole("button", { name: "Stop Claude Code provider" }));
-    expect(screen.getByRole("dialog", { name: "Stop Claude Code provider" })).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: "Stop all Claude Code" }));
+    expect(screen.getByRole("dialog", { name: "Stop all Claude Code" })).toBeTruthy();
     expect(screen.getByText(/does not change your budget policy/i)).toBeTruthy();
   });
 

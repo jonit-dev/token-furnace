@@ -19,7 +19,7 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
-import type { ControlOutcome } from "./services/agent-control";
+import { controlTargetProof, type ControlOutcome } from "./services/agent-control";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
 
@@ -30,6 +30,7 @@ const USAGE = `Usage: token-furnace [days] [options]
        token-furnace hook churn
        token-furnace hook budget [--source <source>]
        token-furnace budgets status
+       token-furnace budgets enable --confirm [--rollback]
        token-furnace budgets stop --provider <id> [--confirm] [--force --force-confirm]
        token-furnace budgets stop --model <provider/model> [--confirm] [--force --force-confirm]
        token-furnace budgets unlock --provider <id> --confirm
@@ -220,12 +221,12 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
     args: argv.slice(1), allowPositionals: true,
     options: {
       provider: { type: "string" }, model: { type: "string" }, source: { type: "string" },
-      confirm: { type: "boolean" }, force: { type: "boolean" }, "force-confirm": { type: "boolean" },
+      confirm: { type: "boolean" }, rollback: { type: "boolean" }, force: { type: "boolean" }, "force-confirm": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
   if (parsed.values.help) {
-    process.stdout.write("Usage: token-furnace budgets status | enable --confirm | stop --provider <id> [--confirm] | stop --model <provider/model> [--confirm] | unlock --provider <id> --confirm\n");
+    process.stdout.write("Usage: token-furnace budgets status | enable --confirm [--rollback] | stop --provider <id> [--confirm] | stop --model <provider/model> [--confirm] | unlock --provider <id> --confirm\n");
     return 0;
   }
   const scope = budgetScope(parsed.values.provider, parsed.values.model, parsed.values.source);
@@ -238,7 +239,7 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
       process.stderr.write("Refusing to enable enforcement without --confirm.\n");
       return 2;
     }
-    return installBudgetAdapters(app.env, { apply: true }, process.stdout);
+    return installBudgetAdapters(app.env, { apply: true, rollback: Boolean(parsed.values.rollback) }, process.stdout);
   }
   if ((command !== "stop" && command !== "unlock") || !scope) {
     process.stderr.write("Usage: token-furnace budgets stop|unlock --provider <id> | --model <provider/model>\n");
@@ -253,18 +254,20 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
     process.stdout.write(`${JSON.stringify({ ok: true, scope })}\n`);
     return 0;
   }
-  const targets = app.control.discover(scope);
-  const preview = app.budgets.previewStop(scope, targets.map((target) => target.id));
+  const controlPreview = app.control.preview(scope);
+  const targets = controlPreview.targets;
+  const preview = app.budgets.previewStop(scope, targets.map((target) => target.id), controlTargetProof(targets));
   if (!parsed.values.confirm) {
-    process.stdout.write(`${JSON.stringify({ action: "preview", ...preview, targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, model: target.model })) })}\n`);
+    process.stdout.write(`${JSON.stringify({ action: "preview", ...preview, targets: targets.map((target) => ({ id: target.id, source: target.source, provider: target.provider, account: target.account ?? null, model: target.model, pid: target.pid, processStartTime: target.processStartTime, ownerUid: target.ownerUid, executable: target.executable })), unverified: controlPreview.unverified, collateral: controlPreview.collateral })}\n`);
     return 0;
   }
   if (parsed.values.force && !parsed.values["force-confirm"]) {
     process.stderr.write("Force stop requires --force-confirm.\n");
     return 2;
   }
-  const currentTargetIds = app.control.discover(scope).map((target) => target.id).sort();
-  if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds)) {
+  const currentTargets = app.control.preview(scope).targets;
+  const currentTargetIds = currentTargets.map((target) => target.id).sort();
+  if (JSON.stringify(currentTargetIds) !== JSON.stringify(preview.targetIds) || controlTargetProof(currentTargets) !== (preview.targetProof ?? controlTargetProof(currentTargets))) {
     process.stderr.write("Stop preview targets changed; preview again.\n");
     return 2;
   }
@@ -285,7 +288,7 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
   return updated.status === "complete" ? 0 : 1;
 }
 
-function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
+export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
   let event: Record<string, unknown> = {};
   try { event = JSON.parse(stdin) as Record<string, unknown>; } catch {
     process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Malformed budget hook input." }));
@@ -296,13 +299,40 @@ function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number
     : app.env.TOKEN_FURNACE_SOURCE === "claude" || app.env.TOKEN_FURNACE_SOURCE === "codex" || app.env.TOKEN_FURNACE_SOURCE === "opencode" ? app.env.TOKEN_FURNACE_SOURCE : null);
   const provider = stringValue(event.provider ?? event.providerID ?? event.provider_id);
   const model = stringValue(event.model ?? event.modelID ?? event.model_id);
+  const hookEvent = stringValue(event.hook_event_name ?? event.hookEventName ?? event.eventName);
+  const phase = stringValue(event.phase ?? event.lifecycle) ?? (hookEvent === "PostToolUse" ? "complete" : hookEvent === "Stop" || hookEvent === "SessionEnd" ? "abandon" : "start");
+  const reservationId = stringValue(event.reservationId ?? event.reservation_id);
+  const requestId = stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.session_id);
+  const identity = source ? { source, provider, model, account: stringValue(event.account ?? event.accountId ?? event.account_id) } : null;
+  if (identity) registerHookTarget(app, event, identity);
+  if ((reservationId || requestId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
+    const amount = usageAmount(event);
+    if (amount !== null && (phase === "complete" || phase === "completed" || phase === "reconcile")) {
+      const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? requestId}:${phase}`;
+      if (reservationId) app.budgets.reconcile(reservationId, amount, eventId);
+      else app.budgets.reconcileRequest(requestId!, amount, eventId);
+    } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
+      if (reservationId) app.budgets.release(reservationId);
+      else app.budgets.releaseRequest(requestId!);
+    } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || requestId)) {
+      if (reservationId) app.budgets.release(reservationId);
+      else app.budgets.releaseRequest(requestId!);
+      process.stdout.write(JSON.stringify({ decision: "allow", allow: true, reason: "Native tool completion observed; no attributable usage was available.", retryAt: null, reservationId }));
+      return 0;
+    } else {
+      process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Completion has no attributable usage telemetry.", retryAt: null, reservationId }));
+      return 0;
+    }
+    process.stdout.write(JSON.stringify({ decision: "allow", allow: true, reason: "Reservation reconciled.", retryAt: null, reservationId }));
+    return 0;
+  }
   const state = app.budgets.snapshot();
   const decision = source
     ? app.budgets.admit({
-        identity: { source, provider, model },
-        estimatedCost: numberValue(event.estimatedCost ?? event.estimated_cost ?? event.cost) ?? 1,
+        identity: identity!,
+        estimatedCost: numberValue(event.estimatedCost ?? event.estimated_cost ?? event.cost) ?? undefined,
         costUnit: event.costUnit === "percentage-per-hour" || event.costUnit === "tokens-per-hour" || event.costUnit === "tokens-total" ? event.costUnit : undefined,
-        requestId: stringValue(event.requestId ?? event.request_id) ?? undefined,
+      requestId: requestId ?? undefined,
       })
     : state.policies.some((policy) => policy.mode !== "off") || state.stops.length > 0
       ? { allowed: false, reason: "Budget hook input has no verified source.", retryAt: null, reservationId: null, matched: [] }
@@ -312,10 +342,56 @@ function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number
     allow: decision.allowed,
     reason: decision.reason,
     retryAt: decision.retryAt,
-    ...(decision.allowed ? {} : { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } }),
+    reservationId: decision.reservationId,
+    ...(decision.allowed ? {} : hookEvent === "UserPromptSubmit"
+      ? { decision: "block", reason: decision.reason }
+      : { hookSpecificOutput: { hookEventName: hookEvent ?? "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } }),
   };
   process.stdout.write(JSON.stringify(body));
   return 0;
+}
+
+function registerHookTarget(app: App, event: Record<string, unknown>, identity: { source: Source; provider: string | null; model: string | null; account: string | null }): void {
+  const pid = numberValue(event.pid ?? event.processId ?? event.process_id) ?? process.ppid;
+  const observed = app.control.processIdentity(pid);
+  const processStartTime = numberValue(event.processStartTime ?? event.process_start_time ?? event.startTime) ?? observed?.processStartTime ?? null;
+  const ownerUid = numberValue(event.ownerUid ?? event.owner_uid ?? event.uid) ?? observed?.ownerUid ?? null;
+  if (!pid || processStartTime === null || ownerUid === null) return;
+  const nativeKind = identity.source === "opencode" ? "opencode" : identity.source === "codex" ? "codex" : undefined;
+  const endpoint = stringValue(event.nativeEndpoint ?? event.native_endpoint ?? event.serverUrl ?? event.server_url);
+  const sessionId = stringValue(event.sessionId ?? event.session_id);
+  app.control.register({
+    id: sessionId ?? `${identity.source}:${pid}:${processStartTime}`,
+    source: identity.source,
+    provider: identity.provider,
+    account: identity.account,
+    model: identity.model,
+    pid,
+    processStartTime,
+    ownerUid,
+    executable: stringValue(event.executable ?? event.executablePath ?? event.executable_path) ?? observed?.executable ?? null,
+    sessionId,
+    native: nativeKind && endpoint ? {
+      kind: nativeKind,
+      endpoint,
+      sessionId: stringValue(event.nativeSessionId ?? event.native_session_id) ?? sessionId ?? undefined,
+      threadId: stringValue(event.threadId ?? event.thread_id ?? event.session_id) ?? undefined,
+      turnId: stringValue(event.turnId ?? event.turn_id) ?? undefined,
+    } : undefined,
+    exclusive: event.exclusive === true,
+  });
+}
+
+function usageAmount(event: Record<string, unknown>): number | null {
+  const direct = numberValue(event.actualCost ?? event.actual_cost ?? event.tokens ?? event.weightedTokens ?? event.weighted_tokens);
+  if (direct !== null && direct >= 0) return direct;
+  const usage = event.usage ?? (event.tool_response && typeof event.tool_response === "object" ? (event.tool_response as Record<string, unknown>).usage : null);
+  if (!usage || typeof usage !== "object") return null;
+  const record = usage as Record<string, unknown>;
+  const values = ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "cached_input_tokens", "cachedInputTokens"]
+    .map((key) => numberValue(record[key]) ?? 0);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return total > 0 ? total : null;
 }
 
 function budgetScope(provider: string | undefined, model: string | undefined, source: string | undefined): BudgetScope | null {
@@ -330,9 +406,33 @@ function budgetScope(provider: string | undefined, model: string | undefined, so
 }
 
 function budgetSources(app: App) {
+  const models = new Map<Source, Set<string>>();
+  const providers = new Map<Source, Set<string>>();
+  for (const session of app.repo.all()) {
+    const sourceModels = models.get(session.source) ?? new Set<string>();
+    const sourceProviders = providers.get(session.source) ?? new Set<string>();
+    for (const turn of session.turns) {
+      if (turn.model.trim()) sourceModels.add(turn.model.trim());
+      const slash = turn.model.indexOf("/");
+      if (slash > 0) sourceProviders.add(turn.model.slice(0, slash).trim().toLowerCase());
+    }
+    models.set(session.source, sourceModels);
+    providers.set(session.source, sourceProviders);
+  }
+  for (const target of app.control.registered()) {
+    if (!target.provider) continue;
+    const values = providers.get(target.source) ?? new Set<string>();
+    values.add(target.provider);
+    providers.set(target.source, values);
+  }
+  for (const [source, observed] of app.budgets.observedProviders()) {
+    const values = providers.get(source) ?? new Set<string>();
+    for (const provider of observed) values.add(provider);
+    providers.set(source, values);
+  }
   return (Object.keys(PROVIDERS) as Source[]).map((source) => {
     const adapter = app.sources.find((candidate) => candidate.name === source);
-    return { source, label: PROVIDERS[source].label, installed: Boolean(adapter && existsSync(adapter.root())), models: [] };
+    return { source, label: PROVIDERS[source].label, installed: Boolean(adapter && existsSync(adapter.root())), models: [...(models.get(source) ?? [])].sort(), providers: [...(providers.get(source) ?? [])].sort() };
   });
 }
 

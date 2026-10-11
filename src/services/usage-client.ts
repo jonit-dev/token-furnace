@@ -27,25 +27,34 @@ export function usageCachePath(env: Env): string {
  * reading. No login on the machine means no call.
  */
 export async function planWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
+  return planReading(env, now, network);
+}
+
+/** The subscription window plus the cache observation metadata used by Auto admission. */
+export async function planReading(env: Env, now: Date, network: boolean): Promise<Week | null> {
   const at = now.getTime() / 1000;
   const path = usageCachePath(env);
   const saved = readJson(path);
   let data = saved?.seven_day ?? null;
+  let observedAt = finiteEpoch(saved?.fetched);
+  let account = typeof saved?.account === "string" ? saved.account : null;
   const stale = !data || at - (saved?.fetched ?? 0) >= REUSE_SECONDS;
   if (network && stale && at - lastTry >= RETRY_SECONDS) {
-    const token = accessToken(env);
-    if (token) {
+    const credentials = accessCredentials(env);
+    if (credentials?.token) {
       lastTry = at;
-      const fresh = await fetchWeek(token);
+      const fresh = await fetchWeek(credentials.token);
       if (fresh) {
         data = fresh;
+        observedAt = at;
+        account = credentials.account;
         if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0")) {
-          writeJson(path, { fetched: at, seven_day: data });
+          writeJson(path, { fetched: at, account, window: "7d", seven_day: data });
         }
       }
     }
   }
-  return toWeek(data, now);
+  return toWeek(data, now, observedAt, account);
 }
 
 async function fetchWeek(token: string): Promise<Record<string, any> | null> {
@@ -63,7 +72,7 @@ async function fetchWeek(token: string): Promise<Record<string, any> | null> {
 }
 
 /** The Claude Code login token: the credentials file, else the macOS Keychain. burn.py:881 */
-function accessToken(env: Env): string | null {
+function accessCredentials(env: Env): { token: string; account: string | null } | null {
   let creds: string | null = null;
   const home = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
   try {
@@ -80,14 +89,18 @@ function accessToken(env: Env): string | null {
     }
   }
   try {
-    return (JSON.parse(creds).claudeAiOauth.accessToken as string) ?? null;
+    const oauth = JSON.parse(creds).claudeAiOauth;
+    const token = typeof oauth?.accessToken === "string" ? oauth.accessToken : "";
+    if (!token) return null;
+    const account = [oauth.accountUuid, oauth.accountUUID, oauth.accountId].find((value: unknown) => typeof value === "string" && value.trim());
+    return { token, account: typeof account === "string" ? account : null };
   } catch {
     return null;
   }
 }
 
 /** The endpoint's reading as a Week: epoch seconds or an ISO string, and only while it runs. */
-function toWeek(data: Record<string, any> | null, now: Date): Week | null {
+function toWeek(data: Record<string, any> | null, now: Date, observedSeconds = Number.NaN, account: string | null = null): Week | null {
   if (!data) return null;
   const resets =
     typeof data.resets_at === "number"
@@ -98,7 +111,14 @@ function toWeek(data: Record<string, any> | null, now: Date): Week | null {
   if (!resets || Number.isNaN(resets.getTime()) || resets <= now) return null;
   const used = Number(data.utilization);
   if (!Number.isFinite(used)) return null;
-  return { start: new Date(resets.getTime() - 7 * 86_400_000), resets, used };
+  return {
+    start: new Date(resets.getTime() - 7 * 86_400_000), resets, used,
+    observedAt: new Date(Number.isFinite(observedSeconds) ? observedSeconds * 1000 : 0), window: "7d", account, authoritative: true,
+  };
+}
+
+function finiteEpoch(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : Number.NaN;
 }
 
 function readJson(path: string): Record<string, any> | null {
@@ -119,7 +139,7 @@ function writeJson(path: string, value: unknown): void {
   }
 }
 
-const goReadings = new Map<string, { fetched: number; lastTry: number; data: Record<string, any> | null }>();
+const goReadings = new Map<string, { fetched: number; lastTry: number; account: string | null; data: Record<string, any> | null }>();
 
 /** Go supplies its actual weekly meter; local token totals only calibrate the burn estimate. */
 export async function openCodeWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
@@ -127,12 +147,14 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
   const path = join(dirname(usageCachePath(env)), "opencode-usage.json");
   const key = source.base();
   const saved = readJson(path);
-  const reading = goReadings.get(key) ?? { fetched: saved?.fetched ?? 0, lastTry: 0,
+  const reading = goReadings.get(key) ?? { fetched: saved?.fetched ?? Number.NaN, lastTry: 0,
+    account: typeof saved?.account === "string" ? saved.account : null,
     data: saved?.source === key ? saved?.seven_day ?? null : null };
   const at = now.getTime() / 1000;
   if (network && (!reading.data || at - reading.fetched >= REUSE_SECONDS) && at - reading.lastTry >= RETRY_SECONDS) {
     const auth = jsonAuth(source.readFile("auth.json"));
-    const token = env.OPENCODE_API_KEY || auth?.["opencode-go"]?.key;
+    const providerAuth = auth?.["opencode-go"];
+    const token = env.OPENCODE_API_KEY || providerAuth?.key;
     if (typeof token === "string" && token) {
       reading.lastTry = at;
       goReadings.set(key, reading);
@@ -148,15 +170,17 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
             const data = { utilization: weekly.percent, resets_at: weekly.resetsAt };
             if (toWeek(data, now)) {
               reading.data = data; reading.fetched = at;
+              const account = providerAuth?.accountId ?? providerAuth?.account ?? providerAuth?.id;
+              reading.account = typeof account === "string" && account.trim() ? account : null;
               if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0"))
-                writeJson(path, { source: key, fetched: at, seven_day: data });
+                writeJson(path, { source: key, fetched: at, account: reading.account, window: "7d", seven_day: data });
             }
           }
         }
       } catch { /* Keep the last unexpired reading when offline or rate limited. */ }
     }
   }
-  return toWeek(reading.data, now);
+  return toWeek(reading.data, now, reading.fetched, reading.account);
 }
 
 function jsonAuth(text: string | null): Record<string, any> | null {

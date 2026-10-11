@@ -87,14 +87,14 @@ describe("BudgetService", () => {
   it("uses the authoritative reset window for Auto and reserves overlapping admissions", () => {
     const { service } = setup();
     service.setMeters([{
-      id: "anthropic:weekly", source: "claude", provider: "anthropic", account: null,
-      usedPercentagePoints: 28, resetAt: new Date("2026-10-15T12:00:00.000Z"), observedAt: now, authoritative: true,
+      id: "anthropic:weekly", source: "claude", provider: "anthropic", account: "account-1",
+      usedPercentagePoints: 28, resetAt: new Date("2026-10-15T12:00:00.000Z"), observedAt: now, authoritative: true, window: "7d",
     } satisfies BudgetMeter]);
     service.savePolicies([{
       scope: { kind: "source", source: "claude" }, mode: "auto", unit: "percentage-per-hour", limit: null, deadline: null,
     }], 0);
-    expect(service.admit({ identity: { source: "claude", provider: "anthropic", model: "claude-opus" }, estimatedCost: 0.59, costUnit: "percentage-per-hour", now }).allowed).toBe(true);
-    expect(service.admit({ identity: { source: "claude", provider: "anthropic", model: "claude-opus" }, estimatedCost: 0.02, costUnit: "percentage-per-hour", now }).allowed).toBe(false);
+    expect(service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" }, estimatedCost: 0.59, costUnit: "percentage-per-hour", now }).allowed).toBe(true);
+    expect(service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" }, estimatedCost: 0.02, costUnit: "percentage-per-hour", now }).allowed).toBe(false);
   });
 
   it("blocks an expired cumulative policy instead of silently granting a new interval", () => {

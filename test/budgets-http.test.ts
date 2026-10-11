@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,6 +25,27 @@ async function boot() {
 }
 
 describe("budget HTTP controls", () => {
+  it("preserves a cached meter observation time and makes stale Auto unavailable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-stale-"));
+    roots.push(root);
+    const cache = join(root, "cache", "token-furnace");
+    mkdirSync(cache, { recursive: true });
+    const now = Date.now();
+    const observed = new Date(now - 6 * 60_000);
+    writeFileSync(join(cache, "usage.json"), JSON.stringify({ fetched: observed.getTime() / 1000, account: "account-1", seven_day: { utilization: 40, resets_at: now / 1000 + 3 * 86_400 } }));
+    const app = compose({ HOME: root, XDG_CACHE_HOME: join(root, "cache"), XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state") }, { noCache: true });
+    const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    servers.push(server);
+    const initial = await (await fetch(`${server.url}/api/budgets`)).json() as { mutationToken: string; revision: number; sources: Array<{ source: string; meter: { observedAt: string } | null }> };
+    const claude = initial.sources.find((source) => source.source === "claude")!;
+    expect(new Date(claude.meter!.observedAt).getTime()).toBe(observed.getTime());
+    const headers = { "content-type": "application/json", "x-token-furnace-mutation": initial.mutationToken, origin: server.url };
+    const saved = await fetch(`${server.url}/api/budgets`, { method: "POST", headers, body: JSON.stringify({ expectedRevision: initial.revision, policies: [{ scope: { kind: "source", source: "claude" }, mode: "auto", unit: "percentage-per-hour", limit: null, deadline: null }] }) });
+    expect(saved.status).toBe(200);
+    const after = await (await fetch(`${server.url}/api/budgets`)).json() as { sources: Array<{ source: string; status: string }> };
+    expect(after.sources.find((source) => source.source === "claude")?.status).toBe("Usage unavailable");
+  });
+
   it("returns all source controls and requires the same-origin mutation token", async () => {
     const { server, initial, body } = await boot();
     expect(initial.status).toBe(200);

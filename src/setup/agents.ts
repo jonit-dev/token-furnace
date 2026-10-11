@@ -9,6 +9,7 @@ import {
   readlinkSync,
   renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -838,10 +839,11 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
 /** Install only the native adapters that can be edited without replacing user-owned config. */
 export function installBudgetAdapters(
   env: Env = process.env,
-  options: { apply?: boolean } = {},
+  options: { apply?: boolean; rollback?: boolean } = {},
   out: { write(text: string): unknown } = process.stdout,
 ): number {
   const apply = Boolean(options.apply);
+  if (options.rollback) return rollbackBudgetAdapters(env, out);
   const home = env.HOME || homedir();
   const claudeDir = env.CLAUDE_CONFIG_DIR || join(home, ".claude");
   const settingsPath = join(claudeDir, "settings.json");
@@ -860,9 +862,11 @@ export function installBudgetAdapters(
     }
   }
   const hooks = (settings.hooks ??= {}) as Record<string, any>;
-  if (hooks.PreToolUse !== undefined && !Array.isArray(hooks.PreToolUse)) {
-    out.write(`Budget adapters: ${settingsPath} has a non-array PreToolUse hook list — left untouched.\n`);
-    return 1;
+  for (const eventName of ["PreToolUse", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
+    if (hooks[eventName] !== undefined && !Array.isArray(hooks[eventName])) {
+      out.write(`Budget adapters: ${settingsPath} has a non-array ${eventName} hook list — left untouched.\n`);
+      return 1;
+    }
   }
   const preToolUse = (hooks.PreToolUse ??= []) as any[];
   const already = preToolUse.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook: any) => hook?.command === budgetCommand));
@@ -871,8 +875,8 @@ export function installBudgetAdapters(
     const after = JSON.stringify(settings, null, 2) + "\n";
     if (apply) {
       mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 });
-      if (original !== null && !existsSync(`${settingsPath}.token-furnace-budget-backup`)) {
-        writeFileSync(`${settingsPath}.token-furnace-budget-backup`, original, { mode: 0o600 });
+      if (!existsSync(`${settingsPath}.token-furnace-budget-backup`)) {
+        writeFileSync(`${settingsPath}.token-furnace-budget-backup`, original ?? "{\"__token_furnace_missing\":true}\n", { mode: 0o600 });
       }
       writeFileSync(settingsPath, after, { mode: 0o600 });
       try { chmodSync(settingsPath, 0o600); } catch { /* best effort on Windows */ }
@@ -882,6 +886,24 @@ export function installBudgetAdapters(
     }
   } else {
     out.write("Budget adapters: Claude PreToolUse already wired.\n");
+  }
+
+  for (const eventName of ["UserPromptSubmit", "PostToolUse"]) {
+    const list = (hooks[eventName] ??= []) as any[];
+    if (!list.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook: any) => hook?.command === budgetCommand))) {
+      list.push({ hooks: [{ type: "command", command: budgetCommand }] });
+      if (apply) {
+        mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 });
+        if (!existsSync(`${settingsPath}.token-furnace-budget-backup`)) {
+          writeFileSync(`${settingsPath}.token-furnace-budget-backup`, original ?? "{\"__token_furnace_missing\":true}\n", { mode: 0o600 });
+        }
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+        try { chmodSync(settingsPath, 0o600); } catch { /* best effort on Windows */ }
+        out.write(`Budget adapters: Claude ${eventName} wired to ${budgetCommand}.\n`);
+      } else {
+        out.write(`Budget adapters: would wire Claude ${eventName} to ${budgetCommand}.\n`);
+      }
+    }
   }
 
   const openCodeConfig = env.OPENCODE_CONFIG_DIR || join(home, ".config", "opencode");
@@ -895,13 +917,98 @@ export function installBudgetAdapters(
   } else {
     out.write("Budget adapters: would install the OpenCode tool.execute.before plugin.\n");
   }
-  out.write("Budget adapters: Partial coverage — Codex installed-version hook wiring needs qualification.\n");
+  const codexCode = installCodexBudgetHook(env, apply, out);
+  if (codexCode !== 0) return codexCode;
+  out.write("Budget adapters: Codex prompt and Agent-tool hooks installed; native coverage remains qualification-gated.\n");
+  return 0;
+}
+
+export function rollbackBudgetAdapters(env: Env = process.env, out: { write(text: string): unknown } = process.stdout): number {
+  const home = env.HOME || homedir();
+  const claudePath = join(env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "settings.json");
+  const codexPath = join(env.CODEX_HOME || join(home, ".codex"), "hooks.json");
+  const restored: string[] = [];
+  for (const path of [claudePath, codexPath]) {
+    const backup = `${path}.token-furnace-budget-backup`;
+    if (!existsSync(backup)) continue;
+    const saved = readFileSync(backup, "utf8");
+    if (saved.trim() === "{\"__token_furnace_missing\":true}") {
+      if (existsSync(path)) unlinkSync(path);
+    } else {
+      copyFileSync(backup, path);
+      try { chmodSync(path, 0o600); } catch { /* best effort on Windows */ }
+    }
+    restored.push(path);
+  }
+  const pluginPath = join(env.OPENCODE_CONFIG_DIR || join(home, ".config", "opencode"), "plugins", "token-furnace-budget.ts");
+  if (existsSync(pluginPath)) {
+    const text = readFileSync(pluginPath, "utf8");
+    if (text.includes("Token Furnace budget gate")) {
+      unlinkSync(pluginPath);
+      restored.push(pluginPath);
+    }
+  }
+  out.write(restored.length ? `Budget adapters rolled back: ${restored.join(", ")}\n` : "Budget adapters: no owned backup or plugin was found; nothing changed.\n");
+  return 0;
+}
+
+function installCodexBudgetHook(env: Env, apply: boolean, out: { write(text: string): unknown }): number {
+  const home = env.HOME || homedir();
+  const codexDir = env.CODEX_HOME || join(home, ".codex");
+  const path = join(codexDir, "hooks.json");
+  const command = "token-furnace hook budget --source codex";
+  let original: string | null = null;
+  let config: Record<string, any> = {};
+  if (existsSync(path)) {
+    original = readFileSync(path, "utf8");
+    try {
+      const parsed = JSON.parse(original);
+      if (!isPlainObject(parsed) || (parsed.hooks !== undefined && !isPlainObject(parsed.hooks))) throw new Error("expected an object with an optional hooks object");
+      config = parsed;
+    } catch (error) {
+      out.write(`Budget adapters: ${path} is malformed — left untouched (${error instanceof Error ? error.message : String(error)}).\n`);
+      return 1;
+    }
+  }
+  const hooks = (config.hooks ??= {}) as Record<string, any>;
+  const events: Array<[string, string | undefined]> = [
+    ["PreToolUse", "Agent|spawn_agent"],
+    ["UserPromptSubmit", undefined],
+    ["PostToolUse", "Agent|spawn_agent"],
+    ["Stop", undefined],
+    ["SessionEnd", "other"],
+  ];
+  for (const [eventName] of events) {
+    if (hooks[eventName] !== undefined && !Array.isArray(hooks[eventName])) {
+      out.write(`Budget adapters: ${path} has a non-array ${eventName} hook list — left untouched.\n`);
+      return 1;
+    }
+  }
+  const missing = events.filter(([eventName]) => {
+    const list = (hooks[eventName] ??= []) as any[];
+    return !list.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook: any) => hook?.command === command));
+  });
+  for (const [eventName, matcher] of missing) {
+    const list = hooks[eventName] as any[];
+    list.push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command }] });
+  }
+  if (!missing.length) return 0;
+  if (!apply) {
+    out.write(`Budget adapters: would wire Codex ${missing.map(([eventName]) => eventName).join(", ")} to ${command}.\n`);
+    return 0;
+  }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  if (!existsSync(`${path}.token-furnace-budget-backup`)) writeFileSync(`${path}.token-furnace-budget-backup`, original ?? "{\"__token_furnace_missing\":true}\n", { mode: 0o600 });
+  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort on Windows */ }
+  out.write(`Budget adapters: Codex ${missing.map(([eventName]) => eventName).join(", ")} hooks installed.\n`);
   return 0;
 }
 
 function openCodePlugin(): string {
   return `// Token Furnace budget gate. Kept local so hooks never download a package.
 const modelBySession = new Map();
+const reservationByCall = new Map();
 async function modelFor(ctx, sessionID) {
   const cached = modelBySession.get(sessionID);
   try {
@@ -917,14 +1024,31 @@ async function modelFor(ctx, sessionID) {
     return cached ?? {};
   }
 }
+function callBudget(event) {
+  const result = Bun.spawnSync(["token-furnace", "hook", "budget"], { stdin: new Blob([JSON.stringify(event)]) });
+  const body = JSON.parse(new TextDecoder().decode(result.stdout));
+  if (result.exitCode !== 0 || !body.allow) throw new Error(body.reason || "Token Furnace budget hook denied the request.");
+  return body;
+}
 export const TokenFurnaceBudget = async (ctx) => ({
   "tool.execute.before": async (input) => {
     const identity = await modelFor(ctx, input.sessionID);
-    const event = { source: "opencode", ...identity, estimatedCost: 1, costUnit: "tokens-per-hour", requestId: input.callID };
-    const result = Bun.spawnSync(["token-furnace", "hook", "budget"], { stdin: new Blob([JSON.stringify(event)]) });
-    if (result.exitCode !== 0) throw new Error("Token Furnace budget hook failed.");
-    const decision = JSON.parse(new TextDecoder().decode(result.stdout));
-    if (!decision.allow) throw new Error(decision.reason);
+    const decision = callBudget({ source: "opencode", ...identity, sessionId: input.sessionID, nativeEndpoint: String(ctx.serverUrl), requestId: input.callID });
+    if (decision.reservationId) reservationByCall.set(input.callID, decision.reservationId);
+  },
+  "tool.execute.after": async (input, output) => {
+    const reservationId = reservationByCall.get(input.callID);
+    if (!reservationId) return;
+    const usage = output.metadata?.usage ?? output.metadata;
+    const hasUsage = usage && ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "cached_input_tokens", "cachedInputTokens"]
+      .some((key) => Number.isFinite(Number(usage[key])));
+    if (!hasUsage) {
+      reservationByCall.delete(input.callID);
+      callBudget({ source: "opencode", phase: "complete", completed: true, reservationId, eventId: input.callID });
+      return;
+    }
+    reservationByCall.delete(input.callID);
+    callBudget({ source: "opencode", phase: "complete", reservationId, eventId: input.callID, usage });
   },
 });
 export default TokenFurnaceBudget;
