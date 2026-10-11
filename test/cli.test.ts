@@ -58,7 +58,7 @@ function env(root: string): NodeJS.ProcessEnv {
 
 /** The clock moves the weekly reset label and the fixture's own paths; neither is the verdict. */
 function mask(text: string, root: string): string {
-  return text.replaceAll(root, "<root>").replaceAll("\\", "/").replace(/(weekly reset )\w{3} \d\d:\d\d/g, "$1<when>");
+  return text.replaceAll("\r\n", "\n").replaceAll(root, "<root>").replaceAll("\\", "/").replace(/(weekly reset )\w{3} \d\d:\d\d/g, "$1<when>");
 }
 
 /** Run the CLI with stdout and stderr captured. */

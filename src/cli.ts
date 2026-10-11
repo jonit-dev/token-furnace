@@ -4,7 +4,7 @@
  * codes of burn.py main(): 1 with no data, 1 with leaks or a failing doctor, 0 otherwise.
  */
 
-import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -31,9 +31,8 @@ const USAGE = `Usage: token-furnace [days] [options]
        token-furnace hook budget [--source <source>]
        token-furnace budgets status
        token-furnace budgets enable --confirm [--rollback]
-       token-furnace budgets stop --provider <id> [--confirm] [--force --force-confirm]
-       token-furnace budgets stop --model <provider/model> [--confirm] [--force --force-confirm]
-       token-furnace budgets unlock --provider <id> --confirm
+       token-furnace budgets stop --source <source> | --provider <id> | --model <provider/model> [--confirm] [--force --force-confirm]
+       token-furnace budgets unlock --source <source> | --provider <id> | --model <provider/model> --confirm
 
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
@@ -226,7 +225,7 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
     },
   });
   if (parsed.values.help) {
-    process.stdout.write("Usage: token-furnace budgets status | enable --confirm [--rollback] | stop --provider <id> [--confirm] | stop --model <provider/model> [--confirm] | unlock --provider <id> --confirm\n");
+    process.stdout.write("Usage: token-furnace budgets status | enable --confirm [--rollback] | stop --source <source> | --provider <id> | --model <provider/model> [--confirm] | unlock --source <source> | --provider <id> | --model <provider/model> --confirm\n");
     return 0;
   }
   const scope = budgetScope(parsed.values.provider, parsed.values.model, parsed.values.source);
@@ -242,7 +241,7 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
     return installBudgetAdapters(app.env, { apply: true, rollback: Boolean(parsed.values.rollback) }, process.stdout);
   }
   if ((command !== "stop" && command !== "unlock") || !scope) {
-    process.stderr.write("Usage: token-furnace budgets stop|unlock --provider <id> | --model <provider/model>\n");
+    process.stderr.write("Usage: token-furnace budgets stop|unlock --source <source> | --provider <id> | --model <provider/model>\n");
     return 2;
   }
   if (command === "unlock") {
@@ -297,27 +296,37 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   const source = sourceOverride ?? (event.source === "claude" || event.source === "codex" || event.source === "opencode"
     ? event.source
     : app.env.TOKEN_FURNACE_SOURCE === "claude" || app.env.TOKEN_FURNACE_SOURCE === "codex" || app.env.TOKEN_FURNACE_SOURCE === "opencode" ? app.env.TOKEN_FURNACE_SOURCE : null);
-  const provider = stringValue(event.provider ?? event.providerID ?? event.provider_id);
-  const model = stringValue(event.model ?? event.modelID ?? event.model_id);
+  const hintedProvider = stringValue(event.provider ?? event.providerID ?? event.provider_id);
+  const hintedModel = stringValue(event.model ?? event.modelID ?? event.model_id);
   const hookEvent = stringValue(event.hook_event_name ?? event.hookEventName ?? event.eventName);
   const phase = stringValue(event.phase ?? event.lifecycle) ?? (hookEvent === "PostToolUse" ? "complete" : hookEvent === "Stop" || hookEvent === "SessionEnd" ? "abandon" : "start");
   const reservationId = stringValue(event.reservationId ?? event.reservation_id);
-  const requestId = stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.session_id);
-  const identity = source ? { source, provider, model, account: stringValue(event.account ?? event.accountId ?? event.account_id) } : null;
-  if (identity) registerHookTarget(app, event, identity);
+  const requestId = stringValue(app.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID) ?? stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.session_id);
+  const metadata = source ? resolveNativeMetadata(app, event, source, hookEvent, hintedProvider, hintedModel) : null;
+  const provider = metadata?.provider ?? null;
+  const model = metadata?.model ?? null;
+  const account = source ? app.budgets.verifiedAccount(source, provider, metadata?.account) : null;
+  const identity = source ? { source, provider, model, account } : null;
+  if (identity && (phase === "start" || provider || model || metadata?.account || stringValue(event.nativeEndpoint ?? event.native_endpoint ?? event.serverUrl ?? event.server_url))) {
+    registerHookTarget(app, event, identity);
+  }
   if ((reservationId || requestId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
-    const amount = usageAmount(event);
+    const amount = usageAmount(event) ?? metadata?.usage ?? null;
     if (amount !== null && (phase === "complete" || phase === "completed" || phase === "reconcile")) {
       const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? requestId}:${phase}`;
-      if (reservationId) app.budgets.reconcile(reservationId, amount, eventId);
-      else app.budgets.reconcileRequest(requestId!, amount, eventId);
+      const observedAt = eventObservedAt(event);
+      if (reservationId) app.budgets.reconcile(reservationId, amount, eventId, observedAt);
+      else app.budgets.reconcileRequest(requestId!, amount, eventId, observedAt);
     } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
+      const sessionId = stringValue(event.session_id ?? event.sessionId);
+      if (!source || !sessionId || !app.control.ownsSession(source, sessionId)) {
+        process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Native abandonment was not tied to a verified owned session.", retryAt: null, reservationId }));
+        return 0;
+      }
       if (reservationId) app.budgets.release(reservationId);
       else app.budgets.releaseRequest(requestId!);
     } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || requestId)) {
-      if (reservationId) app.budgets.release(reservationId);
-      else app.budgets.releaseRequest(requestId!);
-      process.stdout.write(JSON.stringify({ decision: "allow", allow: true, reason: "Native tool completion observed; no attributable usage was available.", retryAt: null, reservationId }));
+      process.stdout.write(JSON.stringify({ decision: "allow", allow: true, reason: "Native completion observed; reservation retained until attributable usage or verified abandonment.", retryAt: null, reservationId }));
       return 0;
     } else {
       process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Completion has no attributable usage telemetry.", retryAt: null, reservationId }));
@@ -353,32 +362,35 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
 
 function registerHookTarget(app: App, event: Record<string, unknown>, identity: { source: Source; provider: string | null; model: string | null; account: string | null }): void {
   const pid = numberValue(event.pid ?? event.processId ?? event.process_id) ?? process.ppid;
-  const observed = app.control.processIdentity(pid);
-  const processStartTime = numberValue(event.processStartTime ?? event.process_start_time ?? event.startTime) ?? observed?.processStartTime ?? null;
-  const ownerUid = numberValue(event.ownerUid ?? event.owner_uid ?? event.uid) ?? observed?.ownerUid ?? null;
-  if (!pid || processStartTime === null || ownerUid === null) return;
+  const expectedExecutable = stringValue(event.executable ?? event.executablePath ?? event.executable_path);
+  const observed = pid ? app.control.owningProcess(pid, identity.source, expectedExecutable) : null;
+  if (!observed || !Number.isFinite(observed.processStartTime) || (observed.ownerUid === null && !observed.ownerIdentity)) return;
   const nativeKind = identity.source === "opencode" ? "opencode" : identity.source === "codex" ? "codex" : undefined;
   const endpoint = stringValue(event.nativeEndpoint ?? event.native_endpoint ?? event.serverUrl ?? event.server_url);
   const sessionId = stringValue(event.sessionId ?? event.session_id);
   app.control.register({
-    id: sessionId ?? `${identity.source}:${pid}:${processStartTime}`,
+    id: sessionId ?? `${identity.source}:${observed.pid}:${observed.processStartTime}`,
     source: identity.source,
     provider: identity.provider,
     account: identity.account,
     model: identity.model,
-    pid,
-    processStartTime,
-    ownerUid,
-    executable: stringValue(event.executable ?? event.executablePath ?? event.executable_path) ?? observed?.executable ?? null,
+    pid: observed.pid,
+    processStartTime: observed.processStartTime,
+    ownerUid: observed.ownerUid,
+    ownerIdentity: observed.ownerIdentity,
+    executable: observed.executable,
     sessionId,
     native: nativeKind && endpoint ? {
       kind: nativeKind,
       endpoint,
+      transport: event.nativeTransport === "websocket" || event.nativeTransport === "unix" || event.nativeTransport === "stdio" || event.nativeTransport === "http"
+        ? event.nativeTransport : undefined,
+      authEnv: stringValue(event.nativeAuthEnv ?? event.native_auth_env) ?? undefined,
       sessionId: stringValue(event.nativeSessionId ?? event.native_session_id) ?? sessionId ?? undefined,
       threadId: stringValue(event.threadId ?? event.thread_id ?? event.session_id) ?? undefined,
       turnId: stringValue(event.turnId ?? event.turn_id) ?? undefined,
     } : undefined,
-    exclusive: event.exclusive === true,
+    exclusive: event.exclusive === true && observed.pid === pid,
   });
 }
 
@@ -388,10 +400,86 @@ function usageAmount(event: Record<string, unknown>): number | null {
   const usage = event.usage ?? (event.tool_response && typeof event.tool_response === "object" ? (event.tool_response as Record<string, unknown>).usage : null);
   if (!usage || typeof usage !== "object") return null;
   const record = usage as Record<string, unknown>;
-  const values = ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "cached_input_tokens", "cachedInputTokens"]
+  const values = ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens", "cached_input_tokens", "cachedInputTokens", "cache_read_input_tokens", "cacheReadInputTokens", "cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write_tokens", "cacheWriteTokens", "total_tokens", "totalTokens"]
     .map((key) => numberValue(record[key]) ?? 0);
-  const total = values.reduce((sum, value) => sum + value, 0);
+  const total = Number.isFinite(Number(record.total_tokens ?? record.totalTokens))
+    ? Number(record.total_tokens ?? record.totalTokens)
+    : values.reduce((sum, value) => sum + value, 0);
   return total > 0 ? total : null;
+}
+
+function eventObservedAt(event: Record<string, unknown>): Date | undefined {
+  const value = event.timestamp ?? event.timestampMs ?? event.timestamp_ms ?? event.at ?? event.time;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date : undefined;
+  }
+  if (typeof value === "string") {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : undefined;
+  }
+  return undefined;
+}
+
+interface NativeMetadata {
+  provider: string | null;
+  model: string | null;
+  account: string | null;
+  usage: number | null;
+}
+
+function resolveNativeMetadata(app: App, event: Record<string, unknown>, source: Source, hookEvent: string | null, hintedProvider: string | null, hintedModel: string | null): NativeMetadata {
+  const transcriptPath = stringValue(event.transcript_path ?? event.transcriptPath);
+  const fromTranscript = transcriptPath ? readNativeTranscriptMetadata(app, source, transcriptPath) : null;
+  const nativePayload = Boolean(hookEvent && (hintedProvider || hintedModel));
+  let provider = fromTranscript?.provider ?? (nativePayload || event.identityVerified === true ? hintedProvider : null);
+  let model = fromTranscript?.model ?? (nativePayload || event.identityVerified === true ? hintedModel : null);
+  if (model?.includes("/")) {
+    const slash = model.indexOf("/");
+    provider ??= model.slice(0, slash);
+    model = model.slice(slash + 1);
+  }
+  return {
+    provider,
+    model,
+    account: fromTranscript?.account ?? ((nativePayload || event.identityVerified === true) ? stringValue(event.account ?? event.accountId ?? event.account_id) : null),
+    usage: fromTranscript?.usage ?? null,
+  };
+}
+
+function readNativeTranscriptMetadata(app: App, source: Source, path: string): NativeMetadata | null {
+  if (!path.startsWith("/")) return null;
+  try {
+    const sourceRoot = app.sources.find((candidate) => candidate.name === source)?.base();
+    const transcript = realpathSync(path);
+    const root = sourceRoot ? realpathSync(sourceRoot) : null;
+    if (!root || (transcript !== root && !transcript.startsWith(`${root}/`))) return null;
+    if (statSync(transcript).size > 2_000_000) return null;
+    const text = readFileSync(transcript, "utf8").slice(-512_000);
+    const metadata: NativeMetadata = { provider: null, model: null, account: null, usage: null };
+    for (const line of text.split(/\r?\n/)) {
+      try { collectNativeMetadata(JSON.parse(line) as unknown, metadata); } catch { /* native logs may contain non-JSON lines */ }
+    }
+    return metadata;
+  } catch { return null; }
+}
+
+function collectNativeMetadata(value: unknown, metadata: NativeMetadata, depth = 0): void {
+  if (!value || typeof value !== "object" || depth > 5) return;
+  const record = value as Record<string, unknown>;
+  metadata.provider = stringValue(record.provider ?? record.providerID ?? record.provider_id) ?? metadata.provider;
+  metadata.model = stringValue(record.model ?? record.modelID ?? record.model_id) ?? metadata.model;
+  metadata.account = stringValue(record.account ?? record.accountId ?? record.account_id ?? record.subscription_id) ?? metadata.account;
+  const usage = record.usage ?? record.tokenUsage ?? record.token_usage ?? record.last_token_usage ?? record.lastTokenUsage ?? record.total_token_usage ?? record.totalTokenUsage;
+  if (usage && typeof usage === "object") metadata.usage = usageAmount(usage as Record<string, unknown>) ?? metadata.usage;
+  for (const key of ["message", "response", "result", "turn", "info", "metadata", "data", "event", "payload", "usage", "tokens", "last_token_usage", "lastTokenUsage", "total_token_usage", "totalTokenUsage"]) {
+    const child = record[key];
+    if (child && typeof child === "object") {
+      if (Array.isArray(child)) for (const item of child) collectNativeMetadata(item, metadata, depth + 1);
+      else collectNativeMetadata(child, metadata, depth + 1);
+    }
+  }
 }
 
 function budgetScope(provider: string | undefined, model: string | undefined, source: string | undefined): BudgetScope | null {

@@ -95,6 +95,7 @@ describe("BudgetService", () => {
     }], 0);
     expect(service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" }, estimatedCost: 0.59, costUnit: "percentage-per-hour", now }).allowed).toBe(true);
     expect(service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1", model: "claude-opus" }, estimatedCost: 0.02, costUnit: "percentage-per-hour", now }).allowed).toBe(false);
+    service.close();
   });
 
   it("blocks an expired cumulative policy instead of silently granting a new interval", () => {

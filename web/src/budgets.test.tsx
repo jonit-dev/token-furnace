@@ -58,8 +58,8 @@ describe("Budgets", () => {
   it("opens a separate provider stop confirmation", async () => {
     render(<Budgets />);
     const card = (await screen.findByText("Claude Code")).closest("section")!;
-    fireEvent.click(within(card).getByRole("button", { name: "Stop all Claude Code" }));
-    expect(screen.getByRole("dialog", { name: "Stop all Claude Code" })).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: "Stop All Claude Code" }));
+    expect(screen.getByRole("dialog", { name: "Stop All Claude Code" })).toBeTruthy();
     expect(screen.getByText(/does not change your budget policy/i)).toBeTruthy();
   });
 
@@ -72,7 +72,7 @@ describe("Budgets", () => {
     });
     render(<Budgets />);
     const card = (await screen.findByText("Claude Code")).closest("section")!;
-    fireEvent.click(within(card).getByRole("button", { name: "Stop model" }));
+    fireEvent.click(within(card).getByRole("button", { name: "Stop model anthropic/claude-opus" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm stop" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/budgets/stop-preview", expect.objectContaining({ method: "POST" })));
     const [, request] = fetchMock.mock.calls.find(([url]) => url === "/api/budgets/stop-preview")!;

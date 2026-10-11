@@ -24,8 +24,12 @@ describe("budget adapter setup", () => {
     const after = JSON.parse(readFileSync(join(claude, "settings.json"), "utf8"));
     expect(after.hooks.PreToolUse).toEqual(expect.arrayContaining(before.hooks.PreToolUse));
     expect(JSON.stringify(after)).toContain("hook budget");
+    expect(after.hooks.Stop).toHaveLength(1);
+    expect(after.hooks.SessionEnd).toHaveLength(1);
     expect(existsSync(join(claude, "settings.json.token-furnace-budget-backup"))).toBe(true);
-    expect(readFileSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"), "utf8")).toMatch(/stdin: new Blob|hasUsage/);
+    const openCodePlugin = readFileSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"), "utf8");
+    expect(openCodePlugin).toMatch(/stdin: new Blob|hasUsage/);
+    expect(openCodePlugin).not.toMatch(/executable: process\.execPath/);
     expect(JSON.parse(readFileSync(join(root, ".codex", "hooks.json"), "utf8")).hooks.UserPromptSubmit).toHaveLength(1);
     expect(rollbackBudgetAdapters({ HOME: root }, { write: () => undefined })).toBe(0);
     expect(readFileSync(join(claude, "settings.json"), "utf8")).toBe(JSON.stringify(before));

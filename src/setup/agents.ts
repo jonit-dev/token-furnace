@@ -888,7 +888,7 @@ export function installBudgetAdapters(
     out.write("Budget adapters: Claude PreToolUse already wired.\n");
   }
 
-  for (const eventName of ["UserPromptSubmit", "PostToolUse"]) {
+  for (const eventName of ["UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
     const list = (hooks[eventName] ??= []) as any[];
     if (!list.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook: any) => hook?.command === budgetCommand))) {
       list.push({ hooks: [{ type: "command", command: budgetCommand }] });
@@ -1009,6 +1009,7 @@ function openCodePlugin(): string {
   return `// Token Furnace budget gate. Kept local so hooks never download a package.
 const modelBySession = new Map();
 const reservationByCall = new Map();
+const sessionByCall = new Map();
 async function modelFor(ctx, sessionID) {
   const cached = modelBySession.get(sessionID);
   try {
@@ -1033,22 +1034,40 @@ function callBudget(event) {
 export const TokenFurnaceBudget = async (ctx) => ({
   "tool.execute.before": async (input) => {
     const identity = await modelFor(ctx, input.sessionID);
-    const decision = callBudget({ source: "opencode", ...identity, sessionId: input.sessionID, nativeEndpoint: String(ctx.serverUrl), requestId: input.callID });
-    if (decision.reservationId) reservationByCall.set(input.callID, decision.reservationId);
+    // Bun's execPath is the plugin runtime, not the owning OpenCode command. Let the hook resolve
+    // the native host from its actual process identity and command line.
+    const decision = callBudget({ source: "opencode", ...identity, identityVerified: true, session_id: input.sessionID, sessionId: input.sessionID, nativeEndpoint: String(ctx.serverUrl), nativeTransport: "http", pid: process.pid, requestId: process.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID ?? input.callID });
+    if (decision.reservationId) {
+      reservationByCall.set(input.callID, decision.reservationId);
+      sessionByCall.set(input.callID, input.sessionID);
+    }
   },
   "tool.execute.after": async (input, output) => {
     const reservationId = reservationByCall.get(input.callID);
     if (!reservationId) return;
     const usage = output.metadata?.usage ?? output.metadata;
-    const hasUsage = usage && ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "cached_input_tokens", "cachedInputTokens"]
+    const hasUsage = usage && ["input_tokens", "inputTokens", "output_tokens", "outputTokens", "reasoning_tokens", "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens", "cached_input_tokens", "cachedInputTokens", "cache_read_input_tokens", "cacheReadInputTokens", "cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write_tokens", "cacheWriteTokens", "total_tokens", "totalTokens"]
       .some((key) => Number.isFinite(Number(usage[key])));
     if (!hasUsage) {
-      reservationByCall.delete(input.callID);
-      callBudget({ source: "opencode", phase: "complete", completed: true, reservationId, eventId: input.callID });
+      callBudget({ source: "opencode", phase: "complete", completed: true, reservationId, eventId: process.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID ?? input.callID });
       return;
     }
     reservationByCall.delete(input.callID);
-    callBudget({ source: "opencode", phase: "complete", reservationId, eventId: input.callID, usage });
+    sessionByCall.delete(input.callID);
+    callBudget({ source: "opencode", identityVerified: true, phase: "complete", reservationId, eventId: process.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID ?? input.callID, timestamp: output.metadata?.timestamp ?? output.metadata?.completedAt, usage });
+  },
+  event: async ({ event }) => {
+    if (!["session.error", "session.deleted"].includes(event.type)) return;
+    const sessionID = event.properties?.sessionID ?? event.sessionID ?? event.properties?.id;
+    if (!sessionID) return;
+    for (const [callID, ownedSession] of sessionByCall) {
+      if (ownedSession !== sessionID) continue;
+      const reservationId = reservationByCall.get(callID);
+      if (!reservationId) continue;
+      callBudget({ source: "opencode", phase: "abandon", reservationId, eventId: String(sessionID), session_id: String(sessionID), pid: process.pid });
+      reservationByCall.delete(callID);
+      sessionByCall.delete(callID);
+    }
   },
 });
 export default TokenFurnaceBudget;

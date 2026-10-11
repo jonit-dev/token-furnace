@@ -15,7 +15,7 @@ let lastTry = 0;
 
 /** The saved reading, in the file burn.py writes and a status line can feed. */
 export function usageCachePath(env: Env): string {
-  const base = env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
+  const base = env.TOKEN_FURNACE_CACHE_HOME || env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
   return join(base, "token-furnace", "usage.json");
 }
 
@@ -82,7 +82,7 @@ function accessCredentials(env: Env): { token: string; account: string | null } 
       creds = execFileSync(
         "security",
         ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        { encoding: "utf8", timeout: 5_000 },
+        { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] },
       );
     } catch {
       return null;

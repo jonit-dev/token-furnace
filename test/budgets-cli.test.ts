@@ -105,4 +105,29 @@ describe("budget CLI", () => {
       app.control.close();
     }
   });
+
+  it("does not release a reservation from an unverified cancellation payload", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-untrusted-cancel-"));
+    roots.push(root);
+    const app = compose({ HOME: root }, { noCache: true });
+    app.budgets.savePolicies([{
+      scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 100,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    try {
+      runBudgetHook(JSON.stringify({ estimatedCost: 90, costUnit: "tokens-total", requestId: "owned-request" }), app, "claude");
+      const admitted = JSON.parse(output.pop()!) as { reservationId: string };
+      runBudgetHook(JSON.stringify({ phase: "cancel", reservationId: admitted.reservationId, session_id: "forged-session" }), app, "claude");
+      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: false, decision: "deny" });
+      runBudgetHook(JSON.stringify({ estimatedCost: 20, costUnit: "tokens-total", requestId: "second-request" }), app, "claude");
+      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: false });
+    } finally {
+      process.stdout.write = original;
+      app.budgets.close();
+      app.control.close();
+    }
+  });
 });

@@ -1,11 +1,11 @@
 # PRD-030 — Budgets and provider/model emergency stops
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 **Priority:** P2 — Add enforceable usage pacing and emergency controls for every supported agent source.
 **Complexity:** 9 → HIGH; risk override: terminating agent work can interrupt writes and affect unrelated sessions.
 **Owner:** Codex
 **Depends on:** None
-**Progress:** 0/8 acceptance criteria; planning only, implementation not authorized by this request.
+**Progress:** 0/8 acceptance criteria closed; execution authorized, implementation at `4750c1b`, native qualification and remaining repairs pending.
 
 ## Context
 Token Furnace observes usage but cannot enforce a pace or stop running work. The existing Claude `PostToolUse` churn hook only adds advice. The user wants to prevent further agent spawning when a provider reaches a budget, plus a provider-wide or model-wide emergency stop. The main entry point must be a tab named **Budgets**. Budget enforcement is **Off by default**, with **Auto** and **Manual** modes.
@@ -147,19 +147,19 @@ CI credentials are not required for native child-process tests; dedicated provid
 
 ## Execution Phases
 #### Phase 1: Budgets tab and shared policy
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 **Files:** New `src/core/budgets.ts` (contracts/pure policy), `src/services/budget-service.ts` (durable settings/admissions), `web/src/components/budgets.tsx`; extend `src/compose.ts`, `src/server.ts`, `web/src/App.tsx`, `web/src/store.ts`; identity additions to source parsers/model/repositories only where required. New/extended tests named in AC-1–3 and AC-7.
 **Implementation:** Deliver `#budgets` → save → read-after-restart with Off default and real Auto/Manual calculations. Establish account/model identity, transactional revisions/reservations, meter freshness and independent durable stop state. Until adapters qualify, show Watching/Partial coverage rather than Enforcing. Secure mutation routes immediately; wire stop routes only when Phase 3 can execute them safely.
 **Verification:** AC-1–3 and mutation portion of AC-7; targeted Vitest files listed above plus `npm run typecheck`. Drive mode save/reload through the served dashboard in a real browser, without mocked HTTP. AC-1 remains pending until all-source mode/policy qualification runs. Check positive, exhausted, reset, unknown model/provider, offline and racing policy-update cases. No native session termination in this phase.
 
 #### Phase 2: Enforcement across every supported source
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 **Files:** New `src/services/agent-control.ts` and source-specific adapter assets under `src/setup/`/`src/control/` as needed; extend `src/cli.ts`, `src/setup/agents.ts`, usage readers, service composition and Budgets coverage display. Add the `qualify:budgets` script, fixtures and package inclusion where required; do not create unconsumed generic plugin infrastructure.
 **Implementation:** Wire all three actual native admission paths to the shared gate; enable/install with backup/trust verification/rollback. Register session/process ownership and current provider/model metadata; support switching/resuming/nesting and code-mode tools. Preserve native config and show discovered gaps. Resolve native capability gaps using supported supervised entry points rather than prose instructions. Reuse existing weighted-token/quota calculations; expose measured versus estimated data.
 **Verification:** AC-4 and installed-adapter parts of AC-8, using isolated native homes/workspaces and known pinned versions. Run the required real integration harness budget-admission scenarios: authentic provider calls, actual native launch/resume, real child/sentinel assertions, no provider/control mocks. Cover all three sources independently. Extend existing source/setup/CLI tests only for changed contracts. Record incomplete remote/unmanaged coverage rather than inflating guarantees.
 
 #### Phase 3: Emergency stops and recovery
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 **Files:** Extend agent-control and budget services, `src/server.ts`, `src/cli.ts`, Budgets component and existing Modal integration; add native platform signal handling only where ownership tests require it. Extend package smoke, `.github/workflows/ci.yml`, `README.md`, and tests named in AC-5–8.
 **Implementation:** Deliver provider/model preview → confirm → durable deny latch → native cancellation → verified outcomes. Add separately confirmed force escalation, identity revalidation, collateral preview, race rediscovery and explicit unlock. Display partial failures with exact remaining scope. Ensure nested/mixed-model hosts and pre-existing discoverable sessions are handled without targeting unrelated processes; preserve state when the server restarts or the report cache is cleared.
 **Verification:** AC-5–8 plus the already selected affected regressions. Run the required real integration harness provider/model stop, force escalation where applicable, restart/latch and unlock scenarios through the actual browser/CLI and authentic native endpoints. Test targets must be disposable real agent sessions, never personal work. A second real model/provider completing post-stop work is required selective-stop evidence. Fake provider servers and generic child-process tests cannot close native cancellation acceptance. Finish with one typecheck/build/regression/package-smoke pass and native CI matrix; record concise evidence here. Mark DONE/archive only after all eight criteria, including real all-source and shared qualification, have attributable passing evidence.
@@ -169,3 +169,18 @@ CI credentials are not required for native child-process tests; dedicated provid
 Official sources checked 2026-10-10: [Claude Code hooks](https://code.claude.com/docs/en/hooks) documents pre-tool denial and non-blocking SubagentStart; [Codex hooks](https://learn.chatgpt.com/docs/hooks) documents local-function/spawn matching and specialized-path exceptions; [Codex App Server](https://learn.chatgpt.com/docs/app-server) documents turn interruption; [OpenCode plugins](https://opencode.ai/docs/plugins/) documents pre-tool blocking; [OpenCode server](https://opencode.ai/docs/server/) documents session abort. Treat these as capability discovery, not installed-version qualification.
 
 Planning checks: scope and entry points inspected; no implementation tests or live cancellations run. In-flight upstream requests can still be billed; local telemetry and weighted tokens cannot guarantee an exact subscription or monetary ceiling. Provider-wide stopping across unmanaged/remote hosts requires capabilities outside this PRD and must never be implied by the UI.
+
+## Execution evidence — 2026-10-11
+
+- Baseline `develop` and pending edits were merged/pushed to `main` at `359fa0a` before execution, as requested. Execution checkout: `.worktrees/prd-030-budgets`, branch `linchpin/prd-030-budgets`; implementation commits `09df958`, `4750c1b`.
+- Manager checks at `4750c1b`, Node 24.16.0: `npm run typecheck` passed; `npm test` passed 36 files / 305 tests; `npm run smoke` passed installed-package checks. These supplement acceptance; they do not prove native admission/cancellation.
+- Real browser, isolated empty HOME, 360×800: `#budgets` opens without transcripts; Off/Auto/Manual saves returned HTTP 200 and survived reload; Manual limit 1000 persisted; viewport/content width both 360px. No provider session, actual quota, installation, or stop was exercised, so AC-1 remains pending.
+- Native versions discovered: Claude Code 2.1.296, Codex CLI 0.162.1, OpenCode 1.18.35. Dedicated-home configuration is absent; authenticated native scenarios have not run. AC-4–6 remain pending.
+- First independent review requested changes for missing production discovery, source/provider scope confusion, premature termination claims, unreconciled reservations, and overstated quota freshness. Repairs are committed, but manager inspection still found incorrect Codex App Server transport, nontransactional/stale ownership registry, Linux-only process verification, and native qualification assertions weaker than the required scenarios. Further implementation precedes the second review; AC-2/3/7 remain pending.
+- [Baseline CI run](https://github.com/jonit-dev/token-furnace/actions/runs/38118939914) at `359fa0a`: Ubuntu/Node24 passed, five other jobs failed (Node22 SQLite statement lifecycle; macOS keychain stderr; Windows snapshots/permission assertions). [Implementation CI run at `4750c1b`](https://github.com/jonit-dev/token-furnace/actions/runs/38123947737): Linux Node22.13/24 passed; four macOS/Windows jobs failed. Failures include macOS keychain stderr/Node22 finalized statements, Windows golden/permission assertions, and Windows Node24 `test/budgets-service.test.ts` cleanup EPERM on a retained SQLite directory. Control/budget connection lifecycle must release handles before cleanup; do not hide the failure. AC-8 remains pending.
+- Repair verification on Node 24.16.0: focused budget/server/CLI/setup/stop/web checks passed 11 files / 91 tests; the final ownership and adapter reruns passed 11 stop tests and 3 setup tests, including concurrent real hook processes and OpenCode host identity; `npm run typecheck` passed; build-backed `npm test` passed 36 files / 311 tests; `npm run smoke` passed installed-package and Budgets checks. The repair adds latest-read transactional SQLite ownership/control state, native identity and endpoint/terminal verification, explicit upstream/source/model scopes, reservation telemetry/reconciliation safeguards, quota freshness enforcement, first-run Budgets rendering, and stricter installed-package qualification assertions. These local checks supplement but do not close any real-native criterion.
+- `npm run qualify:budgets -- --sources claude,codex,opencode` exited `75` as required with no dedicated homes: `TOKEN_FURNACE_QUALIFY_CLAUDE_HOME`, `TOKEN_FURNACE_QUALIFY_CODEX_HOME`, and `TOKEN_FURNACE_QUALIFY_OPENCODE_DATA_DIR` are unset. No authenticated provider request, native hook/plugin decision, process cancellation, or PASS result was produced; AC-1 and AC-4–6 remain pending, and AC-2/3/7/8 remain pending pending cross-platform/native evidence.
+
+## Blocked on
+
+- João: provide disposable authenticated home paths for Claude Code, Codex, and OpenCode, using `TOKEN_FURNACE_QUALIFY_CLAUDE_HOME`, `TOKEN_FURNACE_QUALIFY_CODEX_HOME`, and `TOKEN_FURNACE_QUALIFY_OPENCODE_DATA_DIR`. Requested asynchronously on 2026-10-11; no paths supplied yet. Personal homes/sessions are not qualification targets. Missing access blocks live proof, while independent implementation repairs continue.

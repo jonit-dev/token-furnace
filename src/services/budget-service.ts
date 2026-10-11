@@ -91,6 +91,7 @@ interface StoredSettings {
   version: 1;
   revision: number;
   policies: BudgetPolicy[];
+  latches?: Array<{ scope: StopScope; operationId: string; createdAt: number }>;
 }
 
 interface StoredMeter {
@@ -146,6 +147,10 @@ CREATE INDEX IF NOT EXISTS reservation_scope_status ON reservations(scope_key, s
 CREATE TABLE IF NOT EXISTS admission_decisions (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
+  provider TEXT,
+  account TEXT,
+  model TEXT,
+  request_id TEXT,
   allowed INTEGER NOT NULL,
   reason TEXT NOT NULL,
   at INTEGER NOT NULL
@@ -192,8 +197,8 @@ export class BudgetService {
   constructor(env: Env = process.env, options: { now?: () => Date; dbPath?: string; settingsPath?: string } = {}) {
     this.now = options.now ?? (() => new Date());
     const home = env.HOME || homedir();
-    const config = env.XDG_CONFIG_HOME || join(home, ".config");
-    const state = env.XDG_STATE_HOME || join(home, ".local", "state");
+    const config = env.TOKEN_FURNACE_CONFIG_HOME || env.XDG_CONFIG_HOME || join(home, ".config");
+    const state = env.TOKEN_FURNACE_STATE_HOME || env.XDG_STATE_HOME || join(home, ".local", "state");
     this.settingsPath = options.settingsPath ?? join(config, "token-furnace", "budgets.json");
     this.dbPath = options.dbPath ?? join(state, "token-furnace", "budgets.sqlite");
     mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 });
@@ -204,6 +209,9 @@ export class BudgetService {
     try { this.db.exec("ALTER TABLE meters ADD COLUMN window TEXT"); } catch { /* existing v1 database already has it */ }
     try { this.db.exec("ALTER TABLE reservations ADD COLUMN request_id TEXT"); } catch { /* existing database already has it */ }
     try { this.db.exec("ALTER TABLE stop_previews ADD COLUMN target_proof TEXT NOT NULL DEFAULT ''"); } catch { /* existing database already has it */ }
+    for (const column of ["provider TEXT", "account TEXT", "model TEXT", "request_id TEXT"]) {
+      try { this.db.exec(`ALTER TABLE admission_decisions ADD COLUMN ${column}`); } catch { /* existing database already has it */ }
+    }
     this.db.exec("CREATE INDEX IF NOT EXISTS reservation_request_status ON reservations(request_id, status)");
     try { chmodSync(this.dbPath, 0o600); } catch { /* best effort on Windows */ }
   }
@@ -236,7 +244,7 @@ export class BudgetService {
       const current = this.readSettings();
       if (current.error) throw new Error(current.error);
       if (current.settings.revision !== expectedRevision) throw new Error("Budget settings revision is stale.");
-      const next: StoredSettings = { version: 1, revision: expectedRevision + 1, policies: normalized };
+      const next: StoredSettings = { version: 1, revision: expectedRevision + 1, policies: normalized, latches: current.settings.latches ?? [] };
       this.writeSettings(next);
       const at = now.getTime();
       for (const policy of normalized) {
@@ -270,6 +278,14 @@ export class BudgetService {
       result.set(meter.source, values.sort());
     }
     return result;
+  }
+
+  /** Resolve an account only from authoritative meter identities; never infer it from a model label. */
+  verifiedAccount(source: Source, provider: string | null, candidate?: string | null): string | null {
+    const matches = this.meters().filter((meter) => meter.source === source && canonicalIdentity(meter.provider) === canonicalIdentity(provider) && meter.authoritative && meter.account);
+    if (candidate && matches.some((meter) => canonicalIdentity(meter.account) === canonicalIdentity(candidate))) return canonicalIdentity(candidate);
+    const accounts = [...new Set(matches.map((meter) => canonicalIdentity(meter.account)).filter((account): account is string => Boolean(account)))];
+    return accounts.length === 1 ? accounts[0] : null;
   }
 
   snapshot(sources: BudgetSourceDescriptor[] = DEFAULT_SOURCES): BudgetSnapshot {
@@ -412,18 +428,18 @@ export class BudgetService {
     });
   }
 
-  reconcile(reservationId: string, actualAmount: number, eventId = `${reservationId}:usage`): void {
+  reconcile(reservationId: string, actualAmount: number, eventId = `${reservationId}:usage`, at?: Date): void {
     if (!Number.isFinite(actualAmount) || actualAmount < 0) return;
     this.writeTransaction(() => {
-      this.reconcileRows(reservationId, actualAmount, eventId);
+      this.reconcileRows(reservationId, actualAmount, eventId, at);
     });
   }
 
-  reconcileRequest(requestId: string, actualAmount: number, eventId: string): void {
+  reconcileRequest(requestId: string, actualAmount: number, eventId: string, at?: Date): void {
     if (!requestId || !Number.isFinite(actualAmount) || actualAmount < 0) return;
     this.writeTransaction(() => {
       const rows = this.db.prepare("SELECT DISTINCT reservation_id FROM reservations WHERE request_id = ? AND status = 'reserved'").all(requestId) as Array<{ reservation_id: string }>;
-      for (const row of rows) this.reconcileRows(row.reservation_id, actualAmount, eventId);
+      for (const row of rows) this.reconcileRows(row.reservation_id, actualAmount, eventId, at);
     });
   }
 
@@ -460,6 +476,10 @@ export class BudgetService {
         .run(policyKey(scope), JSON.stringify(scope), id, now.getTime());
       this.db.prepare("INSERT INTO operations (id, scope_json, status, outcomes_json, created_at) VALUES (?, ?, ?, ?, ?)")
         .run(id, JSON.stringify(scope), status, JSON.stringify(outcomes), now.getTime());
+      const settings = this.readSettings().settings;
+      const latches = (settings.latches ?? []).filter((latch) => policyKey(latch.scope) !== policyKey(scope));
+      latches.push({ scope, operationId: id, createdAt: now.getTime() });
+      this.writeSettings({ ...settings, latches });
       this.db.prepare("UPDATE stop_previews SET used = 1 WHERE id = ?").run(previewId);
       return { id, scope, status, outcomes, createdAt: now.toISOString() };
     });
@@ -499,6 +519,8 @@ export class BudgetService {
   unlock(scope: StopScope): void {
     this.writeTransaction(() => {
       this.db.prepare("UPDATE stops SET active = 0, unlocked_at = ? WHERE scope_key = ?").run(this.now().getTime(), policyKey(normalizeScope(scope)));
+      const settings = this.readSettings().settings;
+      this.writeSettings({ ...settings, latches: (settings.latches ?? []).filter((latch) => policyKey(latch.scope) !== policyKey(normalizeScope(scope))) });
     });
   }
 
@@ -508,8 +530,8 @@ export class BudgetService {
   }
 
   private logDecision(input: AdmissionRequest, allowed: boolean, reason: string): void {
-    this.db.prepare("INSERT INTO admission_decisions (id, source, allowed, reason, at) VALUES (?, ?, ?, ?, ?)")
-      .run(randomUUID(), input.identity.source, allowed ? 1 : 0, reason, (input.now ?? this.now()).getTime());
+    this.db.prepare("INSERT INTO admission_decisions (id, source, provider, account, model, request_id, allowed, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(randomUUID(), input.identity.source, canonicalIdentity(input.identity.provider), canonicalIdentity(input.identity.account), canonicalIdentity(input.identity.model), input.requestId ?? null, allowed ? 1 : 0, reason, (input.now ?? this.now()).getTime());
   }
 
   private blockedCount(source: Source): number {
@@ -538,13 +560,13 @@ export class BudgetService {
     return values.length ? values[0] : null;
   }
 
-  private reconcileRows(reservationId: string, actualAmount: number, eventId: string): void {
+  private reconcileRows(reservationId: string, actualAmount: number, eventId: string, at?: Date): void {
     const rows = this.db.prepare("SELECT scope_key, unit, status FROM reservations WHERE reservation_id = ?").all(reservationId) as Array<{ scope_key: string; unit: string; status: string }>;
     for (const row of rows) {
       if (row.status !== "reserved") continue;
       this.db.prepare("UPDATE reservations SET status = 'completed' WHERE reservation_id = ? AND scope_key = ? AND status = 'reserved'").run(reservationId, row.scope_key);
       this.db.prepare("INSERT OR IGNORE INTO usage_events (event_id, scope_key, amount, unit, at) VALUES (?, ?, ?, ?, ?)")
-        .run(`${eventId}:${row.scope_key}`, row.scope_key, actualAmount, row.unit, this.now().getTime());
+        .run(`${eventId}:${row.scope_key}`, row.scope_key, actualAmount, row.unit, at?.getTime() ?? this.now().getTime());
     }
   }
 
@@ -557,9 +579,12 @@ export class BudgetService {
   }
 
   private activeStops(): Array<{ scope: StopScope; operationId: string; createdAt: number }> {
-    return (this.db.prepare("SELECT scope_json, operation_id, created_at FROM stops WHERE active = 1").all() as Array<{ scope_json: string; operation_id: string; created_at: number }>).map((row) => ({
+    const durable = (this.db.prepare("SELECT scope_json, operation_id, created_at FROM stops WHERE active = 1").all() as Array<{ scope_json: string; operation_id: string; created_at: number }>).map((row) => ({
       scope: JSON.parse(row.scope_json) as StopScope, operationId: row.operation_id, createdAt: row.created_at,
     }));
+    const byKey = new Map(durable.map((stop) => [policyKey(stop.scope), stop]));
+    for (const latch of this.readSettings().settings.latches ?? []) byKey.set(policyKey(latch.scope), latch);
+    return [...byKey.values()];
   }
 
   private readSettings(): { settings: StoredSettings; error: string | null } {
@@ -577,7 +602,12 @@ export class BudgetService {
         keys.add(key); policies.push(result.policy);
       }
       this.settingsError = null;
-      return { settings: { version: 1, revision: Number(value.revision), policies }, error: null };
+      const latches = (Array.isArray(value.latches) ? value.latches : []).map((latch) => {
+        if (!latch || typeof latch !== "object" || typeof (latch as { operationId?: unknown }).operationId !== "string" || !Number.isFinite((latch as { createdAt?: unknown }).createdAt)) throw new Error("Budget settings file is malformed: invalid stop latch.");
+        const scope = normalizeScope((latch as { scope: StopScope }).scope);
+        return { scope, operationId: (latch as { operationId: string }).operationId, createdAt: Number((latch as { createdAt: number }).createdAt) };
+      });
+      return { settings: { version: 1, revision: Number(value.revision), policies, latches }, error: null };
     } catch (error) {
       this.settingsError = error instanceof Error ? error.message : String(error);
       return { settings: { version: 1, revision: 0, policies: [] }, error: this.settingsError };

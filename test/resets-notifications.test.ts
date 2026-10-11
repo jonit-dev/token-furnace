@@ -21,6 +21,15 @@ import {
 const NOW = new Date("2026-10-10T12:00:00Z");
 const roots: string[] = [];
 
+function expectPrivateSettings(path: string): void {
+  // Windows reports default POSIX mode bits; its ACL protects the user-created temp tree.
+  if (process.platform === "win32") {
+    expect(statSync(path).isFile()).toBe(true);
+    return;
+  }
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+}
+
 function tempEnv(): NodeJS.ProcessEnv & Record<string, string> {
   const root = mkdtempSync(join(tmpdir(), "tf-notify-"));
   roots.push(root);
@@ -138,7 +147,7 @@ describe("notification settings", () => {
   it("keeps a saved secret when the field is blank, removes it on request, and never returns one", () => {
     const env = tempEnv();
     saveSettings(env, onSettings({ telegram: { enabled: true, botToken: "123456:AAaaBBbbCCccDDddEEeeFFffGGhhIIjjKKllMMnnOO", chatId: "-100123" } }));
-    expect((statSync(settingsPath(env)).mode & 0o777)).toBe(0o600);
+    expectPrivateSettings(settingsPath(env));
 
     const kept = mergeSettings(env, { enabled: true, telegram: { chatId: "-100123" } }).settings;
     expect(kept.telegram.botToken).toBe("123456:AAaaBBbbCCccDDddEEeeFFhhIIjjKKllMMnnOO".slice(0, 0) + kept.telegram.botToken);
@@ -455,7 +464,7 @@ describe("the live server", () => {
     expect(saved.body.ntfy.hasToken).toBe(true);
     const onDisk = JSON.parse(readFileSync(settingsPath(env), "utf8"));
     expect(onDisk.ntfy.token).toBe("tk_secret_value");
-    expect((statSync(settingsPath(env)).mode & 0o777)).toBe(0o600);
+    expectPrivateSettings(settingsPath(env));
 
     const read = await call(server, "/api/notifications");
     expect(JSON.stringify(read.body)).not.toContain("tk_secret_value");

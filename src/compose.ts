@@ -23,7 +23,7 @@ export interface App {
 }
 
 export function sqliteCachePath(env: Env): string {
-  const base = env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
+  const base = env.TOKEN_FURNACE_CACHE_HOME || env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
   return join(base, "token-furnace", "cache.sqlite");
 }
 
