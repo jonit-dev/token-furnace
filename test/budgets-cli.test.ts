@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -163,6 +163,47 @@ describe("budget CLI", () => {
       expect(admitted.reservationId).toMatch(/[0-9a-f-]{20}/);
       expect(runBudgetHook(JSON.stringify({ source: "opencode", phase: "complete", reservationId: admitted.reservationId, actualCost: 20, eventId: "opencode-call" }), app, "opencode")).toBe(0);
       expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, decision: "allow", reservationId: admitted.reservationId });
+    } finally {
+      process.stdout.write = original;
+      app.close();
+    }
+  });
+
+  it("keeps real-shaped Codex transcript provider and model identity", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-codex-metadata-"));
+    roots.push(root);
+    const codexHome = join(root, ".codex");
+    const transcript = join(codexHome, "sessions", "2026", "10", "rollout-openrouter.jsonl");
+    const outsideTranscript = join(root, "outside-rollout.jsonl");
+    mkdirSync(join(codexHome, "sessions", "2026", "10"), { recursive: true });
+    const app = compose({ HOME: root, CODEX_HOME: codexHome }, { noCache: true });
+    stubNoNativeHost(app);
+    app.budgets.savePolicies([{
+      scope: { kind: "source", source: "codex" }, mode: "manual", unit: "tokens-total", limit: 100,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const admit = vi.spyOn(app.budgets, "admit");
+    const original = process.stdout.write;
+    process.stdout.write = (() => true) as typeof process.stdout.write;
+    const run = (requestId: string, transcriptPath = transcript) => {
+      expect(runBudgetHook(JSON.stringify({ transcript_path: transcriptPath, estimatedCost: 1, costUnit: "tokens-total", requestId }), app, "codex")).toBe(0);
+      return admit.mock.calls.at(-1)?.[0].identity;
+    };
+    try {
+      writeFileSync(transcript, [
+        JSON.stringify({ type: "session_meta", payload: { model_provider: "openrouter" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "nvidia/nemotron-3.5-lightning:free" } }),
+      ].join("\n") + "\n");
+      expect(run("codex-openrouter")).toMatchObject({ source: "codex", provider: "openrouter", model: "nvidia/nemotron-3.5-lightning:free" });
+
+      writeFileSync(transcript, [
+        JSON.stringify({ type: "session_meta", payload: { model_provider: "openrouter" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "openrouter/nvidia/nemotron-3.5-lightning:free" } }),
+      ].join("\n") + "\n");
+      expect(run("codex-openrouter-prefixed")).toMatchObject({ source: "codex", provider: "openrouter", model: "nvidia/nemotron-3.5-lightning:free" });
+
+      writeFileSync(outsideTranscript, JSON.stringify({ type: "session_meta", payload: { model_provider: "untrusted" } }) + "\n");
+      expect(run("codex-outside-root", outsideTranscript)).toMatchObject({ source: "codex", provider: null, model: null });
     } finally {
       process.stdout.write = original;
       app.close();

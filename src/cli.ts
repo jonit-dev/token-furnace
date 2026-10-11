@@ -490,10 +490,9 @@ function resolveNativeMetadata(app: App, event: Record<string, unknown>, source:
   const nativePayload = Boolean(hookEvent && (hintedProvider || hintedModel));
   let provider = fromTranscript?.provider ?? (nativePayload || event.identityVerified === true ? hintedProvider : null);
   let model = fromTranscript?.model ?? (nativePayload || event.identityVerified === true ? hintedModel : null);
-  if (model?.includes("/")) {
+  if (provider && model?.includes("/")) {
     const slash = model.indexOf("/");
-    provider ??= model.slice(0, slash);
-    model = model.slice(slash + 1);
+    if (provider.toLowerCase() === model.slice(0, slash).toLowerCase()) model = model.slice(slash + 1);
   }
   return {
     provider,
@@ -523,7 +522,7 @@ function readNativeTranscriptMetadata(app: App, source: Source, path: string): N
 function collectNativeMetadata(value: unknown, metadata: NativeMetadata, depth = 0): void {
   if (!value || typeof value !== "object" || depth > 5) return;
   const record = value as Record<string, unknown>;
-  metadata.provider = stringValue(record.provider ?? record.providerID ?? record.provider_id) ?? metadata.provider;
+  metadata.provider = stringValue(record.model_provider) ?? stringValue(record.provider ?? record.providerID ?? record.provider_id) ?? metadata.provider;
   metadata.model = stringValue(record.model ?? record.modelID ?? record.model_id) ?? metadata.model;
   metadata.account = stringValue(record.account ?? record.accountId ?? record.account_id ?? record.subscription_id) ?? metadata.account;
   const usage = record.usage ?? record.tokenUsage ?? record.token_usage ?? record.last_token_usage ?? record.lastTokenUsage ?? record.total_token_usage ?? record.totalTokenUsage;
