@@ -54,6 +54,11 @@ jobs:
             Write-Output ('powershell.exe -Command environment binding failed: ' + $_.Exception.ToString())
           }
       - run: npm run typecheck
+      - name: Diagnose Windows native stop stages
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        continue-on-error: true
+        run: npx vitest run test/budgets-stop.test.ts -t "force-stops a real owned child" --testTimeout=60000 --reporter=verbose
       - run: npm test
       - run: npm run smoke
       # Native qualification needs dedicated authenticated homes and must never use a CI user's session.

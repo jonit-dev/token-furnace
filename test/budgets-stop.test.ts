@@ -46,6 +46,22 @@ function waitForExit(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
+type WindowsStopTiming = { name: string; startedAt: number; stages: Record<string, number> };
+
+function windowsStopTiming(name: string): WindowsStopTiming {
+  return { name, startedAt: Date.now(), stages: {} };
+}
+
+function markWindowsStopStage(timing: WindowsStopTiming, stage: string): void {
+  if (process.platform === "win32") timing.stages[stage] = Date.now() - timing.startedAt;
+}
+
+function emitWindowsStopTiming(timing: WindowsStopTiming): void {
+  if (process.platform === "win32") {
+    console.info(`TOKEN_FURNACE_WINDOWS_STOP_TIMING ${JSON.stringify({ test: timing.name, ...timing.stages, totalMs: Date.now() - timing.startedAt })}`);
+  }
+}
+
 describe("AgentControl", () => {
   it("does not spawn a POSIX owner-SID lookup while constructing the controller", () => {
     const inspect = vi.fn(() => ({ pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }));
@@ -245,9 +261,11 @@ describe("AgentControl", () => {
   });
 
   it("force-stops a real owned child while an unrelated sibling remains live", async () => {
+    const timing = windowsStopTiming("force-stops a real owned child");
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     const control = makeControl({ currentUid: typeof process.getuid === "function" ? process.getuid() : null, graceMs: 1_000, storePath: testStore() });
+    markWindowsStopStage(timing, "controlConstruction");
     try {
       const identity = await new Promise<ProcessIdentity>((resolve, reject) => {
         const deadline = Date.now() + 2_000;
@@ -259,26 +277,38 @@ describe("AgentControl", () => {
         };
         poll();
       });
+      markWindowsStopStage(timing, "identity");
       expect(child.pid).toBeDefined();
       expect(unrelated.pid).toBeDefined();
       expect(identity.ownerUid !== null || identity.ownerIdentity || identity.ownerSid).toBeTruthy();
       expect(control.register({ ...target({ id: "real-child", pid: child.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
+      markWindowsStopStage(timing, "registration");
+      const previewStarted = Date.now();
+      control.preview({ kind: "source", source: "claude" });
+      if (process.platform === "win32") timing.stages.preview = Date.now() - previewStarted;
       const outcome = await control.cancel({ ...target({ id: "real-child", pid: child.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
-      expect(outcome.status).toBe("terminated");
+      markWindowsStopStage(timing, "cancelAndVerification");
+      if (process.platform === "win32") console.info(`TOKEN_FURNACE_WINDOWS_STOP_OUTCOME ${JSON.stringify(outcome)}`);
+      expect(outcome.status, JSON.stringify(outcome)).toBe("terminated");
       await waitForExit(child);
       expect(unrelated.exitCode).toBeNull();
     } finally {
+      markWindowsStopStage(timing, "cleanupStart");
       control.close();
       if (child.exitCode === null) child.kill("SIGKILL");
       if (unrelated.exitCode === null) unrelated.kill("SIGTERM");
       await Promise.all([waitForExit(child), waitForExit(unrelated)]);
+      markWindowsStopStage(timing, "cleanupDone");
+      emitWindowsStopTiming(timing);
     }
   });
 
   it("force-stops a real owned child tree while an unrelated sibling remains live", async () => {
+    const timing = windowsStopTiming("force-stops a real owned child tree");
     const tree = spawn(process.execPath, ["-e", "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); process.stdout.write(String(child.pid)); setInterval(()=>{},1000)"], { stdio: ["ignore", "pipe", "ignore"] });
     const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     const control = makeControl({ currentUid: typeof process.getuid === "function" ? process.getuid() : null, graceMs: 1_000, storePath: testStore() });
+    markWindowsStopStage(timing, "controlConstruction");
     let grandchildPid: number | null = null;
     try {
       grandchildPid = await new Promise<number>((resolve, reject) => {
@@ -301,16 +331,24 @@ describe("AgentControl", () => {
         };
         poll();
       });
+      markWindowsStopStage(timing, "identity");
       expect(tree.pid).toBeDefined();
       expect(unrelated.pid).toBeDefined();
       expect(grandchildPid).toBeDefined();
       expect(control.register({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) })).toBe(true);
+      markWindowsStopStage(timing, "registration");
+      const previewStarted = Date.now();
+      control.preview({ kind: "source", source: "claude" });
+      if (process.platform === "win32") timing.stages.preview = Date.now() - previewStarted;
       const outcome = await control.cancel({ ...target({ id: "real-tree", pid: tree.pid!, processStartTime: identity.processStartTime, ownerUid: identity.ownerUid, ownerIdentity: identity.ownerIdentity, ownerSid: identity.ownerSid, executable: identity.executable, exclusive: true }) }, true);
-      expect(outcome.status).toBe("terminated");
+      markWindowsStopStage(timing, "cancelAndVerification");
+      if (process.platform === "win32") console.info(`TOKEN_FURNACE_WINDOWS_STOP_OUTCOME ${JSON.stringify(outcome)}`);
+      expect(outcome.status, JSON.stringify(outcome)).toBe("terminated");
       await waitForExit(tree);
       expect(control.processIdentity(grandchildPid!)).toBeNull();
       expect(unrelated.exitCode).toBeNull();
     } finally {
+      markWindowsStopStage(timing, "cleanupStart");
       control.close();
       if (tree.exitCode === null) tree.kill("SIGKILL");
       if (unrelated.exitCode === null) unrelated.kill("SIGTERM");
@@ -318,6 +356,8 @@ describe("AgentControl", () => {
       if (grandchildPid !== null) {
         try { process.kill(grandchildPid, "SIGKILL"); } catch { /* already exited */ }
       }
+      markWindowsStopStage(timing, "cleanupDone");
+      emitWindowsStopTiming(timing);
     }
   }, 20_000);
 
