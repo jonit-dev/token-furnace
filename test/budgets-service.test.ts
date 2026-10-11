@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BudgetService, type BudgetSourceDescriptor } from "../src/services/budget-service";
@@ -130,5 +131,46 @@ describe("BudgetService", () => {
     clock = new Date("2026-10-12T12:00:01.000Z");
     expect(service.admit({ identity: { source: "claude", provider: null, model: null }, estimatedCost: 1, now: clock }).allowed).toBe(false);
     service.close();
+  });
+
+  it("keeps native token completion out of percentage reservations and isolates session sources", () => {
+    const { service } = setup();
+    service.savePolicies([
+      { ...manual(100), scope: { kind: "source", source: "claude" } },
+      { ...manual(100), scope: { kind: "source", source: "codex" } },
+    ], 0);
+    const claude = service.admit({ identity: { source: "claude", provider: null, model: null }, sessionId: "shared-session", estimatedCost: 10, now });
+    const claudeCall = service.admit({ identity: { source: "claude", provider: null, model: null }, sessionId: "shared-session", requestId: "native-call", estimatedCost: 10, now });
+    const codex = service.admit({ identity: { source: "codex", provider: null, model: null }, sessionId: "shared-session", estimatedCost: 10, now });
+    expect(claude.allowed && claudeCall.allowed && codex.allowed).toBe(true);
+    service.reconcileSession("claude", "shared-session", 7, "claude-native-message", now, "tokens");
+    const db = new DatabaseSync(service.dbPath);
+    expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(claude.reservationId) as { status: string }).status).toBe("completed");
+    expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(codex.reservationId) as { status: string }).status).toBe("reserved");
+    expect((db.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE amount = 7").get() as { count: number }).count).toBe(1);
+    service.releaseSession("claude", "shared-session");
+    expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(claudeCall.reservationId) as { status: string }).status).toBe("reserved");
+    service.releaseRequest("claude", "native-call");
+    expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(claudeCall.reservationId) as { status: string }).status).toBe("released");
+    db.close();
+    service.close();
+
+    const percentage = setup();
+    percentage.service.setMeters([{
+      id: "anthropic:weekly", source: "claude", provider: "anthropic", account: "account-1",
+      usedPercentagePoints: 10, resetAt: new Date("2026-10-15T12:00:00.000Z"), observedAt: now, authoritative: true, window: "7d",
+    }]);
+    percentage.service.savePolicies([{
+      scope: { kind: "source", source: "claude" }, mode: "manual", unit: "percentage-per-hour", limit: 10,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const reservation = percentage.service.admit({ identity: { source: "claude", provider: "anthropic", account: "account-1" }, estimatedCost: 1, costUnit: "percentage-per-hour", now });
+    expect(reservation.allowed).toBe(true);
+    percentage.service.reconcile(reservation.reservationId!, 12, "native-token-message", now, "tokens", "claude");
+    const percentageDb = new DatabaseSync(percentage.service.dbPath);
+    expect((percentageDb.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(reservation.reservationId) as { status: string }).status).toBe("reserved");
+    expect((percentageDb.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE event_id LIKE 'native-token-message:%'").get() as { count: number }).count).toBe(0);
+    percentageDb.close();
+    percentage.service.close();
   });
 });

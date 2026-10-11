@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createContext, Script } from "node:vm";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { installBudgetAdapters, rollbackBudgetAdapters } from "../src/setup/agents";
@@ -31,7 +32,7 @@ describe("budget adapter setup", () => {
     expect(openCodePlugin).toMatch(/stdin: new Blob|hasUsage/);
     expect(openCodePlugin).toMatch(/event\.type === "session\.idle"/);
     expect(openCodePlugin).toMatch(/client\.session\.messages/);
-    expect(openCodePlugin).toMatch(/latest\?\.info\?\.tokens/);
+    expect(openCodePlugin).toMatch(/reservationIds/);
     expect(openCodePlugin).toMatch(/requestId: input\.callID/);
     expect(openCodePlugin).not.toMatch(/TOKEN_FURNACE_QUALIFY_REQUEST_ID \?\? input\.callID/);
     expect(openCodePlugin).not.toMatch(/executable: process\.execPath/);
@@ -43,6 +44,85 @@ describe("budget adapter setup", () => {
     expect(existsSync(join(root, ".codex", "hooks.json"))).toBe(false);
     expect(existsSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"))).toBe(false);
     expect(output.join("")).toMatch(/Claude|Partial/);
+  });
+
+  it("executes generated OpenCode callbacks for message-scoped accounting", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-setup-opencode-runtime-"));
+    roots.push(root);
+    expect(installBudgetAdapters({ HOME: root }, { apply: true }, { write: () => undefined })).toBe(0);
+    const pluginPath = join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts");
+    const executable = readFileSync(pluginPath, "utf8")
+      .replace("export const TokenFurnaceBudget =", "globalThis.TokenFurnaceBudget =")
+      .replace("export default TokenFurnaceBudget;", "");
+    const hookEvents: Array<Record<string, unknown>> = [];
+    let messages: unknown[] = [];
+    class TestBlob {
+      readonly value: string;
+      constructor(parts: unknown[]) { this.value = String(parts[0]); }
+    }
+    const context = createContext({
+      Blob: TestBlob,
+      Bun: {
+        spawnSync: (_args: unknown, options: { stdin: TestBlob }) => {
+          const event = JSON.parse(options.stdin.value) as Record<string, unknown>;
+          hookEvents.push(event);
+          const reservationIds = Array.isArray(event.reservationIds)
+            ? event.reservationIds
+            : typeof event.reservationId === "string" ? [event.reservationId] : [];
+          const body = {
+            allow: true,
+            reservationId: typeof event.requestId === "string" && !event.phase ? `reservation-${event.requestId}` : null,
+            reconciled: event.phase === "complete",
+            reconciledReservationIds: reservationIds,
+          };
+          return { exitCode: 0, stdout: new TextEncoder().encode(JSON.stringify(body)) };
+        },
+      },
+      TextDecoder,
+      TextEncoder,
+      process: { pid: 4242, env: {} },
+    });
+    new Script(executable).runInContext(context);
+    const factory = (context as unknown as { TokenFurnaceBudget: (ctx: unknown) => Promise<Record<string, unknown>> }).TokenFurnaceBudget;
+    const ctx = {
+      serverUrl: "http://127.0.0.1:4096",
+      client: { session: { messages: async () => ({ data: messages }) } },
+    };
+    const callbacks = await factory(ctx);
+    const before = callbacks["tool.execute.before"] as (input: Record<string, unknown>) => Promise<void>;
+    const after = callbacks["tool.execute.after"] as (input: Record<string, unknown>, output: Record<string, unknown>) => Promise<void>;
+    const onEvent = callbacks.event as (input: { event: Record<string, unknown> }) => Promise<void>;
+    const assistant = (id: string, callID: string, providerID: string, modelID: string, input: number, output: number, status = "completed") => ({
+      info: { id, role: "assistant", providerID, modelID, time: { completed: "2026-10-11T12:00:00.000Z" }, tokens: { input, output } },
+      parts: [{ type: "tool", callID, state: { status } }],
+    });
+
+    await before({ sessionID: "multi", callID: "call-a" });
+    await before({ sessionID: "multi", callID: "call-b" });
+    messages = [assistant("message-a", "call-a", "provider-a", "model-a", 3, 2), assistant("message-b", "call-b", "provider-b", "model-b", 4, 1)];
+    await onEvent({ event: { type: "session.idle", properties: { sessionID: "multi" } } });
+    const multi = hookEvents.filter((event) => event.phase === "complete" && Array.isArray(event.reservationIds));
+    expect(multi).toHaveLength(2);
+    expect(multi.reduce((sum, event) => sum + Number((event.usage as { total_tokens: number }).total_tokens), 0)).toBe(10);
+    expect(multi.map((event) => [event.provider, event.model])).toEqual([["provider-a", "model-a"], ["provider-b", "model-b"]]);
+    const afterFirstIdle = hookEvents.length;
+    await onEvent({ event: { type: "session.idle", properties: { sessionID: "multi" } } });
+    expect(hookEvents).toHaveLength(afterFirstIdle);
+
+    messages = [];
+    await before({ sessionID: "same-session", callID: "metadata-call" });
+    await after({ sessionID: "same-session", callID: "metadata-call" }, { metadata: { usage: { total_tokens: 2 } } });
+    await before({ sessionID: "same-session", callID: "no-metadata-call" });
+    messages = [assistant("message-c", "no-metadata-call", "provider-c", "model-c", 5, 1)];
+    await onEvent({ event: { type: "session.idle", properties: { sessionID: "same-session" } } });
+    expect(hookEvents.filter((event) => event.phase === "complete" && event.eventId === "message-c")).toHaveLength(1);
+
+    await before({ sessionID: "background", callID: "background-call" });
+    messages = [assistant("message-running", "background-call", "provider-bg", "model-bg", 9, 9, "running")];
+    const beforeBackgroundIdle = hookEvents.length;
+    await onEvent({ event: { type: "session.idle", properties: { sessionID: "background" } } });
+    await onEvent({ event: { type: "session.idle", properties: { sessionID: "background" } } });
+    expect(hookEvents).toHaveLength(beforeBackgroundIdle);
   });
 
   it("leaves malformed native config untouched", () => {

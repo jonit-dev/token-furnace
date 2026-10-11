@@ -214,7 +214,7 @@ describe("budget CLI", () => {
       const pendingSiblingReservationId = String(pendingSibling.reservationId);
       invoke({ source: "opencode", phase: "complete", completed: true, reservationId: pending.reservationId, eventId: "native-tool-after" });
       expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(pendingReservationId) as { status: string }).status).toBe("reserved");
-      invoke({ source: "opencode", phase: "complete", completed: true, session_id: "session-pending", eventId: "native-assistant-message", usage: { total_tokens: 7 } });
+      invoke({ source: "opencode", phase: "complete", completed: true, session_id: "session-pending", reservationIds: [pendingReservationId, pendingSiblingReservationId], eventId: "native-assistant-message", usage: { total_tokens: 7 }, usageUnit: "tokens" });
       expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(pendingReservationId) as { status: string }).status).toBe("completed");
       expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(pendingSiblingReservationId) as { status: string }).status).toBe("completed");
       expect(db.prepare("SELECT amount FROM usage_events WHERE event_id LIKE 'native-assistant-message:%'").all()).toHaveLength(1);

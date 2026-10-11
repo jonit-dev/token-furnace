@@ -20,6 +20,7 @@ import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { openCodeWeek, planWeek } from "./services/usage-client";
 import { controlTargetProof, type ControlOutcome, type NativeTarget } from "./services/agent-control";
+import type { ActualUsageUnit } from "./services/budget-service";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { installBudgetAdapters, runFixConfig, runSetup } from "./setup/agents";
 
@@ -313,6 +314,9 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   const hookEvent = stringValue(event.hook_event_name ?? event.hookEventName ?? event.eventName);
   const phase = stringValue(event.phase ?? event.lifecycle) ?? (hookEvent === "PostToolUse" ? "complete" : hookEvent === "Stop" || hookEvent === "SessionEnd" ? "abandon" : "start");
   const reservationId = stringValue(event.reservationId ?? event.reservation_id);
+  const reservationIds = Array.isArray(event.reservationIds)
+    ? event.reservationIds.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
   const requestId = stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.turnId);
   const correlationId = stringValue(app.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID);
   const sessionId = stringValue(event.session_id ?? event.sessionId);
@@ -324,14 +328,23 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   if (identity && (phase === "start" || provider || model || metadata?.account || nativeFromEvent(event, identity.source))) {
     registerHookTarget(app, event, identity);
   }
-  if ((reservationId || requestId || sessionId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
+  if ((reservationId || reservationIds.length || requestId || sessionId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
     const amount = usageAmount(event) ?? metadata?.usage ?? null;
     if (amount !== null && (phase === "complete" || phase === "completed" || phase === "reconcile")) {
-      const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? requestId ?? sessionId}:${phase}`;
+      const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? (reservationIds.length ? reservationIds.join(",") : null) ?? requestId ?? sessionId}:${phase}`;
       const observedAt = eventObservedAt(event);
-      if (reservationId) app.budgets.reconcile(reservationId, amount, eventId, observedAt);
-      else if (requestId) app.budgets.reconcileRequest(requestId, amount, eventId, observedAt);
-      else if (sessionId) app.budgets.reconcileSession(sessionId, amount, eventId, observedAt);
+      const actualUnit = nativeUsageUnit(event);
+      const reconciledReservationIds = source && reservationIds.length
+        ? app.budgets.reconcileReservations(source, reservationIds, amount, eventId, observedAt, actualUnit)
+        : reservationId
+          ? app.budgets.reconcile(reservationId, amount, eventId, observedAt, actualUnit, source ?? undefined)
+          : source && requestId
+            ? app.budgets.reconcileRequest(source, requestId, amount, eventId, observedAt, actualUnit)
+            : source && sessionId
+              ? app.budgets.reconcileSession(source, sessionId, amount, eventId, observedAt, actualUnit)
+              : [];
+      writeBudgetHookOutput(source, hookEvent, true, reconciledReservationIds.length ? "Reservation reconciled." : "Native usage was retained as unresolved for this reservation unit.", null, reservationId, reconciledReservationIds);
+      return 0;
     } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
       const sessionId = stringValue(event.session_id ?? event.sessionId);
       if (!source || !sessionId || !app.control.ownsSession(source, sessionId)) {
@@ -339,16 +352,16 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
         return 0;
       }
       if (reservationId) app.budgets.release(reservationId);
-      else if (requestId) app.budgets.releaseRequest(requestId);
-      else app.budgets.releaseSession(sessionId);
-    } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || requestId || sessionId)) {
-      writeBudgetHookOutput(source, hookEvent, true, "Native completion observed; reservation retained until attributable usage or verified abandonment.", null, reservationId);
+      else if (requestId) app.budgets.releaseRequest(source, requestId);
+      else app.budgets.releaseSession(source, sessionId);
+    } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || reservationIds.length || requestId || sessionId)) {
+      writeBudgetHookOutput(source, hookEvent, true, "Native completion observed; reservation retained until attributable usage or verified abandonment.", null, reservationId, []);
       return 0;
     } else {
-      writeBudgetHookOutput(source, hookEvent, false, "Completion has no attributable usage telemetry.", null, reservationId);
+      writeBudgetHookOutput(source, hookEvent, false, "Completion has no attributable usage telemetry.", null, reservationId, []);
       return 0;
     }
-    writeBudgetHookOutput(source, hookEvent, true, "Reservation reconciled.", null, reservationId);
+    writeBudgetHookOutput(source, hookEvent, true, "Reservation released.", null, reservationId);
     return 0;
   }
   const state = app.budgets.snapshot();
@@ -375,6 +388,7 @@ function writeBudgetHookOutput(
   reason: string,
   retryAt: string | null,
   reservationId: string | null,
+  reconciledReservationIds?: string[],
 ): void {
   if ((source === "claude" || source === "codex") && hookEvent) {
     process.stdout.write(JSON.stringify(nativeBudgetHookOutput(source, hookEvent, allowed, reason)));
@@ -386,6 +400,10 @@ function writeBudgetHookOutput(
     reason,
     retryAt,
     reservationId,
+    ...(reconciledReservationIds ? {
+      reconciled: reconciledReservationIds.length > 0,
+      reconciledReservationIds,
+    } : {}),
   }));
 }
 
@@ -467,6 +485,12 @@ function usageAmount(event: Record<string, unknown>): number | null {
     ? Number(record.total_tokens ?? record.totalTokens)
     : values.reduce((sum, value) => sum + value, 0);
   return total > 0 ? total : null;
+}
+
+function nativeUsageUnit(event: Record<string, unknown>): ActualUsageUnit {
+  const value = stringValue(event.usageUnit ?? event.usage_unit);
+  if (value === "reservation" || value === "tokens" || value === "percentage-per-hour" || value === "tokens-per-hour" || value === "tokens-total") return value;
+  return "tokens";
 }
 
 function eventObservedAt(event: Record<string, unknown>): Date | undefined {

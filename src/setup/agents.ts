@@ -1010,15 +1010,22 @@ function openCodePlugin(): string {
 const modelBySession = new Map();
 const reservationByCall = new Map();
 const sessionByCall = new Map();
-const usageObservedBySession = new Set();
+const seenMessagesBySession = new Map();
+async function messagesFor(ctx, sessionID) {
+  const messages = await ctx.client.session.messages({ path: { id: sessionID }, query: { limit: 100 } });
+  return Array.isArray(messages) ? messages : (messages.data ?? []);
+}
+function modelForMessage(item) {
+  const info = item?.info;
+  return info?.providerID && info?.modelID ? { provider: info.providerID, model: info.modelID } : {};
+}
 async function modelFor(ctx, sessionID) {
   const cached = modelBySession.get(sessionID);
   try {
-    const messages = await ctx.client.session.messages({ path: { id: sessionID }, query: { limit: 10 } });
-    const list = Array.isArray(messages) ? messages : (messages.data ?? []);
+    const list = await messagesFor(ctx, sessionID);
     const latest = [...list].reverse().find((item) => item.info?.role === "assistant");
-    if (latest?.info?.providerID && latest?.info?.modelID) {
-      const model = { provider: latest.info.providerID, model: latest.info.modelID };
+    const model = modelForMessage(latest);
+    if (model.provider && model.model) {
       modelBySession.set(sessionID, model);
       return model;
     }
@@ -1060,8 +1067,8 @@ export const TokenFurnaceBudget = async (ctx) => ({
     if (!hasUsage) {
       return;
     }
-    usageObservedBySession.add(input.sessionID);
-    callBudget({ source: "opencode", identityVerified: true, phase: "complete", reservationId, eventId: input.callID, timestamp: output.metadata?.timestamp ?? output.metadata?.completedAt, usage });
+    const decision = callBudget({ source: "opencode", identityVerified: true, phase: "complete", reservationId, eventId: input.callID, timestamp: output.metadata?.timestamp ?? output.metadata?.completedAt, usage, usageUnit: "tokens" });
+    if (decision.reconciled === false) return;
     reservationByCall.delete(input.callID);
     sessionByCall.delete(input.callID);
   },
@@ -1071,32 +1078,44 @@ export const TokenFurnaceBudget = async (ctx) => ({
     if (event.type === "session.idle") {
       const pending = [...sessionByCall.entries()].filter(([, ownedSession]) => ownedSession === sessionID);
       if (!pending.length) return;
-      if (usageObservedBySession.has(sessionID)) return;
       let messages;
       try {
-        messages = await ctx.client.session.messages({ path: { id: sessionID }, query: { limit: 10 } });
+        messages = await messagesFor(ctx, sessionID);
       } catch {
         return;
       }
-      const list = Array.isArray(messages) ? messages : (messages.data ?? []);
-      const latest = [...list].reverse().find((item) => item.info?.role === "assistant" && item.info?.time?.completed && !item.info?.error);
-      const tokens = latest?.info?.tokens;
-      if (!latest?.info?.id || !tokens) return;
-      const usage = {
-        input_tokens: Number(tokens.input) || 0,
-        output_tokens: Number(tokens.output) || 0,
-        reasoning_tokens: Number(tokens.reasoning) || 0,
-        cached_input_tokens: Number(tokens.cache?.read) || 0,
-        cache_write_tokens: Number(tokens.cache?.write) || 0,
-      };
-      const total = [usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.cached_input_tokens, usage.cache_write_tokens]
-        .reduce((sum, value) => sum + value, 0);
-      if (!Number.isFinite(total) || total <= 0) return;
-      const identity = await modelFor(ctx, sessionID);
-      callBudget({ source: "opencode", ...identity, identityVerified: true, phase: "complete", completed: true, session_id: sessionID, eventId: String(latest.info.id), timestamp: latest.info.time.completed, native: nativeFor(ctx, sessionID), pid: process.pid, usage: { ...usage, total_tokens: total } });
-      for (const [callID] of pending) {
-        reservationByCall.delete(callID);
-        sessionByCall.delete(callID);
+      const pendingByCall = new Map(pending);
+      const seen = seenMessagesBySession.get(sessionID) ?? new Set();
+      seenMessagesBySession.set(sessionID, seen);
+      for (const item of messages) {
+        const info = item?.info;
+        if (!info?.id || info.role !== "assistant" || !info.time?.completed || info.error || seen.has(String(info.id))) continue;
+        const calls = Array.isArray(item.parts)
+          ? item.parts.filter((part) => part?.type === "tool" && typeof part.callID === "string" && pendingByCall.has(part.callID) && (!part.state?.status || part.state.status === "completed" || part.state.status === "error"))
+          : [];
+        if (!calls.length || !info.tokens) continue;
+        const usage = {
+          input_tokens: Number(info.tokens.input) || 0,
+          output_tokens: Number(info.tokens.output) || 0,
+          reasoning_tokens: Number(info.tokens.reasoning) || 0,
+          cached_input_tokens: Number(info.tokens.cache?.read) || 0,
+          cache_write_tokens: Number(info.tokens.cache?.write) || 0,
+        };
+        const total = [usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.cached_input_tokens, usage.cache_write_tokens]
+          .reduce((sum, value) => sum + value, 0);
+        if (!Number.isFinite(total) || total <= 0) continue;
+        const identity = modelForMessage(item);
+        const reservationIds = calls.map((part) => reservationByCall.get(part.callID)).filter((id) => typeof id === "string");
+        if (!reservationIds.length) continue;
+        const decision = callBudget({ source: "opencode", ...identity, identityVerified: Boolean(identity.provider && identity.model), phase: "complete", completed: true, session_id: sessionID, reservationIds, eventId: String(info.id), timestamp: info.time.completed, native: nativeFor(ctx, sessionID), pid: process.pid, usage: { ...usage, total_tokens: total }, usageUnit: "tokens" });
+        const reconciled = new Set(Array.isArray(decision.reconciledReservationIds) ? decision.reconciledReservationIds : []);
+        for (const part of calls) {
+          if (!reconciled.has(reservationByCall.get(part.callID))) continue;
+          reservationByCall.delete(part.callID);
+          sessionByCall.delete(part.callID);
+          pendingByCall.delete(part.callID);
+        }
+        if (calls.every((part) => !pendingByCall.has(part.callID))) seen.add(String(info.id));
       }
       return;
     }
@@ -1109,7 +1128,7 @@ export const TokenFurnaceBudget = async (ctx) => ({
       reservationByCall.delete(callID);
       sessionByCall.delete(callID);
     }
-    usageObservedBySession.delete(sessionID);
+    seenMessagesBySession.delete(sessionID);
   },
 });
 export default TokenFurnaceBudget;
