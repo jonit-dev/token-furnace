@@ -296,14 +296,14 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
 }
 
 export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
+  const configuredSource = sourceOverride ?? sourceValue(app.env.TOKEN_FURNACE_SOURCE);
   let event: Record<string, unknown> = {};
   try { event = JSON.parse(stdin) as Record<string, unknown>; } catch {
+    if (configuredSource === "claude" || configuredSource === "codex") return 2;
     process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Malformed budget hook input." }));
     return 0;
   }
-  const source = sourceOverride ?? (event.source === "claude" || event.source === "codex" || event.source === "opencode"
-    ? event.source
-    : app.env.TOKEN_FURNACE_SOURCE === "claude" || app.env.TOKEN_FURNACE_SOURCE === "codex" || app.env.TOKEN_FURNACE_SOURCE === "opencode" ? app.env.TOKEN_FURNACE_SOURCE : null);
+  const source = sourceOverride ?? sourceValue(event.source) ?? configuredSource;
   const hintedProvider = stringValue(event.provider ?? event.providerID ?? event.provider_id);
   const hintedModel = stringValue(event.model ?? event.modelID ?? event.model_id);
   const hookEvent = stringValue(event.hook_event_name ?? event.hookEventName ?? event.eventName);
@@ -328,19 +328,19 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
     } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
       const sessionId = stringValue(event.session_id ?? event.sessionId);
       if (!source || !sessionId || !app.control.ownsSession(source, sessionId)) {
-        process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Native abandonment was not tied to a verified owned session.", retryAt: null, reservationId }));
+        writeBudgetHookOutput(source, hookEvent, false, "Native abandonment was not tied to a verified owned session.", null, reservationId);
         return 0;
       }
       if (reservationId) app.budgets.release(reservationId);
       else app.budgets.releaseRequest(requestId!);
     } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || requestId)) {
-      process.stdout.write(JSON.stringify({ decision: "allow", allow: true, reason: "Native completion observed; reservation retained until attributable usage or verified abandonment.", retryAt: null, reservationId }));
+      writeBudgetHookOutput(source, hookEvent, true, "Native completion observed; reservation retained until attributable usage or verified abandonment.", null, reservationId);
       return 0;
     } else {
-      process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Completion has no attributable usage telemetry.", retryAt: null, reservationId }));
+      writeBudgetHookOutput(source, hookEvent, false, "Completion has no attributable usage telemetry.", null, reservationId);
       return 0;
     }
-    process.stdout.write(JSON.stringify({ decision: "allow", allow: true, reason: "Reservation reconciled.", retryAt: null, reservationId }));
+    writeBudgetHookOutput(source, hookEvent, true, "Reservation reconciled.", null, reservationId);
     return 0;
   }
   const state = app.budgets.snapshot();
@@ -354,18 +354,46 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
     : state.policies.some((policy) => policy.mode !== "off") || state.stops.length > 0
       ? { allowed: false, reason: "Budget hook input has no verified source.", retryAt: null, reservationId: null, matched: [] }
       : { allowed: true, reason: "Budget enforcement is Off; source identity was not required.", retryAt: null, reservationId: null, matched: [] };
-  const body = {
-    decision: decision.allowed ? "allow" : "deny",
-    allow: decision.allowed,
-    reason: decision.reason,
-    retryAt: decision.retryAt,
-    reservationId: decision.reservationId,
-    ...(decision.allowed ? {} : hookEvent === "UserPromptSubmit"
-      ? { decision: "block", reason: decision.reason }
-      : { hookSpecificOutput: { hookEventName: hookEvent ?? "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } }),
-  };
-  process.stdout.write(JSON.stringify(body));
+  writeBudgetHookOutput(source, hookEvent, decision.allowed, decision.reason, decision.retryAt, decision.reservationId);
   return 0;
+}
+
+function writeBudgetHookOutput(
+  source: Source | null,
+  hookEvent: string | null,
+  allowed: boolean,
+  reason: string,
+  retryAt: string | null,
+  reservationId: string | null,
+): void {
+  if ((source === "claude" || source === "codex") && hookEvent) {
+    process.stdout.write(JSON.stringify(nativeBudgetHookOutput(source, hookEvent, allowed, reason)));
+    return;
+  }
+  process.stdout.write(JSON.stringify({
+    decision: allowed ? "allow" : "deny",
+    allow: allowed,
+    reason,
+    retryAt,
+    reservationId,
+  }));
+}
+
+function nativeBudgetHookOutput(source: "claude" | "codex", hookEvent: string | null, allowed: boolean, reason: string): Record<string, unknown> {
+  switch (hookEvent) {
+    case "PreToolUse":
+      return source === "claude"
+        ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: allowed ? "allow" : "deny", ...(allowed ? {} : { permissionDecisionReason: reason }) } }
+        : allowed ? { decision: "approve" } : { decision: "block", reason };
+    case "UserPromptSubmit":
+      return allowed ? {} : { decision: "block", reason };
+    case "PostToolUse":
+    case "Stop":
+    case "SessionEnd":
+      return {};
+    default:
+      return {};
+  }
 }
 
 function registerHookTarget(app: App, event: Record<string, unknown>, identity: { source: Source; provider: string | null; model: string | null; account: string | null }): void {
@@ -548,6 +576,10 @@ function budgetSources(app: App) {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function sourceValue(value: unknown): Source | null {
+  return value === "claude" || value === "codex" || value === "opencode" ? value : null;
 }
 
 function numberValue(value: unknown): number | null {

@@ -83,30 +83,78 @@ describe("budget CLI", () => {
     }
   });
 
-  it("maps native Claude lifecycle payloads to the shared reservation", () => {
-    const root = mkdtempSync(join(tmpdir(), "tf-budget-native-hook-"));
+  it.each(["claude", "codex"] as const)("emits the strict %s native hook contract", (source) => {
+    const root = mkdtempSync(join(tmpdir(), `tf-budget-${source}-native-hook-`));
     roots.push(root);
     const app = compose({ HOME: root }, { noCache: true });
     stubNoNativeHost(app);
     app.budgets.savePolicies([{
-      scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 10,
+      scope: { kind: "source", source }, mode: "manual", unit: "tokens-total", limit: 10,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    const invoke = (event: Record<string, unknown>): Record<string, unknown> => {
+      expect(runBudgetHook(JSON.stringify(event), app, source)).toBe(0);
+      return JSON.parse(output.pop()!) as Record<string, unknown>;
+    };
+    const expectStrict = (body: Record<string, unknown>) => {
+      expect(body).not.toHaveProperty("allow");
+      expect(body).not.toHaveProperty("retryAt");
+      expect(body).not.toHaveProperty("reservationId");
+    };
+    try {
+      expect(runBudgetHook("{", app, source)).toBe(2);
+      expect(output).toEqual([]);
+
+      const allowedPreToolUse = invoke({ hook_event_name: "PreToolUse", tool_use_id: `${source}-native-tool`, estimatedCost: 5, costUnit: "tokens-total" });
+      expectStrict(allowedPreToolUse);
+      if (source === "claude") {
+        expect(allowedPreToolUse).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } });
+      } else {
+        expect(allowedPreToolUse).toEqual({ decision: "approve" });
+      }
+
+      const reconciledPostToolUse = invoke({ hook_event_name: "PostToolUse", tool_use_id: `${source}-native-tool`, actualCost: 5 });
+      expectStrict(reconciledPostToolUse);
+      expect(reconciledPostToolUse).toEqual({});
+
+      const blockedPrompt = invoke({ hook_event_name: "UserPromptSubmit", session_id: `${source}-native-session`, estimatedCost: 20, costUnit: "tokens-total" });
+      expectStrict(blockedPrompt);
+      expect(blockedPrompt).toMatchObject({ decision: "block", reason: expect.any(String) });
+
+      const stop = invoke({ hook_event_name: "Stop", session_id: `${source}-native-session` });
+      const sessionEnd = invoke({ hook_event_name: "SessionEnd", session_id: `${source}-native-session` });
+      expectStrict(stop);
+      expectStrict(sessionEnd);
+      expect(stop).toEqual({});
+      expect(sessionEnd).toEqual({});
+    } finally {
+      process.stdout.write = original;
+      app.close();
+    }
+  });
+
+  it("keeps OpenCode's generic reservation contract", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-opencode-hook-"));
+    roots.push(root);
+    const app = compose({ HOME: root }, { noCache: true });
+    stubNoNativeHost(app);
+    app.budgets.savePolicies([{
+      scope: { kind: "source", source: "opencode" }, mode: "manual", unit: "tokens-total", limit: 100,
       deadline: "2099-10-11T12:00:00.000Z",
     }], 0);
     const output: string[] = [];
     const original = process.stdout.write;
     process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
     try {
-      runBudgetHook(JSON.stringify({ hook_event_name: "PreToolUse", tool_use_id: "native-tool", estimatedCost: 5, costUnit: "tokens-total" }), app, "claude");
-      expect((JSON.parse(output.pop()!) as { allow: boolean }).allow).toBe(true);
-      runBudgetHook(JSON.stringify({ hook_event_name: "PostToolUse", tool_use_id: "native-tool" }), app, "claude");
-      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, reason: expect.stringMatching(/completion/i) });
-      runBudgetHook(JSON.stringify({ estimatedCost: 5, costUnit: "tokens-total", requestId: "completed-without-usage" }), app, "claude");
-      const completed = JSON.parse(output.pop()!) as { allow: boolean; reservationId: string };
-      expect(completed.allow).toBe(true);
-      runBudgetHook(JSON.stringify({ phase: "complete", completed: true, reservationId: completed.reservationId }), app, "claude");
-      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, reason: expect.stringMatching(/completion/i) });
-      runBudgetHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-session", estimatedCost: 20, costUnit: "tokens-total" }), app, "claude");
-      expect(JSON.parse(output.pop()!)).toMatchObject({ decision: "block", allow: false });
+      expect(runBudgetHook(JSON.stringify({ source: "opencode", estimatedCost: 20, costUnit: "tokens-total", requestId: "opencode-call" }), app, "opencode")).toBe(0);
+      const admitted = JSON.parse(output.pop()!) as { allow: boolean; reservationId: string; decision: string };
+      expect(admitted).toMatchObject({ allow: true, decision: "allow" });
+      expect(admitted.reservationId).toMatch(/[0-9a-f-]{20}/);
+      expect(runBudgetHook(JSON.stringify({ source: "opencode", phase: "complete", reservationId: admitted.reservationId, actualCost: 20, eventId: "opencode-call" }), app, "opencode")).toBe(0);
+      expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, decision: "allow", reservationId: admitted.reservationId });
     } finally {
       process.stdout.write = original;
       app.close();

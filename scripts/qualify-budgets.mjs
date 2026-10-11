@@ -73,7 +73,7 @@ try {
   }
 } finally {
   for (const worker of nativeWorkers.splice(0)) await stopChild(worker);
-  for (const server of servers) await stopChild(server);
+  for (const server of servers) await stopChild(server.child);
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 }
 }
