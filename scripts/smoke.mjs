@@ -310,8 +310,14 @@ try {
     "serve exposes all-source budget controls",
   );
   const enabled = run(npx.cmd, [...npx.args, "--no-install", "token-furnace", "budgets", "enable", "--confirm"], { cwd: project, env });
+  const codexHooksPath = join(env.CODEX_HOME, "hooks.json");
+  let codexHooks = null;
+  try { codexHooks = JSON.parse(readFileSync(codexHooksPath, "utf8")); } catch { /* the check below reports the missing/malformed asset */ }
+  const codexCommand = "token-furnace hook budget --source codex";
+  const codexEvents = ["PreToolUse", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"];
+  const codexHooksOk = codexEvents.every((eventName) => Array.isArray(codexHooks?.hooks?.[eventName]) && codexHooks.hooks[eventName].some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some((hook) => hook?.command === codexCommand)));
   check(
-    enabled.includes("Claude") && existsSync(join(env.CLAUDE_CONFIG_DIR, "settings.json")) && existsSync(join(env.HOME, ".config", "opencode", "plugins", "token-furnace-budget.ts")),
+    enabled.includes("Claude") && enabled.includes("Codex") && existsSync(join(env.CLAUDE_CONFIG_DIR, "settings.json")) && codexHooksOk && existsSync(join(env.HOME, ".config", "opencode", "plugins", "token-furnace-budget.ts")),
     "installed CLI writes isolated adapter assets",
   );
 
