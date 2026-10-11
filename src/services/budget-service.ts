@@ -53,6 +53,10 @@ export interface AdmissionRequest {
   /** Auto meters are percentage points; manual policies use their configured unit. */
   costUnit?: BudgetPolicy["unit"];
   requestId?: string;
+  /** Qualification-only correlation; never participates in admission idempotency. */
+  correlationId?: string;
+  /** Native session owning this request, distinct from per-call requestId. */
+  sessionId?: string;
   now?: Date;
 }
 
@@ -138,6 +142,8 @@ CREATE TABLE IF NOT EXISTS reservations (
   reservation_id TEXT NOT NULL,
   scope_key TEXT NOT NULL,
   request_id TEXT,
+  correlation_id TEXT,
+  session_id TEXT,
   amount REAL NOT NULL,
   unit TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -152,6 +158,8 @@ CREATE TABLE IF NOT EXISTS admission_decisions (
   account TEXT,
   model TEXT,
   request_id TEXT,
+  correlation_id TEXT,
+  session_id TEXT,
   allowed INTEGER NOT NULL,
   reason TEXT NOT NULL,
   at INTEGER NOT NULL
@@ -211,11 +219,15 @@ export class BudgetService {
       this.db.exec(DDL);
       addSqliteColumn(this.db, "ALTER TABLE meters ADD COLUMN window TEXT");
       addSqliteColumn(this.db, "ALTER TABLE reservations ADD COLUMN request_id TEXT");
+      addSqliteColumn(this.db, "ALTER TABLE reservations ADD COLUMN correlation_id TEXT");
+      addSqliteColumn(this.db, "ALTER TABLE reservations ADD COLUMN session_id TEXT");
       addSqliteColumn(this.db, "ALTER TABLE stop_previews ADD COLUMN target_proof TEXT NOT NULL DEFAULT ''");
-      for (const column of ["provider TEXT", "account TEXT", "model TEXT", "request_id TEXT"]) {
+      for (const column of ["provider TEXT", "account TEXT", "model TEXT", "request_id TEXT", "correlation_id TEXT", "session_id TEXT"]) {
         addSqliteColumn(this.db, `ALTER TABLE admission_decisions ADD COLUMN ${column}`);
       }
       this.db.exec("CREATE INDEX IF NOT EXISTS reservation_request_status ON reservations(request_id, status)");
+      this.db.exec("CREATE INDEX IF NOT EXISTS reservation_session_status ON reservations(session_id, status)");
+      this.db.exec("CREATE INDEX IF NOT EXISTS admission_correlation_at ON admission_decisions(correlation_id, at)");
     });
     try { chmodSync(this.dbPath, 0o600); } catch { /* best effort on Windows */ }
   }
@@ -415,8 +427,8 @@ export class BudgetService {
       }
       const reservationId = randomUUID();
       for (const reservation of reservations) {
-        this.db.prepare("INSERT INTO reservations (reservation_id, scope_key, request_id, amount, unit, created_at, status) VALUES (?, ?, ?, ?, ?, ?, 'reserved')")
-          .run(reservationId, reservation.scopeKey, input.requestId ?? null, reservation.amount, reservation.unit, now.getTime());
+        this.db.prepare("INSERT INTO reservations (reservation_id, scope_key, request_id, correlation_id, session_id, amount, unit, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved')")
+          .run(reservationId, reservation.scopeKey, input.requestId ?? null, input.correlationId ?? null, input.sessionId ?? null, reservation.amount, reservation.unit, now.getTime());
       }
       this.logDecision(input, true, "Admitted.");
       return { allowed: true, reason: "Admitted.", retryAt: retryAt?.toISOString() ?? null, reservationId, matched };
@@ -436,10 +448,17 @@ export class BudgetService {
     });
   }
 
+  releaseSession(sessionId: string): void {
+    if (!sessionId) return;
+    this.writeTransaction(() => {
+      this.db.prepare("UPDATE reservations SET status = 'released' WHERE session_id = ? AND status = 'reserved'").run(sessionId);
+    });
+  }
+
   reconcile(reservationId: string, actualAmount: number, eventId = `${reservationId}:usage`, at?: Date): void {
     if (!Number.isFinite(actualAmount) || actualAmount < 0) return;
     this.writeTransaction(() => {
-      this.reconcileRows(reservationId, actualAmount, eventId, at);
+      this.reconcileRows([reservationId], actualAmount, eventId, at);
     });
   }
 
@@ -447,7 +466,15 @@ export class BudgetService {
     if (!requestId || !Number.isFinite(actualAmount) || actualAmount < 0) return;
     this.writeTransaction(() => {
       const rows = this.db.prepare("SELECT DISTINCT reservation_id FROM reservations WHERE request_id = ? AND status = 'reserved'").all(requestId) as Array<{ reservation_id: string }>;
-      for (const row of rows) this.reconcileRows(row.reservation_id, actualAmount, eventId, at);
+      this.reconcileRows(rows.map((row) => row.reservation_id), actualAmount, eventId, at);
+    });
+  }
+
+  reconcileSession(sessionId: string, actualAmount: number, eventId: string, at?: Date): void {
+    if (!sessionId || !Number.isFinite(actualAmount) || actualAmount < 0) return;
+    this.writeTransaction(() => {
+      const rows = this.db.prepare("SELECT DISTINCT reservation_id FROM reservations WHERE session_id = ? AND status = 'reserved'").all(sessionId) as Array<{ reservation_id: string }>;
+      this.reconcileRows(rows.map((row) => row.reservation_id), actualAmount, eventId, at);
     });
   }
 
@@ -538,8 +565,8 @@ export class BudgetService {
   }
 
   private logDecision(input: AdmissionRequest, allowed: boolean, reason: string): void {
-    this.db.prepare("INSERT INTO admission_decisions (id, source, provider, account, model, request_id, allowed, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(randomUUID(), input.identity.source, canonicalIdentity(input.identity.provider), canonicalIdentity(input.identity.account), canonicalIdentity(input.identity.model), input.requestId ?? null, allowed ? 1 : 0, reason, (input.now ?? this.now()).getTime());
+    this.db.prepare("INSERT INTO admission_decisions (id, source, provider, account, model, request_id, correlation_id, session_id, allowed, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(randomUUID(), input.identity.source, canonicalIdentity(input.identity.provider), canonicalIdentity(input.identity.account), canonicalIdentity(input.identity.model), input.requestId ?? null, input.correlationId ?? null, input.sessionId ?? null, allowed ? 1 : 0, reason, (input.now ?? this.now()).getTime());
   }
 
   private blockedCount(source: Source): number {
@@ -568,13 +595,20 @@ export class BudgetService {
     return values.length ? values[0] : null;
   }
 
-  private reconcileRows(reservationId: string, actualAmount: number, eventId: string, at?: Date): void {
-    const rows = this.db.prepare("SELECT scope_key, unit, status FROM reservations WHERE reservation_id = ?").all(reservationId) as Array<{ scope_key: string; unit: string; status: string }>;
-    for (const row of rows) {
-      if (row.status !== "reserved") continue;
-      this.db.prepare("UPDATE reservations SET status = 'completed' WHERE reservation_id = ? AND scope_key = ? AND status = 'reserved'").run(reservationId, row.scope_key);
+  private reconcileRows(reservationIds: string[], actualAmount: number, eventId: string, at?: Date): void {
+    const scopes = new Map<string, string>();
+    for (const reservationId of reservationIds) {
+      const rows = this.db.prepare("SELECT scope_key, unit, status FROM reservations WHERE reservation_id = ?").all(reservationId) as Array<{ scope_key: string; unit: string; status: string }>;
+      for (const row of rows) {
+        if (row.status !== "reserved") continue;
+        this.db.prepare("UPDATE reservations SET status = 'completed' WHERE reservation_id = ? AND scope_key = ? AND status = 'reserved'").run(reservationId, row.scope_key);
+        scopes.set(`${row.scope_key}\0${row.unit}`, `${row.scope_key}\0${row.unit}`);
+      }
+    }
+    for (const key of scopes.values()) {
+      const [scopeKey, unit] = key.split("\0");
       this.db.prepare("INSERT OR IGNORE INTO usage_events (event_id, scope_key, amount, unit, at) VALUES (?, ?, ?, ?, ?)")
-        .run(`${eventId}:${row.scope_key}`, row.scope_key, actualAmount, row.unit, at?.getTime() ?? this.now().getTime());
+        .run(`${eventId}:${scopeKey}:${unit}`, scopeKey, actualAmount, unit, at?.getTime() ?? this.now().getTime());
     }
   }
 

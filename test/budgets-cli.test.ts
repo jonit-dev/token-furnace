@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { compose } from "../src/compose";
 import { main, runBudgetHook } from "../src/cli";
@@ -165,6 +166,67 @@ describe("budget CLI", () => {
       expect(JSON.parse(output.pop()!)).toMatchObject({ allow: true, decision: "allow", reservationId: admitted.reservationId });
     } finally {
       process.stdout.write = original;
+      app.close();
+    }
+  });
+
+  it("keeps native call IDs distinct while correlating and reconciling session usage", () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-budget-native-correlation-"));
+    roots.push(root);
+    const app = compose({ HOME: root, TOKEN_FURNACE_QUALIFY_REQUEST_ID: "qualification-run" }, { noCache: true });
+    stubNoNativeHost(app);
+    app.budgets.savePolicies([{
+      scope: { kind: "source", source: "opencode" }, mode: "manual", unit: "tokens-total", limit: 100,
+      deadline: "2099-10-11T12:00:00.000Z",
+    }], 0);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    let db: DatabaseSync | undefined;
+    const invoke = (event: Record<string, unknown>): Record<string, unknown> => {
+      expect(runBudgetHook(JSON.stringify(event), app, "opencode")).toBe(0);
+      return JSON.parse(output.pop()!) as Record<string, unknown>;
+    };
+    try {
+      const first = invoke({ source: "opencode", session_id: "session-a", callID: "native-call-a", estimatedCost: 10, costUnit: "tokens-total" });
+      const second = invoke({ source: "opencode", session_id: "session-a", callID: "native-call-b", estimatedCost: 10, costUnit: "tokens-total" });
+      expect(first.reservationId).toBeTruthy();
+      expect(second.reservationId).toBeTruthy();
+      expect(second.reservationId).not.toBe(first.reservationId);
+
+      db = new DatabaseSync(app.budgets.dbPath);
+      const decisions = db.prepare("SELECT request_id, correlation_id, session_id FROM admission_decisions WHERE source = 'opencode' ORDER BY at, id").all() as Array<{ request_id: string; correlation_id: string; session_id: string }>;
+      expect(decisions.slice(-2)).toEqual(expect.arrayContaining([
+        { request_id: "native-call-a", correlation_id: "qualification-run", session_id: "session-a" },
+        { request_id: "native-call-b", correlation_id: "qualification-run", session_id: "session-a" },
+      ]));
+
+      invoke({ source: "opencode", phase: "complete", reservationId: first.reservationId, eventId: "native-message-a", usage: { total_tokens: 10 } });
+      invoke({ source: "opencode", phase: "complete", reservationId: first.reservationId, eventId: "native-message-a", usage: { total_tokens: 10 } });
+      invoke({ source: "opencode", phase: "complete", reservationId: second.reservationId, eventId: "native-message-b", usage: { total_tokens: 10 } });
+      const usage = db.prepare("SELECT event_id, amount FROM usage_events WHERE scope_key = 'source:opencode' ORDER BY event_id").all() as Array<{ event_id: string; amount: number }>;
+      expect(usage).toHaveLength(2);
+      expect(usage.reduce((sum, row) => sum + row.amount, 0)).toBe(20);
+
+      const pending = invoke({ source: "opencode", session_id: "session-pending", callID: "native-call-pending", estimatedCost: 10, costUnit: "tokens-total" });
+      const pendingSibling = invoke({ source: "opencode", session_id: "session-pending", callID: "native-call-pending-sibling", estimatedCost: 10, costUnit: "tokens-total" });
+      const pendingReservationId = String(pending.reservationId);
+      const pendingSiblingReservationId = String(pendingSibling.reservationId);
+      invoke({ source: "opencode", phase: "complete", completed: true, reservationId: pending.reservationId, eventId: "native-tool-after" });
+      expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(pendingReservationId) as { status: string }).status).toBe("reserved");
+      invoke({ source: "opencode", phase: "complete", completed: true, session_id: "session-pending", eventId: "native-assistant-message", usage: { total_tokens: 7 } });
+      expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(pendingReservationId) as { status: string }).status).toBe("completed");
+      expect((db.prepare("SELECT status FROM reservations WHERE reservation_id = ?").get(pendingSiblingReservationId) as { status: string }).status).toBe("completed");
+      expect(db.prepare("SELECT amount FROM usage_events WHERE event_id LIKE 'native-assistant-message:%'").all()).toHaveLength(1);
+
+      const repeatedFirst = invoke({ source: "opencode", session_id: "session-repeated", estimatedCost: 1, costUnit: "tokens-total" });
+      const repeatedSecond = invoke({ source: "opencode", session_id: "session-repeated", estimatedCost: 1, costUnit: "tokens-total" });
+      expect(repeatedFirst.reason).toBe("Admitted.");
+      expect(repeatedSecond.reason).toBe("Admitted.");
+      expect(repeatedSecond.reservationId).not.toBe(repeatedFirst.reservationId);
+    } finally {
+      process.stdout.write = original;
+      db?.close();
       app.close();
     }
   });

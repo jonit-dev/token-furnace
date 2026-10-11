@@ -313,7 +313,9 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   const hookEvent = stringValue(event.hook_event_name ?? event.hookEventName ?? event.eventName);
   const phase = stringValue(event.phase ?? event.lifecycle) ?? (hookEvent === "PostToolUse" ? "complete" : hookEvent === "Stop" || hookEvent === "SessionEnd" ? "abandon" : "start");
   const reservationId = stringValue(event.reservationId ?? event.reservation_id);
-  const requestId = stringValue(app.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID) ?? stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.session_id);
+  const requestId = stringValue(event.requestId ?? event.request_id ?? event.tool_use_id ?? event.toolUseId ?? event.callID ?? event.call_id ?? event.turn_id ?? event.turnId);
+  const correlationId = stringValue(app.env.TOKEN_FURNACE_QUALIFY_REQUEST_ID);
+  const sessionId = stringValue(event.session_id ?? event.sessionId);
   const metadata = source ? resolveNativeMetadata(app, event, source, hookEvent, hintedProvider, hintedModel) : null;
   const provider = metadata?.provider ?? null;
   const model = metadata?.model ?? null;
@@ -322,13 +324,14 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
   if (identity && (phase === "start" || provider || model || metadata?.account || nativeFromEvent(event, identity.source))) {
     registerHookTarget(app, event, identity);
   }
-  if ((reservationId || requestId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
+  if ((reservationId || requestId || sessionId) && (phase === "complete" || phase === "completed" || phase === "reconcile" || phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned")) {
     const amount = usageAmount(event) ?? metadata?.usage ?? null;
     if (amount !== null && (phase === "complete" || phase === "completed" || phase === "reconcile")) {
-      const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? requestId}:${phase}`;
+      const eventId = stringValue(event.eventId ?? event.event_id) ?? `${reservationId ?? requestId ?? sessionId}:${phase}`;
       const observedAt = eventObservedAt(event);
       if (reservationId) app.budgets.reconcile(reservationId, amount, eventId, observedAt);
-      else app.budgets.reconcileRequest(requestId!, amount, eventId, observedAt);
+      else if (requestId) app.budgets.reconcileRequest(requestId, amount, eventId, observedAt);
+      else if (sessionId) app.budgets.reconcileSession(sessionId, amount, eventId, observedAt);
     } else if (phase === "cancel" || phase === "cancelled" || phase === "abandon" || phase === "abandoned") {
       const sessionId = stringValue(event.session_id ?? event.sessionId);
       if (!source || !sessionId || !app.control.ownsSession(source, sessionId)) {
@@ -336,8 +339,9 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
         return 0;
       }
       if (reservationId) app.budgets.release(reservationId);
-      else app.budgets.releaseRequest(requestId!);
-    } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || requestId)) {
+      else if (requestId) app.budgets.releaseRequest(requestId);
+      else app.budgets.releaseSession(sessionId);
+    } else if (phase === "complete" && (hookEvent === "PostToolUse" || event.completed === true) && (reservationId || requestId || sessionId)) {
       writeBudgetHookOutput(source, hookEvent, true, "Native completion observed; reservation retained until attributable usage or verified abandonment.", null, reservationId);
       return 0;
     } else {
@@ -353,7 +357,9 @@ export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source):
         identity: identity!,
         estimatedCost: numberValue(event.estimatedCost ?? event.estimated_cost ?? event.cost) ?? undefined,
         costUnit: event.costUnit === "percentage-per-hour" || event.costUnit === "tokens-per-hour" || event.costUnit === "tokens-total" ? event.costUnit : undefined,
-      requestId: requestId ?? undefined,
+        requestId: requestId ?? undefined,
+        correlationId: correlationId ?? undefined,
+        sessionId: sessionId ?? undefined,
       })
     : state.policies.some((policy) => policy.mode !== "off") || state.stops.length > 0
       ? { allowed: false, reason: "Budget hook input has no verified source.", retryAt: null, reservationId: null, matched: [] }

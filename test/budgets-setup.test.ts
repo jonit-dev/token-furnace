@@ -29,6 +29,11 @@ describe("budget adapter setup", () => {
     expect(existsSync(join(claude, "settings.json.token-furnace-budget-backup"))).toBe(true);
     const openCodePlugin = readFileSync(join(root, ".config", "opencode", "plugins", "token-furnace-budget.ts"), "utf8");
     expect(openCodePlugin).toMatch(/stdin: new Blob|hasUsage/);
+    expect(openCodePlugin).toMatch(/event\.type === "session\.idle"/);
+    expect(openCodePlugin).toMatch(/client\.session\.messages/);
+    expect(openCodePlugin).toMatch(/latest\?\.info\?\.tokens/);
+    expect(openCodePlugin).toMatch(/requestId: input\.callID/);
+    expect(openCodePlugin).not.toMatch(/TOKEN_FURNACE_QUALIFY_REQUEST_ID \?\? input\.callID/);
     expect(openCodePlugin).not.toMatch(/executable: process\.execPath/);
     expect(openCodePlugin).toMatch(/scheme: "basic"/);
     expect(openCodePlugin).toMatch(/OPENCODE_SERVER_PASSWORD/);

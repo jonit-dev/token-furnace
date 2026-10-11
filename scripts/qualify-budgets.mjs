@@ -388,7 +388,7 @@ function decisionEvidence(source, requestId, startedAt, allowed) {
   if (!requestId || !sharedStateHome) return null;
   try {
     const db = new DatabaseSync(join(sharedStateHome, "token-furnace", "budgets.sqlite"));
-    const rows = db.prepare("SELECT allowed, reason, at FROM admission_decisions WHERE source = ? AND request_id = ? AND at >= ? ORDER BY at DESC").all(source, requestId, Math.max(0, (startedAt ?? 0) - 2_000));
+    const rows = db.prepare("SELECT allowed, reason, at, request_id, session_id FROM admission_decisions WHERE source = ? AND correlation_id = ? AND request_id IS NOT NULL AND request_id <> ? AND session_id IS NOT NULL AND at >= ? ORDER BY at DESC").all(source, requestId, requestId, Math.max(0, (startedAt ?? 0) - 2_000));
     db.close();
     return rows.find((row) => Boolean(row.allowed) === allowed) ?? null;
   } catch {
