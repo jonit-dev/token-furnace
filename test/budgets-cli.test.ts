@@ -169,6 +169,31 @@ describe("budget CLI", () => {
     }
   });
 
+  it.each(["claude", "codex", "opencode"] as const)("fails closed for non-object hook input from %s", (source) => {
+    const root = mkdtempSync(join(tmpdir(), `tf-budget-${source}-invalid-hook-`));
+    roots.push(root);
+    const app = compose({ HOME: root }, { noCache: true });
+    stubNoNativeHost(app);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    try {
+      for (const input of ["null", "[]", "\"text\"", "42", "true", "{"]) {
+        const code = runBudgetHook(input, app, source);
+        if (source === "claude" || source === "codex") {
+          expect(code).toBe(2);
+          expect(output).toEqual([]);
+        } else {
+          expect(code).toBe(0);
+          expect(JSON.parse(output.pop()!)).toEqual({ decision: "deny", allow: false, reason: "Malformed budget hook input." });
+        }
+      }
+    } finally {
+      process.stdout.write = original;
+      app.close();
+    }
+  });
+
   it("does not release a reservation from an unverified cancellation payload", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-budget-untrusted-cancel-"));
     roots.push(root);

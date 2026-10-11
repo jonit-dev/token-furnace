@@ -298,7 +298,11 @@ async function runBudgets(argv: string[], app: App): Promise<number> {
 export function runBudgetHook(stdin: string, app: App, sourceOverride?: Source): number {
   const configuredSource = sourceOverride ?? sourceValue(app.env.TOKEN_FURNACE_SOURCE);
   let event: Record<string, unknown> = {};
-  try { event = JSON.parse(stdin) as Record<string, unknown>; } catch {
+  try {
+    const parsed: unknown = JSON.parse(stdin);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Budget hook input must be a JSON object.");
+    event = parsed as Record<string, unknown>;
+  } catch {
     if (configuredSource === "claude" || configuredSource === "codex") return 2;
     process.stdout.write(JSON.stringify({ decision: "deny", allow: false, reason: "Malformed budget hook input." }));
     return 0;
