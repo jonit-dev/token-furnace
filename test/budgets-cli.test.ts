@@ -174,8 +174,9 @@ describe("budget CLI", () => {
     roots.push(root);
     const codexHome = join(root, ".codex");
     const transcript = join(codexHome, "sessions", "2026", "10", "rollout-openrouter.jsonl");
-    const outsideTranscript = join(root, "outside-rollout.jsonl");
+    const siblingTranscript = join(root, ".codex-other", "sessions", "2026", "10", "rollout-openrouter.jsonl");
     mkdirSync(join(codexHome, "sessions", "2026", "10"), { recursive: true });
+    mkdirSync(join(root, ".codex-other", "sessions", "2026", "10"), { recursive: true });
     const app = compose({ HOME: root, CODEX_HOME: codexHome }, { noCache: true });
     stubNoNativeHost(app);
     app.budgets.savePolicies([{
@@ -202,8 +203,12 @@ describe("budget CLI", () => {
       ].join("\n") + "\n");
       expect(run("codex-openrouter-prefixed")).toMatchObject({ source: "codex", provider: "openrouter", model: "nvidia/nemotron-3.5-lightning:free" });
 
-      writeFileSync(outsideTranscript, JSON.stringify({ type: "session_meta", payload: { model_provider: "untrusted" } }) + "\n");
-      expect(run("codex-outside-root", outsideTranscript)).toMatchObject({ source: "codex", provider: null, model: null });
+      writeFileSync(siblingTranscript, [
+        JSON.stringify({ type: "session_meta", payload: { model_provider: "untrusted" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "untrusted/should-not-be-read" } }),
+      ].join("\n") + "\n");
+      expect(run("codex-relative-path", "relative-rollout.jsonl")).toMatchObject({ source: "codex", provider: null, model: null });
+      expect(run("codex-sibling-root", siblingTranscript)).toMatchObject({ source: "codex", provider: null, model: null });
     } finally {
       process.stdout.write = original;
       app.close();

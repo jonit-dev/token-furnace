@@ -5,7 +5,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { CONTEXT_TARGET_LABEL } from "./core/context";
@@ -503,12 +503,14 @@ function resolveNativeMetadata(app: App, event: Record<string, unknown>, source:
 }
 
 function readNativeTranscriptMetadata(app: App, source: Source, path: string): NativeMetadata | null {
-  if (!path.startsWith("/")) return null;
+  if (!isAbsolute(path)) return null;
   try {
     const sourceRoot = app.sources.find((candidate) => candidate.name === source)?.base();
     const transcript = realpathSync(path);
     const root = sourceRoot ? realpathSync(sourceRoot) : null;
-    if (!root || (transcript !== root && !transcript.startsWith(`${root}/`))) return null;
+    if (!root) return null;
+    const withinRoot = relative(root, transcript);
+    if (withinRoot === ".." || withinRoot.startsWith(`..${sep}`) || isAbsolute(withinRoot)) return null;
     if (statSync(transcript).size > 2_000_000) return null;
     const text = readFileSync(transcript, "utf8").slice(-512_000);
     const metadata: NativeMetadata = { provider: null, model: null, account: null, usage: null };
