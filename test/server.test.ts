@@ -268,4 +268,23 @@ describe("configuration repair endpoint", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("lists only repairs that would still change a file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tf-server-pending-"));
+    const app = compose({ HOME: home }, { noCache: true });
+    const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    const pending = async () => ((await (await fetch(`${server.url}/api/fix-config`)).json()) as { pending: string[] }).pending;
+    try {
+      expect(await pending()).toHaveLength(9);
+      const done = await fetch(`${server.url}/api/fix-config`, { method: "POST", headers: { "X-Token-Furnace-Confirm": "true", "X-Token-Furnace-Repairs": "claude-context,claude-workers,codex-context" } });
+      expect(done.status).toBe(200);
+      expect(await pending()).toEqual(["claude-tools", "claude-model", "claude-depth", "codex-workers", "codex-effort", "codex-depth"]);
+      const before = readFileSync(join(home, ".claude", "settings.json"), "utf8");
+      await pending();
+      expect(readFileSync(join(home, ".claude", "settings.json"), "utf8")).toBe(before); // listing never writes
+    } finally {
+      await server.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

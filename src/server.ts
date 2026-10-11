@@ -13,7 +13,7 @@ import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
-import { runFixConfig } from "./setup/agents";
+import { pendingRepairs, runFixConfig } from "./setup/agents";
 import { openCodeWeek, planWeek } from "./services/usage-client";
 import { resetsSnapshot } from "./services/resets-client";
 import {
@@ -177,6 +177,11 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   @Controller()
   class ReportController {
+    @Get("/api/fix-config")
+    pendingFixes(@Res() res: Response) {
+      return res.set("Cache-Control", "no-store").json({ pending: pendingRepairs(app.env) });
+    }
+
     @Post("/api/fix-config")
     fixConfig(@Req() req: Request, @Res() res: Response) {
       const origin = req.headers.origin;

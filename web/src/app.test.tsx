@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -339,7 +339,7 @@ describe("context configuration repair", () => {
   });
 
   it("explains changes, cancels without writing, and applies only after confirmation", async () => {
-    const fetcher = vi.fn(async (url: string) => ({
+    const fetcher = vi.fn(async (url: string, _init?: RequestInit) => ({
       ok: true, status: 200,
       json: async () => url === "/api/fix-config" ? { ok: true, output: "Backup: saved\nUpdated: config" } : fixtureReport,
     }));
@@ -352,7 +352,7 @@ describe("context configuration repair", () => {
     expect(screen.getByRole("dialog").textContent).toContain("Sonnet");
     expect(screen.getAllByRole("checkbox")).toHaveLength(9);
     expect(screen.getAllByRole("checkbox").every((input) => (input as HTMLInputElement).checked)).toBe(true);
-    expect(fetcher.mock.calls.some(([url]) => url === "/api/fix-config")).toBe(false);
+    expect(fetcher.mock.calls.some(([url, init]) => url === "/api/fix-config" && init?.method === "POST")).toBe(false);
     expect(useUi.getState().modal).toBe("auto-fixes");
     fireEvent.click(screen.getByRole("button", { name: "Close modal" }));
     expect(useUi.getState().modal).toBeNull();
@@ -363,6 +363,22 @@ describe("context configuration repair", () => {
     expect(screen.getByRole("status").textContent).toContain("Backup: saved");
     expect(screen.getByRole("button", { name: "Close" })).toBeDefined();
     expect(fetcher.mock.calls.filter(([url]) => url === "/api/report").length).toBeGreaterThan(1);
+  });
+
+  it("lists only pending repairs and shows an all-set state when none remain", async () => {
+    let pending = ["claude-model", "codex-effort"];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => ({ ok: true, json: async () =>
+      url === "/api/fix-config" && !init ? { pending } : fixtureReport })));
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    await waitFor(() => expect(screen.getAllByRole("checkbox")).toHaveLength(2));
+    expect(screen.getByRole("dialog").textContent).toContain("2 of 2 repairs selected");
+    fireEvent.click(screen.getByRole("button", { name: "Close modal" }));
+    pending = [];
+    fireEvent.click(screen.getByRole("button", { name: "Auto Fixes" }));
+    await waitFor(() => expect(screen.queryAllByRole("checkbox")).toHaveLength(0));
+    expect(screen.getByRole("dialog").textContent).toContain("Nothing to repair");
+    expect(screen.getByRole("button", { name: "Back up and apply" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("omits unchecked repairs and disables applying an empty selection", async () => {

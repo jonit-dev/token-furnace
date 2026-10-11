@@ -6,19 +6,31 @@ import { Modal } from "./modal";
 export function FixConfig() {
   const open = useUi((state) => state.modal === "auto-fixes");
   const setModal = useUi((state) => state.setModal);
-  const [selected, setSelected] = useState<ConfigRepairId[]>(() => CONFIG_REPAIRS.map((repair) => repair.id));
+  const [pending, setPending] = useState<ConfigRepairId[]>(() => CONFIG_REPAIRS.map((repair) => repair.id));
+  const [selected, setSelected] = useState<ConfigRepairId[]>(pending);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState("");
   const [done, setDone] = useState(false);
   const live = location.protocol === "http:" || location.protocol === "https:";
 
   useEffect(() => {
-    if (open) {
-      setDone(false);
-      setResult("");
-      setSelected(CONFIG_REPAIRS.map((repair) => repair.id));
-    }
-  }, [open]);
+    if (!open) return;
+    const all = CONFIG_REPAIRS.map((repair) => repair.id);
+    setDone(false);
+    setResult("");
+    setPending(all);
+    setSelected(all);
+    if (!live) return;
+    let stale = false;
+    // Only offer repairs that would still change a file; keep the full list if the check fails.
+    fetch("/api/fix-config").then((response) => response.json()).then((data) => {
+      if (stale || !Array.isArray(data?.pending)) return;
+      const next = all.filter((id) => data.pending.includes(id));
+      setPending(next);
+      setSelected(next);
+    }).catch(() => {});
+    return () => { stale = true; };
+  }, [open, live]);
 
   async function apply() {
     if (!selected.length) return;
@@ -60,16 +72,17 @@ export function FixConfig() {
           className="px-3 py-2 text-sm bg-accent text-bg font-semibold rounded-lg disabled:opacity-50">{busy ? "Saving backups…" : "Back up and apply"}</button>}
       </div>}>
       {!done && <div className="space-y-4">
-        {(["claude", "codex"] as const).map((provider) => <fieldset key={provider} disabled={busy} className="space-y-2">
+        {!pending.length && <p className="text-sm" role="status">Everything is already set. Nothing to repair.</p>}
+        {(["claude", "codex"] as const).filter((provider) => CONFIG_REPAIRS.some((repair) => repair.provider === provider && pending.includes(repair.id))).map((provider) => <fieldset key={provider} disabled={busy} className="space-y-2">
           <legend className="mb-2 font-heading font-semibold">{provider === "claude" ? "Claude Code" : "Codex"}</legend>
-          {CONFIG_REPAIRS.filter((repair) => repair.provider === provider).map((repair) => <label key={repair.id} className="flex items-start gap-3 rounded-lg border border-line p-3 cursor-pointer hover:border-accent">
+          {CONFIG_REPAIRS.filter((repair) => repair.provider === provider && pending.includes(repair.id)).map((repair) => <label key={repair.id} className="flex items-start gap-3 rounded-lg border border-line p-3 cursor-pointer hover:border-accent">
             <input type="checkbox" checked={selected.includes(repair.id)} onChange={(event) => {
               setSelected((current) => event.target.checked ? [...current, repair.id] : current.filter((id) => id !== repair.id));
             }} className="mt-1 accent-accent" />
             <span className="text-sm">{repair.label}<span className="block text-xs text-muted mt-1">{repair.detail}</span></span>
           </label>)}
         </fieldset>)}
-        <p className="text-xs text-muted" aria-live="polite">{selected.length} of {CONFIG_REPAIRS.length} repairs selected. Restart agents after applying. Shell environment overrides must be unset in your shell.</p>
+        <p className="text-xs text-muted" aria-live="polite">{selected.length} of {pending.length} repairs selected. Restart agents after applying. Shell environment overrides must be unset in your shell.</p>
       </div>}
       {result && <pre role={done ? "status" : "alert"} className="mt-4 p-3 text-xs whitespace-pre-wrap break-words rounded-lg bg-bg border border-line max-h-48 overflow-auto">{result}</pre>}
     </Modal>

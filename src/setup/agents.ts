@@ -708,8 +708,17 @@ export function runSetup(
   return 0;
 }
 
+/** Repairs that would still change a file. Dry-runs each one so the test never drifts from the writer. */
+export function pendingRepairs(env: Env): ConfigRepairId[] {
+  return CONFIG_REPAIRS.map((repair) => repair.id).filter((id) => {
+    let output = "";
+    const code = runFixConfig(env, { write: (text) => { output += text; } }, { repairs: [id], dryRun: true });
+    return code !== 0 || output.includes("Would update:"); // an unreadable config stays listed so apply reports it
+  });
+}
+
 /** Repair actionable settings; back up every changed file before writing either config. */
-export function runFixConfig(env: Env, out: { write(text: string): unknown }, options: { includeDepth?: boolean; repairs?: readonly ConfigRepairId[] } = {}): number {
+export function runFixConfig(env: Env, out: { write(text: string): unknown }, options: { includeDepth?: boolean; repairs?: readonly ConfigRepairId[]; dryRun?: boolean } = {}): number {
   try {
     const repairs = options.repairs ?? CONFIG_REPAIRS.filter((repair) => options.includeDepth || !repair.id.endsWith("-depth")).map((repair) => repair.id);
     if (!Array.isArray(repairs) || repairs.some((id) => !CONFIG_REPAIRS.some((repair) => repair.id === id))) {
@@ -793,6 +802,11 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
         throw new Error(`${codexPath}: unsupported setting layout; left unchanged`);
       }
       if (afterCodex !== (beforeCodex ?? "")) changes.push({ path: codexPath, before: beforeCodex, after: afterCodex });
+    }
+
+    if (options.dryRun) {
+      for (const change of changes) out.write(`Would update: ${change.path}\n`);
+      return 0;
     }
 
     const backups: string[] = [];
