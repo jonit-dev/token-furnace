@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { connect as connectTls } from "node:tls";
 import { homedir } from "node:os";
@@ -113,6 +113,12 @@ export interface AgentControlOptions {
   graceMs?: number;
 }
 
+interface ProcessInspectionResult {
+  identity: ProcessIdentity | null;
+  available: boolean;
+  detail?: string;
+}
+
 /** Durable ownership-aware local control. Unregistered or unverifiable work is never signalled. */
 export class AgentControl {
   private readonly inspectProcess: (pid: number) => ProcessIdentity | null;
@@ -142,7 +148,7 @@ export class AgentControl {
       ? process.platform === "win32" && env.USERDOMAIN && env.USERNAME ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME ?? env.USER ?? null
       : options.currentOwner;
     this.currentOwnerSid = options.currentOwnerSid === undefined
-      ? process.platform === "win32" ? this.inspectProcess(this.currentPid)?.ownerSid ?? null : null
+      ? process.platform === "win32" ? this.inspectSafely(this.currentPid).identity?.ownerSid ?? null : null
       : options.currentOwnerSid;
     this.env = env;
     const state = env.TOKEN_FURNACE_STATE_HOME || env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state");
@@ -159,7 +165,9 @@ export class AgentControl {
 
   register(target: ControlTarget): boolean {
     if (!target.id || !Number.isInteger(target.pid) || target.pid <= 0 || target.pid === this.currentPid) return false;
-    const observed = this.inspectProcess(target.pid);
+    const observedResult = this.inspectSafely(target.pid);
+    if (!observedResult.available) return false;
+    const observed = observedResult.identity;
     const ownerUid = target.ownerUid ?? observed?.ownerUid ?? null;
     const ownerIdentity = target.ownerIdentity ?? observed?.ownerIdentity ?? null;
     const ownerSid = target.ownerSid ?? observed?.ownerSid ?? null;
@@ -174,7 +182,7 @@ export class AgentControl {
       ownerUid,
       ownerIdentity,
       ownerSid,
-      executable: target.executable ?? this.inspectProcess(target.pid)?.executable ?? null,
+      executable: target.executable ?? observed?.executable ?? null,
       nativeCancel: target.nativeCancel ?? nativeCanceller(target.native, this.env),
       nativeState: target.nativeState ?? nativeStateChecker(target.native, this.env),
     };
@@ -193,19 +201,23 @@ export class AgentControl {
   }
 
   processIdentity(pid: number): ProcessIdentity | null {
-    return this.inspectProcess(pid);
+    return this.inspectSafely(pid).identity;
   }
 
   /** Resolve a hook's intermediary parent to the owned native runtime, never to a shell alone. */
   owningProcess(pid: number, source: Source, expectedExecutable?: string | null): ProcessIdentity | null {
     const seen = new Set<number>();
-    let current = this.inspectProcess(pid);
+    let currentResult = this.inspectSafely(pid);
+    if (!currentResult.available) return null;
+    let current = currentResult.identity;
     while (current && current.pid > 1 && !seen.has(current.pid)) {
       seen.add(current.pid);
       const executable = current.executable ?? "";
       const expected = expectedExecutable && sameExecutable(expectedExecutable, executable);
       if (sourceForIdentity(current) === source && (!expectedExecutable || expected || sourceForExecutable(executable) === source)) return current;
-      current = current.parentPid ? this.inspectProcess(current.parentPid) : null;
+      currentResult = current.parentPid ? this.inspectSafely(current.parentPid) : { identity: null, available: true };
+      if (!currentResult.available) return null;
+      current = currentResult.identity;
     }
     return null;
   }
@@ -249,9 +261,13 @@ export class AgentControl {
   }
 
   async cancel(target: ControlTarget, force = false): Promise<ControlOutcome> {
-    const identity = this.inspectProcess(target.pid);
+    const initial = this.inspectSafely(target.pid);
+    if (!initial.available) return this.finish(target, { targetId: target.id, status: "unresolved", detail: initial.detail ?? "Process identity lookup is unavailable." });
+    const identity = initial.identity;
     if (!identity) return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Process is no longer discoverable." });
-    if (target.pid === this.currentPid || this.protectsCurrentProcess(target.pid)) {
+    const protection = this.protectsCurrentProcess(target.pid);
+    if (!protection.available) return this.finish(target, { targetId: target.id, status: "unresolved", detail: protection.detail ?? "Ancestor identity lookup is unavailable." });
+    if (target.pid === this.currentPid || protection.protected) {
       return this.finish(target, { targetId: target.id, status: "unresolved", detail: "Refused to target Token Furnace or an ancestor." });
     }
     if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null) || (identity.ownerSid ?? null) !== (target.ownerSid ?? null)) {
@@ -321,7 +337,19 @@ export class AgentControl {
   }
 
   private refreshRuntime(): void {
-    const discovered = this.discoverRuntime?.() ?? this.discoverNativeProcesses();
+    let discovered: ControlTarget[];
+    try {
+      discovered = this.discoverRuntime?.() ?? this.discoverNativeProcesses();
+    } catch (error) {
+      this.runtimeUnverified = [{
+        id: "native-discovery",
+        source: null,
+        provider: null,
+        model: null,
+        detail: `Native process discovery is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      }];
+      return;
+    }
     for (const target of discovered) {
       if (!target.id) continue;
       const normalized = { ...target, provider: canonicalIdentity(target.provider), account: canonicalIdentity(target.account), model: canonicalIdentity(target.model), nativeCancel: target.nativeCancel ?? nativeCanceller(target.native, this.env), nativeState: target.nativeState ?? nativeStateChecker(target.native, this.env) };
@@ -332,9 +360,20 @@ export class AgentControl {
   }
 
   private discoverNativeProcesses(): ControlTarget[] {
-    const discovered = discoverNativeProcesses(this.listNativeProcesses, this.inspectProcess, this.currentPid);
-    this.runtimeUnverified = discovered.unverified;
-    return discovered.targets;
+    try {
+      const discovered = discoverNativeProcesses(this.listNativeProcesses, (pid) => this.inspectSafely(pid).identity, this.currentPid);
+      this.runtimeUnverified = discovered.unverified;
+      return discovered.targets;
+    } catch (error) {
+      this.runtimeUnverified = [{
+        id: "native-discovery",
+        source: null,
+        provider: null,
+        model: null,
+        detail: `Native process discovery is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      }];
+      return [];
+    }
   }
 
   private readTargets(): ControlTarget[] {
@@ -362,9 +401,13 @@ export class AgentControl {
   }
 
   private verify(target: ControlTarget): { ok: true } | { ok: false; detail: string } {
-    const identity = this.inspectProcess(target.pid);
+    const inspected = this.inspectSafely(target.pid);
+    if (!inspected.available) return { ok: false, detail: inspected.detail ?? "Process identity lookup is unavailable." };
+    const identity = inspected.identity;
     if (!identity) return { ok: false, detail: "Process is no longer discoverable." };
-    if (target.pid === this.currentPid || this.protectsCurrentProcess(target.pid)) return { ok: false, detail: "Token Furnace or an ancestor is protected." };
+    const protection = this.protectsCurrentProcess(target.pid);
+    if (!protection.available) return { ok: false, detail: protection.detail ?? "Ancestor identity lookup is unavailable." };
+    if (target.pid === this.currentPid || protection.protected) return { ok: false, detail: "Token Furnace or an ancestor is protected." };
     if (identity.processStartTime !== target.processStartTime || identity.ownerUid !== target.ownerUid || (identity.ownerIdentity ?? null) !== (target.ownerIdentity ?? null) || (identity.ownerSid ?? null) !== (target.ownerSid ?? null)) return { ok: false, detail: "Process ownership or start identity changed." };
     if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return { ok: false, detail: "Process owner identity is unavailable." };
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return { ok: false, detail: "Process is not owned by the current user." };
@@ -375,15 +418,27 @@ export class AgentControl {
   }
 
   /** Walk the current process's parents: descendants are valid workers, ancestors are protected. */
-  private protectsCurrentProcess(pid: number): boolean {
+  private protectsCurrentProcess(pid: number): { protected: boolean; available: boolean; detail?: string } {
     const seen = new Set<number>();
-    let current = this.inspectProcess(this.currentPid)?.parentPid ?? null;
+    const currentResult = this.inspectSafely(this.currentPid);
+    if (!currentResult.available || !currentResult.identity) return {
+      protected: false,
+      available: false,
+      detail: currentResult.detail ?? "Token Furnace identity lookup is unavailable.",
+    };
+    let current = currentResult.identity.parentPid;
     while (current && current > 1 && !seen.has(current)) {
-      if (current === pid) return true;
+      if (current === pid) return { protected: true, available: true };
       seen.add(current);
-      current = this.inspectProcess(current)?.parentPid ?? null;
+      const inspected = this.inspectSafely(current);
+      if (!inspected.available || !inspected.identity) return {
+        protected: false,
+        available: false,
+        detail: inspected.detail ?? "Ancestor identity lookup is unavailable.",
+      };
+      current = inspected.identity.parentPid;
     }
-    return false;
+    return { protected: false, available: true };
   }
 
   private async waitForTerminal(target: ControlTarget): Promise<boolean> {
@@ -392,7 +447,8 @@ export class AgentControl {
       if (target.nativeState) {
         try { if (await target.nativeState()) return true; } catch { /* keep checking process ownership */ }
       }
-      if (!this.inspectProcess(target.pid)) return true;
+      const inspected = this.inspectSafely(target.pid);
+      if (inspected.available && !inspected.identity) return true;
       if (Date.now() - started >= this.graceMs) return false;
       await new Promise((resolve) => setTimeout(resolve, Math.min(50, this.graceMs)));
     }
@@ -401,11 +457,15 @@ export class AgentControl {
   private async waitForProcessExit(target: ControlTarget, descendants: ProcessIdentity[] = []): Promise<boolean> {
     const started = Date.now();
     while (true) {
-      const identity = this.inspectProcess(target.pid);
+      const inspected = this.inspectSafely(target.pid);
+      if (!inspected.available) return false;
+      const identity = inspected.identity;
       if (identity && !sameProcessIdentity(identity, target)) return false;
       let descendantAlive = false;
       for (const descendant of descendants) {
-        const current = this.inspectProcess(descendant.pid);
+        const currentResult = this.inspectSafely(descendant.pid);
+        if (!currentResult.available) return false;
+        const current = currentResult.identity;
         if (current && !sameProcessIdentity(current, descendant)) return false;
         descendantAlive ||= Boolean(current);
       }
@@ -415,10 +475,13 @@ export class AgentControl {
     }
   }
 
-  private verifyProcessIdentity(expected: ProcessIdentity, observed = this.inspectProcess(expected.pid)): boolean {
-    const identity = observed;
+  private verifyProcessIdentity(expected: ProcessIdentity, observed?: ProcessIdentity): boolean {
+    const inspected = observed ? { identity: observed, available: true } : this.inspectSafely(expected.pid);
+    if (!inspected.available) return false;
+    const identity = inspected.identity;
     if (!identity || !sameProcessIdentity(identity, expected)) return false;
-    if (expected.pid === this.currentPid || this.protectsCurrentProcess(expected.pid)) return false;
+    const protection = this.protectsCurrentProcess(expected.pid);
+    if (!protection.available || expected.pid === this.currentPid || protection.protected) return false;
     if (identity.ownerUid === null && !identity.ownerIdentity && !identity.ownerSid) return false;
     if (this.currentUid !== null && identity.ownerUid !== this.currentUid) return false;
     if (this.currentOwnerSid && identity.ownerSid !== this.currentOwnerSid) return false;
@@ -426,7 +489,8 @@ export class AgentControl {
   }
 
   private ownedDescendants(target: ControlTarget): ProcessIdentity[] | null {
-    const processes = this.listProcesses();
+    let processes: ProcessIdentity[];
+    try { processes = this.listProcesses(); } catch { return null; }
     const children = new Map<number, ProcessIdentity[]>();
     for (const identity of processes) {
       if (identity.parentPid === null) continue;
@@ -438,13 +502,31 @@ export class AgentControl {
     const queue = [...(children.get(target.pid) ?? [])];
     while (queue.length) {
       const identity = queue.shift()!;
-      const observed = this.inspectProcess(identity.pid);
-      if (!observed || !sameProcessOwner(observed, target)) return null;
+      const inspected = this.inspectSafely(identity.pid);
+      if (!inspected.available) return null;
+      const observed = inspected.identity;
+      if (!observed) {
+        queue.push(...(children.get(identity.pid) ?? []));
+        continue;
+      }
+      if (!sameProcessOwner(observed, target)) return null;
       if (!this.verifyProcessIdentity(identity, observed)) return null;
       result.push(observed);
       queue.push(...(children.get(identity.pid) ?? []));
     }
     return result;
+  }
+
+  private inspectSafely(pid: number): ProcessInspectionResult {
+    try {
+      return { identity: this.inspectProcess(pid), available: true };
+    } catch (error) {
+      return {
+        identity: null,
+        available: false,
+        detail: `Process identity lookup is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
   }
 
   private finish(target: ControlTarget, outcome: ControlOutcome): ControlOutcome {
@@ -1093,29 +1175,37 @@ function readProcCommandLine(pid: number): string | null {
   try { return readFileSync(`/proc/${pid}/cmdline`).toString().replaceAll("\0", " ").trim() || null; } catch { return null; }
 }
 
+function isMissingProcessError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT");
+}
+
 function inspectProcess(pid: number): ProcessIdentity | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform === "win32") return inspectWindowsProcess(pid);
   if (process.platform === "darwin") return inspectPsProcess(pid);
+  if (!existsSync("/proc")) throw new Error("Linux process table /proc is unavailable.");
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(")");
+    if (close < 0) throw new Error(`Linux process ${pid} has malformed stat data.`);
     const fields = stat.slice(close + 2).trim().split(/\s+/);
     const parentPid = Number(fields[1]);
     const processStartTime = Number(fields[19]);
     const status = readFileSync(`/proc/${pid}/status`, "utf8");
     const uid = /^Uid:\s+(\d+)/m.exec(status)?.[1];
-    if (!Number.isFinite(parentPid) || !Number.isFinite(processStartTime) || uid === undefined) return null;
+    if (!Number.isFinite(parentPid) || !Number.isFinite(processStartTime) || uid === undefined) throw new Error(`Linux process ${pid} has malformed identity data.`);
     return { pid, processStartTime, ownerUid: Number(uid), parentPid, executable: readProcExecutable(pid), commandLine: readProcCommandLine(pid) };
-  } catch { return null; }
+  } catch (error) {
+    if (isMissingProcessError(error)) return null;
+    throw new Error(`Linux process lookup failed for PID ${pid}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function listProcessIdentities(): ProcessIdentity[] {
   if (process.platform === "win32") return listWindowsProcesses(false, false);
   if (process.platform === "darwin") return listPsProcesses();
-  try {
-    return readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).map(Number).map(inspectProcess).filter((value): value is ProcessIdentity => value !== null);
-  } catch { return []; }
+  if (!existsSync("/proc")) throw new Error("Linux process table /proc is unavailable.");
+  return readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).map(Number).map(inspectProcess).filter((value): value is ProcessIdentity => value !== null);
 }
 
 function listNativeProcessIdentities(): ProcessIdentity[] {
@@ -1124,57 +1214,87 @@ function listNativeProcessIdentities(): ProcessIdentity[] {
 }
 
 function inspectPsProcess(pid: number): ProcessIdentity | null {
-  try {
-    const output = execFileSync("ps", ["-p", String(pid), "-o", "pid=,ppid=,uid=,lstart=,comm=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return parsePsLine(output);
-  } catch { return null; }
+  const identityOutput = runPsQuery(["-p", String(pid), "-o", "pid=,ppid=,uid=,lstart=,comm="], pid);
+  if (!identityOutput.trim()) return null;
+  const commandOutput = runPsQuery(["-p", String(pid), "-o", "pid=,command="], pid);
+  if (!commandOutput.trim()) return null;
+  const rows = parsePsProcesses(identityOutput, commandOutput);
+  if (rows.length !== 1) throw new Error(`macOS process ${pid} returned malformed identity data.`);
+  return rows[0] ?? null;
 }
 
 function listPsProcesses(): ProcessIdentity[] {
+  const identityOutput = runPsQuery(["-axo", "pid=,ppid=,uid=,lstart=,comm="]);
+  const commandOutput = runPsQuery(["-axo", "pid=,command="]);
+  return parsePsProcesses(identityOutput, commandOutput);
+}
+
+function runPsQuery(args: string[], missingPid?: number): string {
   try {
-    const output = execFileSync("ps", ["-axo", "pid=,ppid=,uid=,lstart=,comm=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return output.split(/\r?\n/).map((line) => parsePsLine(line.trim())).filter((value): value is ProcessIdentity => value !== null);
-  } catch { return []; }
+    return execFileSync("ps", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    const result = error as { status?: unknown; stdout?: unknown; stderr?: unknown };
+    if (missingPid !== undefined && result.status === 1 && !String(result.stdout ?? "") && !String(result.stderr ?? "")) return "";
+    throw new Error(`macOS process query failed${missingPid === undefined ? "" : ` for PID ${missingPid}`}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+export function parsePsProcesses(identityOutput: string, commandOutput: string): ProcessIdentity[] {
+  const commands = new Map<number, string | null>();
+  for (const rawLine of commandOutput.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) continue;
+    const match = /^\s*(\d+)(?:\s+(.*))?$/.exec(line);
+    if (!match) throw new Error("macOS process command output is malformed.");
+    commands.set(Number(match[1]), match[2]?.trim() || null);
+  }
+  return identityOutput.split(/\r?\n/).flatMap((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return [];
+    const identity = parsePsLine(line);
+    if (!identity) throw new Error("macOS process identity output is malformed.");
+    return [{ ...identity, commandLine: commands.get(identity.pid) ?? null }];
+  });
 }
 
 function parsePsLine(line: string): ProcessIdentity | null {
-  const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(.{24})\s+(\S+)(?:\s+(.*))?$/.exec(line);
+  const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/.exec(line);
   if (!match) return null;
   const processStartTime = Date.parse(match[4].trim());
   if (!Number.isFinite(processStartTime)) return null;
-  return { pid: Number(match[1]), parentPid: Number(match[2]), ownerUid: Number(match[3]), processStartTime, executable: match[5].trim(), commandLine: match[6]?.trim() || null };
+  return { pid: Number(match[1]), parentPid: Number(match[2]), ownerUid: Number(match[3]), processStartTime, executable: match[5].trim(), commandLine: null };
 }
 
 function inspectWindowsProcess(pid: number): ProcessIdentity | null {
-  try {
-    const script = windowsProcessScript(`Get-CimInstance Win32_Process -Filter 'ProcessId=${String(pid)}'`);
-    const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return parseWindowsOutput(output)[0] ?? null;
-  } catch { return null; }
+  const script = windowsProcessScript(`Get-CimInstance Win32_Process -Filter 'ProcessId=${String(pid)}'`);
+  const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return parseWindowsOutput(output)[0] ?? null;
 }
 
 function listWindowsProcesses(nativeOnly: boolean, includeOwners = true): ProcessIdentity[] {
-  try {
-    const script = windowsProcessScript("Get-CimInstance Win32_Process", nativeOnly, includeOwners);
-    const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return parseWindowsOutput(output);
-  } catch { return []; }
+  const script = windowsProcessScript("Get-CimInstance Win32_Process", nativeOnly, includeOwners);
+  const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return parseWindowsOutput(output);
 }
 
 function windowsProcessScript(query: string, nativeOnly = false, includeOwners = true): string {
   const filter = nativeOnly ? " | Where-Object { $_.ExecutablePath -match '(?i)claude|codex|opencode' -or $_.CommandLine -match '(?i)claude|codex|opencode' }" : "";
   const owner = includeOwners
-    ? "$owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ return };"
+    ? "$owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction Stop; $sid=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop; if([int]$owner.ReturnValue -ne 0 -or [int]$sid.ReturnValue -ne 0 -or !$sid.Sid){ throw \"CIM owner lookup failed for PID $($_.ProcessId).\" };"
     : "$owner=$null; $sid=$null;";
-  return `$rows=@(${query}${filter} | ForEach-Object { try { ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } } catch { } }); $rows | ConvertTo-Json -Compress`;
+  return `$rows=@(${query}${filter} | ForEach-Object { ${owner} [pscustomobject]@{ ProcessId=[int]$_.ProcessId; ParentProcessId=[int]$_.ParentProcessId; StartTime=[long]((([DateTime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc()/10000)-11644473600000); ExecutablePath=$_.ExecutablePath; Domain=$owner.Domain; User=$owner.User; Sid=$sid.Sid; CommandLine=$_.CommandLine } }); $rows | ConvertTo-Json -Compress`;
 }
 
 function parseWindowsOutput(output: string): ProcessIdentity[] {
-  try {
-    const parsed = JSON.parse(output) as WindowsProcessRecord | WindowsProcessRecord[];
-    const rows = Array.isArray(parsed) ? parsed : [parsed];
-    return rows.map(parseWindowsRecord).filter((value): value is ProcessIdentity => value !== null);
-  } catch { return []; }
+  if (!output.trim() || output.trim() === "[]") return [];
+  const parsed = JSON.parse(output) as WindowsProcessRecord | WindowsProcessRecord[];
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  if (!rows.length) return [];
+  return rows.map((row) => {
+    const parsedRow = parseWindowsRecord(row);
+    if (!parsedRow) throw new Error("Windows process query returned malformed identity data.");
+    return parsedRow;
+  });
 }
 
 interface WindowsProcessRecord {

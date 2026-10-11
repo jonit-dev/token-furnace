@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentControl, type ControlTarget, type ProcessIdentity } from "../src/services/agent-control";
+import { AgentControl, parsePsProcesses, type ControlTarget, type ProcessIdentity } from "../src/services/agent-control";
 
 const testStoreRoot = mkdtempSync(join(tmpdir(), "tf-control-tests-"));
 let testStoreNumber = 0;
@@ -114,8 +114,34 @@ describe("AgentControl", () => {
     expect(outcome.detail).toMatch(/exit was not verified/i);
   });
 
+  it("does not treat a failed exit lookup as proof that force termination succeeded", async () => {
+    const signal = vi.fn(() => { lookupFailed = true; });
+    let lookupFailed = false;
+    const identity: ProcessIdentity = { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 };
+    const inspect = (pid: number) => {
+      if (lookupFailed && pid === identity.pid) throw new Error("native process lookup unavailable");
+      if (pid === 9000) return { pid, processStartTime: 1, ownerUid: 7, parentPid: 1 };
+      return pid === identity.pid ? identity : null;
+    };
+    const control = makeControl({ inspect, signal, currentUid: 7, currentPid: 9000, graceMs: 0, listProcesses: () => [identity], storePath: testStore() });
+    const outcome = await control.cancel(target({ exclusive: true }), true);
+    expect(outcome.status).toBe("unresolved");
+    expect(outcome.detail).toMatch(/exit was not verified/i);
+  });
+
+  it("keeps macOS executable paths with spaces separate from command lines", () => {
+    const executable = "/Applications/Claude Code.app/Contents/MacOS/claude";
+    const commandLine = `${executable} --model claude-sonnet`;
+    const rows = parsePsProcesses(
+      `123 1 7 Sun Oct 11 02:55:17 2026 ${executable}\n`,
+      `123 ${commandLine}\n`,
+    );
+    expect(rows).toEqual([expect.objectContaining({ pid: 123, executable, commandLine })]);
+  });
+
   it("terminates verified owned descendants without widening to an unrelated sibling", async () => {
     const identities = new Map<number, ProcessIdentity>([
+      [9000, { pid: 9000, processStartTime: 1, ownerUid: 7, parentPid: 1 }],
       [4321, { pid: 4321, processStartTime: 10, ownerUid: 7, parentPid: 1 }],
       [4322, { pid: 4322, processStartTime: 11, ownerUid: 7, parentPid: 4321 }],
       [4333, { pid: 4333, processStartTime: 12, ownerUid: 7, parentPid: 1 }],

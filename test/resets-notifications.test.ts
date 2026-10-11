@@ -41,8 +41,8 @@ function expectPrivateSettings(path: string): void {
     expect(statSync(path).isFile()).toBe(true);
     const script = [
       "$ErrorActionPreference='Stop'",
-      "if($args.Count -ne 1){throw 'ACL path argument is missing.'}",
-      "$path=[IO.Path]::GetFullPath([string]$args[0])",
+      "if([string]::IsNullOrWhiteSpace($env:TOKEN_FURNACE_PRIVATE_FILE_PATH)){throw 'ACL path environment value is missing.'}",
+      "$path=[IO.Path]::GetFullPath([string]$env:TOKEN_FURNACE_PRIVATE_FILE_PATH)",
       "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User",
       "if($null -eq $sid){throw 'Current Windows SID is unavailable.'}",
       "$acl=$null; $extensions=$null",
@@ -50,7 +50,11 @@ function expectPrivateSettings(path: string): void {
       "$rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))",
       "[pscustomobject]@{sid=$sid.Value; protected=$acl.AreAccessRulesProtected; rules=@($rules | ForEach-Object {[pscustomobject]@{identity=$_.IdentityReference.Value; inherited=$_.IsInherited; rights=$_.FileSystemRights.ToString(); type=$_.AccessControlType.ToString(); inheritance=$_.InheritanceFlags.ToString(); propagation=$_.PropagationFlags.ToString()}})} | ConvertTo-Json -Compress -Depth 6",
     ].join("; ");
-    const acl = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) as {
+    const acl = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, TOKEN_FURNACE_PRIVATE_FILE_PATH: path },
+    })) as {
       sid?: string;
       protected?: boolean;
       rules?: Array<{ identity?: string; inherited?: boolean; rights?: string; type?: string; inheritance?: string; propagation?: string }>
@@ -185,6 +189,14 @@ describe("reset feed", () => {
 });
 
 describe("notification settings", () => {
+  it("passes Windows ACL verification a path containing spaces and shell metacharacters", () => {
+    if (process.platform !== "win32") return;
+    const env = tempEnv();
+    env.XDG_CONFIG_HOME = join(env.XDG_CONFIG_HOME, "config with spaces & $() 'quoted'");
+    saveSettings(env, onSettings());
+    expectPrivateSettings(settingsPath(env));
+  });
+
   it("keeps a saved secret when the field is blank, removes it on request, and never returns one", () => {
     const env = tempEnv();
     saveSettings(env, onSettings({ telegram: { enabled: true, botToken: "123456:AAaaBBbbCCccDDddEEeeFFffGGhhIIjjKKllMMnnOO", chatId: "-100123" } }));

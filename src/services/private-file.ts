@@ -26,8 +26,8 @@ export function writePrivateFile(path: string, contents: string): void {
 function enforceWindowsPrivateFile(path: string): void {
   const script = [
     "$ErrorActionPreference='Stop'",
-    "if($args.Count -ne 1){throw 'Private ACL path argument is missing.'}",
-    "$path=[IO.Path]::GetFullPath([string]$args[0])",
+    "if([string]::IsNullOrWhiteSpace($env:TOKEN_FURNACE_PRIVATE_FILE_PATH)){throw 'Private ACL path environment value is missing.'}",
+    "$path=[IO.Path]::GetFullPath([string]$env:TOKEN_FURNACE_PRIVATE_FILE_PATH)",
     "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User",
     "if($null -eq $sid){throw 'Current Windows SID is unavailable.'}",
     "$acl=$null; $extensions=$null",
@@ -40,5 +40,8 @@ function enforceWindowsPrivateFile(path: string): void {
     "$check=$null; if($null -eq $extensions){$check=[IO.File]::GetAccessControl($path)}else{$check=$extensions.GetMethod('GetAccessControl',[type[]]@([IO.FileInfo])).Invoke($null,@([IO.FileInfo]::new($path)))}",
     "$rules=@($check.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])); if(!$check.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value -or $rules[0].AccessControlType -ne 'Allow' -or !($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -or $rules[0].IsInherited){throw 'Private ACL verification failed.'}",
   ].join("; ");
-  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, path], { stdio: ["ignore", "ignore", "pipe"] });
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { ...process.env, TOKEN_FURNACE_PRIVATE_FILE_PATH: path },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
 }

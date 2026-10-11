@@ -47,10 +47,11 @@ jobs:
             Write-Output ('Import-Module Microsoft.PowerShell.Security: ' + $_.Exception.ToString())
           }
           try {
-            $bound = & powershell.exe -NoProfile -NonInteractive -Command 'if($args.Count -ne 1){throw "ACL argument binding failed."}; [IO.Path]::GetFullPath([string]$args[0])' 'token-furnace-acl-argument-check'
-            Write-Output ('powershell.exe -Command argument binding: ' + ($bound -join ''))
+            $env:TOKEN_FURNACE_PRIVATE_FILE_PATH = 'token-furnace-acl-argument-check'
+            $bound = & powershell.exe -NoProfile -NonInteractive -Command '$path = $env:TOKEN_FURNACE_PRIVATE_FILE_PATH; if([string]::IsNullOrWhiteSpace($path)){throw "ACL environment binding failed."}; [IO.Path]::GetFullPath([string]$path)'
+            Write-Output ('powershell.exe -Command environment binding: ' + ($bound -join ''))
           } catch {
-            Write-Output ('powershell.exe -Command argument binding failed: ' + $_.Exception.ToString())
+            Write-Output ('powershell.exe -Command environment binding failed: ' + $_.Exception.ToString())
           }
       - run: npm run typecheck
       - run: npm test
