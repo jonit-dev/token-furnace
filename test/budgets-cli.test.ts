@@ -110,17 +110,25 @@ describe("budget CLI", () => {
 
       const allowedPreToolUse = invoke({ hook_event_name: "PreToolUse", tool_use_id: `${source}-native-tool`, estimatedCost: 5, costUnit: "tokens-total" });
       expectStrict(allowedPreToolUse);
-      if (source === "claude") {
-        expect(allowedPreToolUse).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } });
-      } else {
-        expect(allowedPreToolUse).toEqual({ decision: "approve" });
-      }
+      expect(allowedPreToolUse).toEqual({});
 
       const reconciledPostToolUse = invoke({ hook_event_name: "PostToolUse", tool_use_id: `${source}-native-tool`, actualCost: 5 });
       expectStrict(reconciledPostToolUse);
       expect(reconciledPostToolUse).toEqual({});
 
-      const blockedPrompt = invoke({ hook_event_name: "UserPromptSubmit", session_id: `${source}-native-session`, estimatedCost: 20, costUnit: "tokens-total" });
+      const allowedPrompt = invoke({ hook_event_name: "UserPromptSubmit", session_id: `${source}-native-session`, estimatedCost: 1, costUnit: "tokens-total" });
+      expectStrict(allowedPrompt);
+      expect(allowedPrompt).toEqual({});
+
+      const blockedPreToolUse = invoke({ hook_event_name: "PreToolUse", tool_use_id: `${source}-blocked-tool`, estimatedCost: 20, costUnit: "tokens-total" });
+      expectStrict(blockedPreToolUse);
+      if (source === "claude") {
+        expect(blockedPreToolUse).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: expect.any(String) } });
+      } else {
+        expect(blockedPreToolUse).toMatchObject({ decision: "block", reason: expect.any(String) });
+      }
+
+      const blockedPrompt = invoke({ hook_event_name: "UserPromptSubmit", session_id: `${source}-blocked-session`, estimatedCost: 20, costUnit: "tokens-total" });
       expectStrict(blockedPrompt);
       expect(blockedPrompt).toMatchObject({ decision: "block", reason: expect.any(String) });
 

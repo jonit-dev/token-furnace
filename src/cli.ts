@@ -382,9 +382,10 @@ function writeBudgetHookOutput(
 function nativeBudgetHookOutput(source: "claude" | "codex", hookEvent: string | null, allowed: boolean, reason: string): Record<string, unknown> {
   switch (hookEvent) {
     case "PreToolUse":
+      if (allowed) return {};
       return source === "claude"
-        ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: allowed ? "allow" : "deny", ...(allowed ? {} : { permissionDecisionReason: reason }) } }
-        : allowed ? { decision: "approve" } : { decision: "block", reason };
+        ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }
+        : { decision: "block", reason };
     case "UserPromptSubmit":
       return allowed ? {} : { decision: "block", reason };
     case "PostToolUse":
