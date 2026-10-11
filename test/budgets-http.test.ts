@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { compose } from "../src/compose";
 import { startServer, type LiveServer } from "../src/server";
 
@@ -16,6 +16,7 @@ async function boot() {
   const root = mkdtempSync(join(tmpdir(), "tf-budget-http-"));
   roots.push(root);
   const app = compose({ HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state") }, { noCache: true });
+  vi.spyOn(app.control, "preview").mockReturnValue({ targets: [], unverified: [], collateral: [] });
   const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
   servers.push(server);
   const initial = await fetch(`${server.url}/api/budgets`);

@@ -1,19 +1,26 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { compose } from "../src/compose";
 import { main, runBudgetHook } from "../src/cli";
+import type { App } from "../src/compose";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+function stubNoNativeHost(app: App): void {
+  vi.spyOn(app.control, "owningProcess").mockReturnValue(null);
+  vi.spyOn(app.control, "preview").mockReturnValue({ targets: [], unverified: [], collateral: [] });
+}
+
 async function run(argv: string[]) {
   const root = mkdtempSync(join(tmpdir(), "tf-budget-cli-"));
   roots.push(root);
   const app = compose({ HOME: root }, { noCache: true });
+  stubNoNativeHost(app);
   const out: string[] = [];
   const err: string[] = [];
   const original = process.stdout.write;
@@ -51,6 +58,7 @@ describe("budget CLI", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-budget-hook-"));
     roots.push(root);
     const app = compose({ HOME: root }, { noCache: true });
+    stubNoNativeHost(app);
     app.budgets.savePolicies([{
       scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 100,
       deadline: "2099-10-11T12:00:00.000Z",
@@ -79,6 +87,7 @@ describe("budget CLI", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-budget-native-hook-"));
     roots.push(root);
     const app = compose({ HOME: root }, { noCache: true });
+    stubNoNativeHost(app);
     app.budgets.savePolicies([{
       scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 10,
       deadline: "2099-10-11T12:00:00.000Z",
@@ -108,6 +117,7 @@ describe("budget CLI", () => {
     const root = mkdtempSync(join(tmpdir(), "tf-budget-untrusted-cancel-"));
     roots.push(root);
     const app = compose({ HOME: root }, { noCache: true });
+    stubNoNativeHost(app);
     app.budgets.savePolicies([{
       scope: { kind: "source", source: "claude" }, mode: "manual", unit: "tokens-total", limit: 100,
       deadline: "2099-10-11T12:00:00.000Z",

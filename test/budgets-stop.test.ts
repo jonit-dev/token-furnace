@@ -9,6 +9,7 @@ import { AgentControl, parsePsProcesses, type ControlTarget, type ProcessIdentit
 
 const testStoreRoot = mkdtempSync(join(tmpdir(), "tf-control-tests-"));
 const TEST_EXECUTABLE = "/usr/bin/token-furnace-test-agent";
+const TEST_OWNER_SID = "S-1-5-21-token-furnace-test-7";
 let testStoreNumber = 0;
 const controls: AgentControl[] = [];
 afterAll(() => rmSync(testStoreRoot, { recursive: true, force: true }));
@@ -20,7 +21,28 @@ function testStore(): string {
 }
 
 function makeControl(options: ConstructorParameters<typeof AgentControl>[0] = {}): AgentControl {
-  const control = new AgentControl(options);
+  // Logical fixtures use synthetic PIDs. Keep their owner identity coherent with the
+  // strict native Windows checks without changing real-process fixtures.
+  const hasCustomInspector = options.inspect !== undefined;
+  const fixtureUid = options.currentUid === undefined ? 7 : options.currentUid;
+  const fixtureSid = options.currentOwnerSid === undefined ? TEST_OWNER_SID : options.currentOwnerSid;
+  const inspect = hasCustomInspector
+    ? (pid: number) => {
+      const identity = options.inspect!(pid);
+      if (!identity || identity.ownerSid || !fixtureSid || identity.ownerUid !== fixtureUid) return identity;
+      return { ...identity, ownerSid: fixtureSid };
+    }
+    : options.inspect;
+  const control = new AgentControl(hasCustomInspector
+    ? {
+      ...options,
+      currentUid: fixtureUid,
+      currentOwnerSid: fixtureSid,
+      currentPid: options.currentPid ?? 9000,
+      inspect,
+      listProcesses: options.listProcesses ?? (() => []),
+    }
+    : options);
   controls.push(control);
   return control;
 }
@@ -38,6 +60,7 @@ function target(overrides: Partial<ControlTarget> = {}): ControlTarget {
     pid: 4321,
     processStartTime: 10,
     ownerUid: 7,
+    ownerSid: TEST_OWNER_SID,
     executable: TEST_EXECUTABLE,
     ...overrides,
   };
@@ -525,7 +548,7 @@ describe("AgentControl", () => {
       markWindowsStopStage(timing, "cleanupDone");
       emitWindowsStopTiming(timing);
     }
-  });
+  }, 20_000);
 
   it("force-stops a real owned child tree while an unrelated sibling remains live", async () => {
     const timing = windowsStopTiming("force-stops a real owned child tree");
@@ -668,7 +691,7 @@ describe("AgentControl", () => {
       closeControls();
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it("initializes cold shared budget and control stores for concurrent hook processes", async () => {
     const cliPath = join(process.cwd(), "dist", "cli.js");
