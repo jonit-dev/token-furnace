@@ -346,3 +346,36 @@ it("writes no plan size with no-cache, and ignores a corrupt or nonsense file", 
   }
   db.close();
 });
+
+// Red/green: local spend can under-count (runs this machine cannot see), so a calibration may only
+// raise the plan size. A remembered larger size is never replaced by a smaller one.
+it("uses the remembered plan size as a floor when local spend under-counts the plan", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const week = { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 5 };
+  const local = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week })!.burns.opencode!;
+  const big = local.limit! * 50;
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week, limits: { opencode: big } })!.burns.opencode!;
+  expect(burn.limit).toBe(big);
+  expect(burn.used).toBe(5);
+  // The plan has 95% left, so the hourly goal comes from the larger size.
+  expect(burn.goal).toBeCloseTo((big * 0.95) / burn.hoursLeft!);
+  // The curve keeps its local shape but ends at the plan's reading.
+  expect(burn.weekBurndown!.at(-1)![1]).toBeCloseTo(5);
+  db.close();
+});
+
+it("never lowers the remembered plan size, and raises it when a calibration is larger", async () => {
+  const { db, env } = fixture(); const { readFileSync, writeFileSync, mkdirSync: mk } = await import("node:fs");
+  const dir = join(env.HOME, ".cache", "token-furnace"); mk(dir, { recursive: true });
+  const file = join(dir, "limits.json");
+  const app = compose(env); await app.reports.refresh();
+  const week = { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 5 };
+  const local = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week })!.burns.opencode!.limit!;
+  writeFileSync(file, JSON.stringify({ opencode: local * 10 }));
+  app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week });
+  expect(JSON.parse(readFileSync(file, "utf8")).opencode).toBeCloseTo(local * 10, 0);
+  writeFileSync(file, JSON.stringify({ opencode: local / 10 }));
+  app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week });
+  expect(JSON.parse(readFileSync(file, "utf8")).opencode).toBeCloseTo(local, 0);
+  db.close();
+});

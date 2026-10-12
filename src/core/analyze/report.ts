@@ -422,14 +422,15 @@ export function buildReport(input: ReportInput): RawReport | null {
     const week = weeks[src];
     const spent = weekNow.get(src) ?? 0;
     const burn: RawReport["burns"][Source] = { rate: lastHour.get(src) ?? 0, total: spend, week: null };
-    // A new week can read 1% or more with no local spend: the use came from somewhere this machine
-    // cannot see. Then the last calibrated plan size stands in, and the spend it implies is `used`%.
+    // Local spend can under-count the plan: runs on other machines or in throwaway data dirs are
+    // billed to it but never recorded here. So the last calibrated size is a floor, and a week with
+    // no local spend at all can still be read from it.
     const remembered = input.limits?.[src];
-    const known = !spent && remembered && Number.isFinite(remembered) && remembered > 0 ? remembered : null;
-    if (week && week.used >= 1 && (spent || known)) {
-      // Calibrate: this week's local spend is `used` percent of the plan's week.
-      const limit = known ?? (spent * 100) / week.used;
-      const implied = known ? (known * week.used) / 100 : spent;
+    const floor = remembered && Number.isFinite(remembered) && remembered > 0 ? remembered : 0;
+    const local = week && week.used >= 1 && spent ? (spent * 100) / week.used : 0;
+    const limit = Math.max(local, floor);
+    if (week && week.used >= 1 && limit > 0) {
+      const implied = (limit * week.used) / 100; // the spend the plan's reading stands for
       const hoursLeft = Math.max((week.resets.getTime() - now.getTime()) / 3_600_000, 1);
       const weekRecent = recent.get(src) ?? new Map<number, number>();
       const gains: Record<string, number> = {};
@@ -450,9 +451,10 @@ export function buildReport(input: ReportInput): RawReport | null {
         start: week.start,
         rate_pct: ((quotaHour.get(src) ?? 0) * 100) / limit,
         ideal_pct: Math.max(left, 0) / hoursLeft,
-        burndown: known
-          ? [[week.start, 0, 0], [now, week.used, week.used]]
-          : weekPoints(weekHourly.get(src) ?? new Map(), week.start, now, limit),
+        // Local shape, scaled to end at the plan's reading; flat when nothing was recorded locally.
+        burndown: local
+          ? weekPoints(weekHourly.get(src) ?? new Map(), week.start, now, local)
+          : [[week.start, 0, 0], [now, week.used, week.used]],
         projection: {
           rate_pct: rate24,
           hours_to_empty: toEmpty,

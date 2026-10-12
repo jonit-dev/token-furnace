@@ -17,7 +17,7 @@ const root = mkdtempSync(join(tmpdir(), "tf-server-"));
 buildFull(root, now);
 // A saved subscription reading: the default run makes no network call and still has a Claude week.
 saveUsageReading(root, now);
-const env = { ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString() };
+const env = { ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString(), TOKEN_FURNACE_NO_CACHE: "1" };
 const app = compose(env);
 
 let live: LiveServer;

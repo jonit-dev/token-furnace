@@ -210,7 +210,7 @@ export class ReportService {
     }
   }
 
-  /** Saves each calibrated plan size once it moves more than 2%, so a quiet week keeps its last good one. */
+  /** Saves a calibrated plan size when it is more than 2% larger, so a week with unseen spend cannot shrink it. */
   private rememberLimits(report: RawReport): void {
     if (this.env.TOKEN_FURNACE_NO_CACHE && this.env.TOKEN_FURNACE_NO_CACHE !== "0") return;
     const stored = this.readLimits();
@@ -219,7 +219,7 @@ export class ReportService {
       const week = report.burns[source]?.week;
       if (!week || !(week.limit > 0)) continue; // a week sized from the stored limit equals it: no write
       const old = stored[source];
-      if (!old || Math.abs(week.limit - old) / old > 0.02) next[source] = week.limit;
+      if (!old || week.limit > old * 1.02) next[source] = week.limit; // raise only: delete the file to resize down
     }
     if (JSON.stringify(next) === JSON.stringify(stored)) return;
     try {
