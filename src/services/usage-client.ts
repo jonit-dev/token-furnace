@@ -154,9 +154,12 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
           const weekly = body?.usage?.weekly;
           if (typeof weekly?.percent === "number" && Number.isFinite(weekly.percent) && weekly.percent >= 0) {
             const data = { utilization: weekly.percent, resets_at: weekly.resetsAt };
-            if (toWeek(data, now)) {
+            // Within one week the meter only rises. A lower reading is another account (the env key
+            // fallback) or a glitch, so it must not replace the plan's reading.
+            const same = reading.data?.resets_at === data.resets_at;
+            if (toWeek(data, now) && !(same && weekly.percent < reading.data!.utilization)) {
               // A new reset is a new week: its meter starts over.
-              if (reading.data?.resets_at !== data.resets_at) reading.history = [];
+              if (!same) reading.history = [];
               reading.history = [...reading.history, [now.getTime(), weekly.percent] as [number, number]].slice(-HISTORY_CAP);
               reading.data = data; reading.fetched = at;
               if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0"))
@@ -170,8 +173,12 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
   }
   const week = toWeek(reading.data, now);
   if (!week) return null;
-  const readings = reading.history.filter((r): r is [number, number] =>
+  const valid = reading.history.filter((r): r is [number, number] =>
     Array.isArray(r) && Number.isFinite(r[0]) && Number.isFinite(r[1]) && r[0] >= week.start.getTime() && r[0] <= now.getTime());
+  // Two processes can interleave their writes, and older files hold dips from the fallback account:
+  // order by time and keep only readings that do not fall below an earlier one.
+  let top = 0;
+  const readings = valid.sort((a, b) => a[0] - b[0]).filter(r => r[1] >= top && ((top = r[1]), true));
   return { ...week, readings };
 }
 

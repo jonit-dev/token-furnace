@@ -463,3 +463,32 @@ it("treats a saved reading from before meter history existed as the first meter 
   expect(week.readings).toEqual([[+now - 60_000, 8]]);
   db.close();
 });
+
+// Red/green: a remembered floor 50x the local calibration flattened Codex's projection to ~0 while
+// its curve (scaled by local spend) climbed 25% in a day. Rates must use the curve's scale.
+it("converts local rates to plan percent on the curve's scale, not the remembered floor", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const week = { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 5 };
+  const local = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week })!.burns.opencode!;
+  const floored = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week, limits: { opencode: local.limit! * 50 } })!.burns.opencode!;
+  expect(local.gains![24]).toBeGreaterThan(0);
+  expect(floored.gains).toEqual(local.gains);
+  expect(floored.projection).toEqual(local.projection);
+  db.close();
+});
+
+// Red/green: the env-key fallback (another account) read 0% mid-week and two processes interleaved
+// writes, so the curve dropped to 0 and back. Within one week the meter only rises.
+it("keeps the weekly meter monotonic: drops lower readings and orders interleaved ones", async () => {
+  const { db, env } = fixture(); await withAuth(env);
+  const { mkdirSync: mk, writeFileSync } = await import("node:fs");
+  const dir = join(env.HOME, ".cache", "token-furnace"); mk(dir, { recursive: true });
+  const resets_at = "2026-10-12T00:00:00Z", t = (m: number) => +now - m * 60_000;
+  writeFileSync(join(dir, "opencode-usage.json"), JSON.stringify({ source: env.OPENCODE_DATA_DIR, fetched: t(30) / 1000,
+    seven_day: { utilization: 40, resets_at }, history: [[t(40), 30], [t(35), 0], [t(30), 40], [t(32), 38]] }));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(goBody({ percent: 0, resetsAt: resets_at })));
+  const week = await openCodeWeek(env, now, true);
+  expect(week?.used).toBe(40);
+  expect(week?.readings).toEqual([[t(40), 30], [t(32), 38], [t(30), 40]]);
+  db.close();
+});

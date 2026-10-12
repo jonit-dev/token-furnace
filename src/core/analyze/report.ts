@@ -437,6 +437,9 @@ export function buildReport(input: ReportInput): RawReport | null {
     const meter = week?.readings?.length ? week.readings : null;
     if (week && (meter || (week.used >= 1 && limit > 0))) {
       const sized = limit > 0 ? limit : null;
+      // Local spend is `used`% of `local`, so local rates convert to plan percent on that same scale
+      // (the curve's). The remembered floor can be far larger and would flatten every rate.
+      const scale = local || sized;
       const nowMs = now.getTime();
       const startMs = week.start.getTime();
       const hoursLeft = Math.max((week.resets.getTime() - nowMs) / 3_600_000, 1);
@@ -445,7 +448,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       for (const h of GAIN_HOURS) {
         gains[h] = meter
           ? Math.max(week.used - meterAt(meter, startMs, nowMs - h * 3_600_000)[1], 0)
-          : ((weekRecent.get(h) ?? 0) * 100) / sized!;
+          : ((weekRecent.get(h) ?? 0) * 100) / scale!;
       }
       // Quota points per hour over the last 24 h. A week younger than that has spent only its
       // own points, so divide by the time since the week began.
@@ -467,7 +470,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         // Whole-percent readings are coarse over one hour, so the meter's rate spans the last 3 h.
         rate_pct: meter
           ? meterRate(meter, startMs, nowMs, week.used, METER_RATE_HOURS)
-          : ((quotaHour.get(src) ?? 0) * 100) / sized!,
+          : ((quotaHour.get(src) ?? 0) * 100) / scale!,
         ideal_pct: Math.max(left, 0) / hoursLeft,
         burndown: meter
           ? meterPoints(meter, week, now)
