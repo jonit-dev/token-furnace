@@ -212,27 +212,35 @@ export class CodexSource implements AgentSource {
    * often a non-subscription (eval/tooling) session that logs no rate_limits at all.
    */
   week(now: Date): Week | null {
-    const files = [...this.files()].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 200);
+    // Thousands of newer rollouts can log no rate_limits (lane and eval runs), so scan them all
+    // but read each file's tail once: the cache is keyed on mtime and size.
+    const files = [...this.files()].sort((a, b) => b.mtimeMs - a.mtimeMs);
     for (const file of files) {
-      for (const line of tail(file.path, file.size).reverse()) {
-        if (!line.includes('"rate_limits"')) continue;
-        const record = jsonParse(line);
-        const limits = record?.payload?.rate_limits;
-        const week = [limits?.primary, limits?.secondary].find(
-          (w: any) => w && w.window_minutes === 10080,
-        );
-        const resets = epoch(week?.resets_at);
-        if (resets === null) continue;
-        if (resets <= now.getTime()) break; // this file's newest reading ended; try an older one
-        return {
-          start: new Date(resets - 7 * 86_400_000),
-          resets: new Date(resets),
-          used: Number(week.used_percent),
-        };
-      }
+      const cached = readings.get(file.path);
+      const reading = cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size
+        ? cached.reading
+        : lastWeekReading(file);
+      readings.set(file.path, { mtimeMs: file.mtimeMs, size: file.size, reading });
+      if (!reading || reading.resets <= now.getTime()) continue; // none, or ended; try an older file
+      return { start: new Date(reading.resets - 7 * 86_400_000), resets: new Date(reading.resets), used: reading.used };
     }
     return null;
   }
+}
+
+type WeekReading = { resets: number; used: number } | null;
+const readings = new Map<string, { mtimeMs: number; size: number; reading: WeekReading }>();
+
+/** The newest 7-day reading in a rollout's tail, whether or not it has ended. */
+function lastWeekReading(file: SourceFile): WeekReading {
+  for (const line of tail(file.path, file.size).reverse()) {
+    if (!line.includes('"rate_limits"')) continue;
+    const limits = jsonParse(line)?.payload?.rate_limits;
+    const week = [limits?.primary, limits?.secondary].find((w: any) => w && w.window_minutes === 10080);
+    const resets = epoch(week?.resets_at);
+    if (resets !== null) return { resets, used: Number(week.used_percent) };
+  }
+  return null;
 }
 
 function epoch(value: unknown): number | null {

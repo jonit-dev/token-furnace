@@ -12,9 +12,9 @@ const GAUGE_TIP =
 function NewQuotaWarning({ used, resets }: { used: number; resets: string }) {
   return (
     <MetricInfo warn label="Why there is no quota reading">
-      <p>Your Claude plan reports the weekly quota as {used}% used. The week resets {dayLabel(toDate(resets))}.</p>
-      <p>Token Furnace learns the size of your plan by dividing the tokens you spent this week by the percentage used. The plan reports whole percentages. At 0% the division has no answer, so the size is unknown.</p>
-      <p>The gauge shows tokens per hour against your 7-day average until the plan reports 1% or more. This usually happens within a few hours of normal use. No action is needed.</p>
+      <p>Your plan reports the weekly quota as {used}% used. The week resets {dayLabel(toDate(resets))}.</p>
+      <p>Token Furnace learns the size of your plan by dividing the tokens you spent this week by the percentage used. It needs tokens spent since the week began and a reading of 1% or more. Until both exist, the size is unknown.</p>
+      <p>The gauge shows tokens per hour against your 7-day average until then. This usually happens within a few hours of normal use. No action is needed.</p>
     </MetricInfo>
   );
 }
@@ -205,11 +205,15 @@ export function Burndown({
 export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> }) {
   const [ref, { w, h }] = useSize();
   const series = (Object.entries(burns) as [Source, Burn][]).flatMap(([source, burn]) => {
-    if (!burn.weekBurndown || burn.weekBurndown.length < 2) return [];
-    const start = toDate(burn.start).getTime();
-    const reset = toDate(burn.resets).getTime();
+    // A new week with no local spend has the plan's reading but no burndown: draw 0 to that reading.
+    const pending = !burn.weekBurndown && burn.pending ? burn.pending : null;
+    if (!pending && (!burn.weekBurndown || burn.weekBurndown.length < 2)) return [];
+    const reset = toDate(pending ? pending.resets : burn.resets).getTime();
+    const start = pending ? reset - 7 * 86_400_000 : toDate(burn.start).getTime();
     if (!Number.isFinite(start) || !Number.isFinite(reset) || reset <= start) return [];
-    const pts = burn.weekBurndown.map(([t, used, capped]) => [toDate(t).getTime(), used, capped] as const);
+    const pts = pending
+      ? [[start, 0, 0] as const, [Date.now(), pending.used, pending.used] as const]
+      : burn.weekBurndown!.map(([t, used, capped]) => [toDate(t).getTime(), used, capped] as const);
     const [now, used] = pts[pts.length - 1];
     const rate = burn.projection?.ratePct ?? 0;
     const end = rate > 0 && used < 100 ? Math.max(now, Math.min(reset, now + (100 - used) / rate * 3600000)) : now;

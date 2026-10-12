@@ -132,16 +132,20 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
   const at = now.getTime() / 1000;
   if (network && (!reading.data || at - reading.fetched >= REUSE_SECONDS) && at - reading.lastTry >= RETRY_SECONDS) {
     const auth = jsonAuth(source.readFile("auth.json"));
-    const token = env.OPENCODE_API_KEY || auth?.["opencode-go"]?.key;
-    if (typeof token === "string" && token) {
+    // The login OpenCode itself uses (auth.json) owns the sessions we read, so it goes first. The
+    // env key is another possible account: a fallback only, never the one that hides the login.
+    const tokens = [...new Set([auth?.["opencode-go"]?.key, env.OPENCODE_API_KEY])]
+      .filter((t): t is string => typeof t === "string" && t !== "");
+    if (tokens.length) {
       reading.lastTry = at;
       goReadings.set(key, reading);
-      try {
-        const response = await fetch("https://opencode.ai/zen/go/v1/usage", {
-          headers: { Authorization: `Bearer ${token}`, "User-Agent": "token-furnace" },
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (response.ok) {
+      for (const token of tokens) {
+        try {
+          const response = await fetch("https://opencode.ai/zen/go/v1/usage", {
+            headers: { Authorization: `Bearer ${token}`, "User-Agent": "token-furnace" },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!response.ok) continue;
           const body = await response.json() as Record<string, any>;
           const weekly = body?.usage?.weekly;
           if (typeof weekly?.percent === "number" && Number.isFinite(weekly.percent) && weekly.percent >= 0) {
@@ -152,8 +156,9 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
                 writeJson(path, { source: key, fetched: at, seven_day: data });
             }
           }
-        }
-      } catch { /* Keep the last unexpired reading when offline or rate limited. */ }
+          break;
+        } catch { /* Keep the last unexpired reading when offline or rate limited. */ }
+      }
     }
   }
   return toWeek(reading.data, now);

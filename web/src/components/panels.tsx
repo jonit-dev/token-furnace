@@ -490,7 +490,8 @@ export function KpiStrip({
     );
   } else {
     tiles.push(
-      <Tile key="week" label="Weekly limit" value="—" line="no subscription reading yet" state={null}
+      <Tile key="week" label="Weekly limit" value={burn?.pending ? `${burn.pending.used}%` : "—"}
+        line={burn?.pending ? "plan reading · size unknown until this week has spend" : "no subscription reading yet"} state={null}
         help={<p>This card shows the percentage of the selected provider’s weekly quota already used. There is no subscription reading yet, so usage against the weekly limit is unknown. A dash means unavailable data.</p>} />,
     );
   }
@@ -612,7 +613,7 @@ export function Dashboard({
     onChange={(value) => { if (value !== "all") onSource(value); }} label="Combustion rate"
     pinned={pins.source === source} onPin={() => togglePin("source", source)} /> : null;
   const weeklyBurns = r.burns ?? (r.burn ? { claude: r.burn } : {});
-  const weekly = Object.values(weeklyBurns).some(b => (b?.weekBurndown?.length ?? 0) > 1);
+  const weekly = Object.values(weeklyBurns).some(b => (b?.weekBurndown?.length ?? 0) > 1 || b?.pending);
   return (
     <div className="space-y-4">
       <div className="grid gap-4 lg:grid-cols-4">

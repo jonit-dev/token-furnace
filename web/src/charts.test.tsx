@@ -82,3 +82,74 @@ it("explains a new quota that reads under 1% behind a warning button", () => {
   fireEvent.click(screen.getByRole("button", { name: /Why there is no quota reading/ }));
   expect(screen.getByText(/reports the weekly quota as 0% used/)).toBeTruthy();
 });
+
+// A new week has the plan's reading but no local spend, so there is no burndown to draw.
+const fresh = (used: number, resetsAtHour = 168): Burn =>
+  ({ ...burn(), weekBurndown: null, start: null, resets: null, used: null, limit: null, projection: null,
+    pending: { used, resets: iso(resetsAtHour) } });
+
+it("draws a new OpenCode week from the plan reading, on the same scale as the other providers", () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(start + 72 * hour);
+  try {
+    const { container } = render(<WeeklyQuota burns={{ claude: burn(), opencode: fresh(5) }} />);
+    expect(container.querySelectorAll("g[data-provider]")).toHaveLength(2);
+    const go = container.querySelector('[data-provider="opencode"]')!;
+    expect(go.querySelector('[data-series="used"]')?.getAttribute("stroke")).toBe("#a78bfa");
+    expect(go.querySelector("title")?.textContent).toContain("5% used");
+    // 5% of the 164 px plot: y = 176 - 8.2. Now is 72 h into a 168 h week, on the Oct 1–8 axis.
+    expect(Number(go.querySelector("circle")?.getAttribute("cy"))).toBeCloseTo(176 - 5 / 100 * 164);
+    expect(Number(go.querySelector("circle")?.getAttribute("cx"))).toBeCloseTo(38 + 550 * 72 / 168);
+    expect(go.querySelector('[data-series="projection"]')).toBeNull();
+    expect(screen.getByText(/OpenCode 5%/)).toBeTruthy();
+  } finally { vi.useRealTimers(); }
+});
+
+it("draws a new week even when it is the only provider with a quota reading", () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(start + 24 * hour);
+  try {
+    const { container } = render(<WeeklyQuota burns={{ opencode: fresh(2) }} />);
+    expect(container.querySelector('[data-provider="opencode"] [data-series="used"]')).not.toBeNull();
+  } finally { vi.useRealTimers(); }
+});
+
+it("prefers the local burndown over a pending reading and skips providers with neither", () => {
+  const both = { ...burn(), pending: { used: 99, resets: iso(168) } };
+  const none = { ...burn(), weekBurndown: null, pending: null };
+  const { container } = render(<WeeklyQuota burns={{ claude: both, codex: none }} />);
+  expect(container.querySelectorAll("g[data-provider]")).toHaveLength(1);
+  expect(container.querySelector("title")?.textContent).toContain("50% used");
+});
+
+it("ignores a pending reading with an unusable reset instead of drawing a broken line", () => {
+  const { container } = render(<WeeklyQuota burns={{ claude: burn(), opencode: { ...fresh(5), pending: { used: 5, resets: "not-a-date" } } }} />);
+  expect(container.querySelector('[data-provider="opencode"]')).toBeNull();
+  expect(container.querySelector('[data-provider="claude"]')).not.toBeNull();
+});
+
+it("shows the weekly quota card when the only reading is a pending one", () => {
+  const burns = { opencode: fresh(5) };
+  render(<Dashboard r={{ burns }} burn={burns.opencode} sources={["opencode"]} source="opencode" onSource={vi.fn()} />);
+  expect(screen.getByText("Weekly quota")).toBeTruthy();
+});
+
+it("shows the plan's reading in the Weekly limit tile instead of a dash while the week is new", () => {
+  const burns = { opencode: fresh(5) };
+  render(<Dashboard r={{ burns }} burn={burns.opencode} sources={["opencode"]} source="opencode" onSource={vi.fn()} />);
+  expect(screen.getByText("5%")).toBeTruthy();
+  expect(screen.getByText(/plan reading/)).toBeTruthy();
+  expect(screen.queryByText("no subscription reading yet")).toBeNull();
+});
+
+it("keeps the dash when a provider has no reading at all", () => {
+  const burns = { opencode: { ...fresh(5), pending: null } };
+  render(<Dashboard r={{ burns }} burn={burns.opencode} sources={["opencode"]} source="opencode" onSource={vi.fn()} />);
+  expect(screen.getByText("no subscription reading yet")).toBeTruthy();
+});
+
+it("words the new-quota warning for any provider and any percentage", () => {
+  render(<Gauge burn={{ ...burn(), ratePct: null, idealPct: null, pending: { used: 5, resets: iso(168) } }} />);
+  fireEvent.click(screen.getByRole("button", { name: /Why there is no quota reading/ }));
+  expect(screen.getByText(/Your plan reports the weekly quota as 5% used/)).toBeTruthy();
+  expect(screen.queryByText(/Claude plan/)).toBeNull();
+  expect(screen.queryByText(/under 1%/)).toBeNull();
+});

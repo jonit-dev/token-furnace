@@ -126,3 +126,130 @@ it("keeps quota failures private, retries at most once a minute, and writes noth
   expect((await openCodeWeek(env, new Date(+now + 60_000), false))?.used).toBe(63);
   db.close();
 });
+
+// Quota reader hardening: each case guards a way the Go meter has gone missing from the dashboard.
+const goBody = (weekly: unknown) => ({ ok: true, json: async () => ({ usage: { weekly } }) });
+async function withAuth(env: Record<string, string>, key = "file-key") {
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(env.OPENCODE_DATA_DIR, "auth.json"), JSON.stringify({ "opencode-go": { type: "api", key } }));
+}
+const bearer = (call: unknown[]) => (call[1] as { headers: Record<string, string> }).headers.Authorization;
+
+it("prefers the auth.json login over OPENCODE_API_KEY, which may belong to another account", async () => {
+  const { db, env } = fixture(); await withAuth(env);
+  const fetcher = vi.fn(async (_url: string, init: { headers: Record<string, string> }) =>
+    goBody({ percent: init.headers.Authorization === "Bearer file-key" ? 5 : 0, resetsAt: "2026-10-12T00:00:00Z" }));
+  vi.stubGlobal("fetch", fetcher);
+  expect((await openCodeWeek({ ...env, OPENCODE_API_KEY: "other-account" }, now, true))?.used).toBe(5);
+  expect(fetcher.mock.calls.map(bearer)).toEqual(["Bearer file-key"]);
+  db.close();
+});
+
+it("falls back to OPENCODE_API_KEY when the auth.json key is rejected", async () => {
+  const { db, env } = fixture(); await withAuth(env, "expired");
+  const fetcher = vi.fn(async (_url: string, init: { headers: Record<string, string> }) =>
+    init.headers.Authorization === "Bearer env-key" ? goBody({ percent: 4, resetsAt: "2026-10-12T00:00:00Z" }) : { ok: false });
+  vi.stubGlobal("fetch", fetcher);
+  expect((await openCodeWeek({ ...env, OPENCODE_API_KEY: "env-key" }, now, true))?.used).toBe(4);
+  expect(fetcher.mock.calls.map(bearer)).toEqual(["Bearer expired", "Bearer env-key"]);
+  db.close();
+});
+
+it("does not call twice with the same key when env and auth.json agree", async () => {
+  const { db, env } = fixture(); await withAuth(env, "same");
+  const fetcher = vi.fn().mockResolvedValue({ ok: false }); vi.stubGlobal("fetch", fetcher);
+  expect(await openCodeWeek({ ...env, OPENCODE_API_KEY: "same" }, now, true)).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  db.close();
+});
+
+it("falls back to the env key when the auth.json key throws a network error", async () => {
+  const { db, env } = fixture(); await withAuth(env);
+  const fetcher = vi.fn(async (_url: string, init: { headers: Record<string, string> }) => {
+    if (init.headers.Authorization === "Bearer file-key") throw new Error("socket hang up");
+    return goBody({ percent: 3, resetsAt: "2026-10-12T00:00:00Z" });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  expect((await openCodeWeek({ ...env, OPENCODE_API_KEY: "env-key" }, now, true))?.used).toBe(3);
+  db.close();
+});
+
+it("makes no request without any key, and works with only the env key", async () => {
+  const { db, env } = fixture();
+  const fetcher = vi.fn().mockResolvedValue(goBody({ percent: 9, resetsAt: "2026-10-12T00:00:00Z" }));
+  vi.stubGlobal("fetch", fetcher);
+  expect(await openCodeWeek(env, now, true)).toBeNull(); expect(fetcher).not.toHaveBeenCalled();
+  expect((await openCodeWeek({ ...env, OPENCODE_API_KEY: "env-only" }, now, true))?.used).toBe(9);
+  db.close();
+});
+
+it.each([
+  ["a response with no weekly meter (monthly or rolling only)", { monthly: { percent: 31, resetsAt: "2026-11-01T00:00:00Z" } }],
+  ["a non-numeric percent", { percent: "5", resetsAt: "2026-10-12T00:00:00Z" }],
+  ["a negative percent", { percent: -1, resetsAt: "2026-10-12T00:00:00Z" }],
+  ["a reset that already passed", { percent: 5, resetsAt: "2026-10-09T00:00:00Z" }],
+  ["a missing reset", { percent: 5 }],
+])("ignores %s and writes no reading", async (_label, weekly) => {
+  const { db, env } = fixture(); await withAuth(env);
+  const { existsSync } = await import("node:fs");
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(goBody(weekly)));
+  expect(await openCodeWeek(env, now, true)).toBeNull();
+  expect(existsSync(join(env.HOME, ".cache", "token-furnace", "opencode-usage.json"))).toBe(false);
+  db.close();
+});
+
+it("keeps the last good reading when a refresh fails, until its own reset passes", async () => {
+  const { db, env } = fixture(); await withAuth(env);
+  const fetcher = vi.fn().mockResolvedValue(goBody({ percent: 5, resetsAt: "2026-10-12T00:00:00Z" }));
+  vi.stubGlobal("fetch", fetcher);
+  expect((await openCodeWeek(env, now, true))?.used).toBe(5);
+  fetcher.mockResolvedValue({ ok: false });
+  const later = new Date(+now + 10 * 60_000); // past the 5-minute reuse window, so it retries
+  expect((await openCodeWeek(env, later, true))?.used).toBe(5);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(await openCodeWeek(env, new Date("2026-10-12T00:00:01Z"), true)).toBeNull();
+  db.close();
+});
+
+it("reads the saved reading on a fresh process, and ignores one saved for another data directory", async () => {
+  const { db, env } = fixture();
+  const { mkdirSync: mk, writeFileSync } = await import("node:fs");
+  const dir = join(env.HOME, ".cache", "token-furnace"); mk(dir, { recursive: true });
+  const saved = (source: string) => JSON.stringify({ source, fetched: +now / 1000, seven_day: { utilization: 2, resets_at: "2026-10-19T00:00:00.000Z" } });
+  writeFileSync(join(dir, "opencode-usage.json"), saved(env.OPENCODE_DATA_DIR));
+  expect((await openCodeWeek(env, now, false))?.used).toBe(2);
+  writeFileSync(join(dir, "opencode-usage.json"), saved("/somewhere/else"));
+  expect(await openCodeWeek({ ...env, OPENCODE_DATA_DIR: join(env.HOME, "other") }, now, false)).toBeNull();
+  db.close();
+});
+
+it("surfaces a new week with no local spend as pending, not as a dash, and not as a calibrated week", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const later = new Date(+now + 2 * 3_600_000); // the fixture's only turn is before this week began
+  const week = (used: number) => ({ start: new Date(+now + 3_600_000), resets: new Date(+now + 7 * 86_400_000), used });
+  for (const used of [0, 2, 5]) {
+    const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now: later, opencodeWeek: week(used) })!.burns.opencode!;
+    expect(burn.used).toBeNull(); expect(burn.weekBurndown).toBeNull(); expect(burn.limit).toBeNull();
+    expect(burn.pending?.used).toBe(used);
+    expect(Date.parse(burn.pending!.resets)).toBe(+now + 7 * 86_400_000);
+  }
+  db.close();
+});
+
+it("calibrates once this week has Go spend and the plan reads 1% or more, and clears pending", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const week = (used: number) => ({ start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used });
+  const ok = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week(5) })!.burns.opencode!;
+  expect(ok.used).toBe(5); expect(ok.pending).toBeNull(); expect(ok.limit).toBeGreaterThan(0);
+  // Spend exists, but the plan still reads 0%: the limit cannot be divided out yet.
+  const zero = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week(0) })!.burns.opencode!;
+  expect(zero.used).toBeNull(); expect(zero.pending?.used).toBe(0);
+  db.close();
+});
+
+it("reports no pending and no week when the plan reading is unavailable", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now })!.burns.opencode!;
+  expect(burn.used).toBeNull(); expect(burn.pending).toBeNull();
+  db.close();
+});
