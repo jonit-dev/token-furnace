@@ -134,6 +134,7 @@ export function reportView(report: RawReport, now: Date): Report {
       prompt: issuePrompt(i),
     })),
     active: report.active.map(named),
+    unseenAgents: report.unseenAgents,
     agentActivity: report.agentActivity,
     burndown,
     contextTargets: CONTEXT_TARGET,

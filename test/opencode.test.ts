@@ -253,3 +253,32 @@ it("reports no pending and no week when the plan reading is unavailable", async 
   expect(burn.used).toBeNull(); expect(burn.pending).toBeNull();
   db.close();
 });
+
+it("adds hidden headless runs to the active count, and visible ones only past the sessions already seen", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const get = (headless: import("../src/services/processes").Headless | undefined) =>
+    app.reports.getReport(7, "opencode", { weeklyBudget: null, now, headless })!;
+  expect(get(undefined).unseenAgents).toBeUndefined();
+  expect(get({ hidden: {}, visible: {} }).unseenAgents).toEqual({});
+  const seen = get(undefined).active.filter((a) => a.source === "opencode").length; // 1: the fixture turn is at `now`
+  expect(seen).toBe(1);
+  // One visible run is the session we already see; a second is a real extra.
+  expect(get({ hidden: {}, visible: { opencode: 1 } }).unseenAgents).toEqual({});
+  expect(get({ hidden: {}, visible: { opencode: 3 } }).unseenAgents).toEqual({ opencode: 2 });
+  expect(get({ hidden: { codex: 2 }, visible: { opencode: 1 } }).unseenAgents).toEqual({ codex: 2 });
+  db.close();
+});
+
+it("probes the process table for /api/report only when the server opts in", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const { startServer } = await import("../src/server");
+  const base = { days: 7, source: "opencode" as const, weeklyBudget: null, planUsage: false, port: 0 };
+  for (const [processes, expected] of [[undefined, "undefined"], [true, "object"]] as const) {
+    const server = await startServer(app, { ...base, processes });
+    try {
+      const report = await (await fetch(`${server.url}/api/report`)).json() as { unseenAgents?: unknown };
+      expect(typeof report.unseenAgents).toBe(expected);
+    } finally { await server.close(); }
+  }
+  db.close();
+});

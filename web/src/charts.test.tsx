@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Burn } from "../../src/core/model";
 import { Gauge, WeeklyQuota } from "./components/charts";
-import { Dashboard } from "./components/panels";
+import { ActiveAgents, Dashboard } from "./components/panels";
 
 const hour = 3600000;
 const start = Date.parse("2026-10-01T00:00:00Z");
@@ -152,4 +152,19 @@ it("words the new-quota warning for any provider and any percentage", () => {
   expect(screen.getByText(/Your plan reports the weekly quota as 5% used/)).toBeTruthy();
   expect(screen.queryByText(/Claude plan/)).toBeNull();
   expect(screen.queryByText(/under 1%/)).toBeNull();
+});
+
+it("counts running headless agents that leave no transcript in the Active agents panel", () => {
+  const session = (source: "claude" | "codex" | "opencode") => ({ source }) as never;
+  const r = { burns: { claude: burn(), codex: burn(), opencode: burn() }, active: [session("claude"), session("claude")],
+    unseenAgents: { codex: 2, opencode: 1 } };
+  render(<ActiveAgents r={r} />);
+  expect(screen.getByText("5")).toBeTruthy(); // 2 claude + 2 codex + 1 opencode
+  const rows = screen.getByLabelText("Active agents by provider").textContent;
+  expect(rows).toMatch(/Claude Code\s*2/); expect(rows).toMatch(/Codex\s*2/); expect(rows).toMatch(/OpenCode\s*1/);
+});
+
+it("leaves the Active agents count alone when nothing is unseen", () => {
+  const { container } = render(<ActiveAgents r={{ burns: { codex: burn() }, active: [] }} />);
+  expect(container.querySelector("strong")?.textContent).toBe("0");
 });

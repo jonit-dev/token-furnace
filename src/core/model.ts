@@ -300,6 +300,8 @@ export interface RawReport {
   /** [share %, worst models] */
   unpriced: [number, [string, number][]] | null;
   active: ActiveSession[];
+  /** Running headless agents the transcripts cannot show, per source. */
+  unseenAgents?: Partial<Record<Source, number>>;
   agentActivity?: AgentActivity;
   /** [hour, [cool spend, hot spend]] */
   timeline: [Date, [number, number]][];
@@ -332,6 +334,7 @@ export interface Report {
   actions: string[];
   issues: Issue[];
   active: ActiveSession[];
+  unseenAgents?: Partial<Record<Source, number>>;
   agentActivity?: AgentActivity;
   /** [hour end, actual, benchmark] */
   burndown: [string, number, number][];

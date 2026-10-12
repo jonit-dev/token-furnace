@@ -108,7 +108,7 @@ describe("App", () => {
     expect(quota.nextElementSibling).toBe(agents);
     expect(agents.parentElement!.nextElementSibling!.textContent).not.toContain("Active agents");
     fireEvent.click(within(agents as HTMLElement).getByRole("button", { name: "About Active agents" }));
-    expect(screen.getByRole("dialog", { name: "Active agents" }).textContent).toContain("does not inspect running processes");
+    expect(screen.getByRole("dialog", { name: "Active agents" }).textContent).toContain("running headless agent processes");
   });
 
   it("counts active agents across providers and keeps idle providers visible", () => {

@@ -1,3 +1,4 @@
+import type { Headless } from "./processes";
 import { existsSync } from "node:fs";
 import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
@@ -13,6 +14,8 @@ export interface ReportOptions {
   /** The subscription window, read by the caller: the saved reading, refreshed from the network when a login exists. */
   planWeek?: Week | null;
   opencodeWeek?: Week | null;
+  /** Headless agent runs from the process table, when the caller probed it. */
+  headless?: Headless;
   /** The clock. Defaults to now, so a test can freeze it. */
   now?: Date;
 }
@@ -171,6 +174,7 @@ export class ReportService {
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
     });
     if (report) this.sessionAgents.enrich(report.active, sessions, this.sources, now);
+    if (report && opts.headless) report.unseenAgents = unseen(opts.headless, report.active);
     return report;
   }
 
@@ -208,4 +212,15 @@ function fullSessionId(session: SessionInput): string | null {
   if (UUID_ONLY.test(turn)) return turn;
   const match = UUID_ANY.exec(session.path);
   return match ? match[0] : null;
+}
+
+/** Hidden runs always add. Visible ones add only past the sessions the transcripts already show. */
+function unseen(found: Headless, active: { source: Source }[]): Partial<Record<Source, number>> {
+  const out: Partial<Record<Source, number>> = {};
+  for (const source of ["claude", "codex", "opencode"] as const) {
+    const seen = active.filter((a) => a.source === source).length;
+    const extra = (found.hidden[source] ?? 0) + Math.max((found.visible[source] ?? 0) - seen, 0);
+    if (extra) out[source] = extra;
+  }
+  return out;
 }

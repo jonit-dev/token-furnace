@@ -3,6 +3,7 @@
  * request. burn.py serve(). Every route is a controller method: no vanilla routers.
  */
 
+import { headlessAgents } from "./services/processes";
 import type { Server } from "node:http";
 import "reflect-metadata";
 import express, { type Request, type Response } from "express";
@@ -27,6 +28,8 @@ export interface ServeOptions {
   /** Millions of weighted tokens, or null. */
   weeklyBudget: number | null;
   planUsage: boolean;
+  /** Probe the process table for headless agent runs. `serve` turns it on; library callers opt in. */
+  processes?: boolean;
   port: number;
 }
 
@@ -41,7 +44,7 @@ const TICK_MS = 60_000;
 
 /** Serve until the process is stopped. Ctrl-C ends it. */
 export async function serve(app: App, options: ServeOptions): Promise<void> {
-  const live = await startServer(app, options);
+  const live = await startServer(app, { processes: true, ...options });
   console.log(`Token Furnace live on ${live.url} (Ctrl-C to stop)`);
   console.log("The first scan reads every transcript once. The page shows its progress.");
   await new Promise<void>(() => {}); // the server keeps the loop alive
@@ -174,6 +177,7 @@ function reportController(app: App, options: ServeOptions, page: string) {
       weeklyBudget: options.weeklyBudget,
       planWeek: await plan(now),
       opencodeWeek: await openCodeWeek(app.env, now, false),
+      headless: options.processes ? await headlessAgents() : undefined,
       now,
     });
     if (options.planUsage) setImmediate(refresh); // after this response: the keychain read must not block it

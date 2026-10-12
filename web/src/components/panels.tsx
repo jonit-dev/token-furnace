@@ -353,14 +353,17 @@ export function ActiveAgents({ r }: { r: Partial<Report> }) {
   const active = r.active ?? [];
   const counts = new Map<string, number>(Object.keys(r.burns ?? {}).map(provider => [provider, 0]));
   for (const session of active) counts.set(session.source, (counts.get(session.source) ?? 0) + 1);
+  // Headless runs (codex exec --ephemeral, opencode run) leave no transcript: the server counts them.
+  for (const [source, extra] of Object.entries(r.unseenAgents ?? {})) counts.set(source, (counts.get(source) ?? 0) + (extra ?? 0));
+  const total = [...counts.values()].reduce((a, b) => a + b, 0);
   return <Card title="Active agents" sub="Across all providers" icon="Users"
     right={<MetricInfo label="Active agents">
-      <p>Sessions with a recorded assistant turn in the last 30 minutes, added across all providers. The provider counts break down that total. This estimates recent activity; it does not inspect running processes.</p>
+      <p>Sessions with a recorded assistant turn in the last 30 minutes, added across all providers. The provider counts break down that total. The server also counts running headless agent processes that leave no transcript (<code>codex exec --ephemeral</code>, <code>opencode run</code>, <code>claude -p</code>). Their history is not recorded, so the chart and peaks use transcripts only.</p>
       <p>The line reconstructs the last 24 hours, sampled every 30 minutes. A session stays active for 30 minutes after each recorded turn; repeated turns from the same session do not add extra agents.</p>
       <p>7d peak is the highest simultaneous count in the last seven days. Lifetime peak covers all available local transcripts, including activity before Token Furnace started. Peaks use exact activity times, so brief overlaps between chart samples still count. Deleted transcripts are excluded.</p>
     </MetricInfo>}>
     <div className="flex items-baseline gap-2 mb-3">
-      <strong className="text-4xl font-heading tabular-nums">{active.length}</strong>
+      <strong className="text-4xl font-heading tabular-nums">{total}</strong>
       <span className="text-xs text-muted">last 30 min</span>
     </div>
     <ul aria-label="Active agents by provider" className="space-y-1 text-xs mb-4">
