@@ -125,6 +125,8 @@ export interface ReportInput {
   planWeek: Week | null;
   codexWeek: Week | null;
   opencodeWeek?: Week | null;
+  /** Last calibrated plan size in weighted tokens, per source: sizes a week with no local spend yet. */
+  limits?: Partial<Record<Source, number>>;
 }
 
 export interface ActivityTurn {

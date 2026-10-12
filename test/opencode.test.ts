@@ -282,3 +282,67 @@ it("probes the process table for /api/report only when the server opts in", asyn
   }
   db.close();
 });
+
+// Red/green: a new week with no local spend has the plan's reading but no way to size the plan.
+// The last calibrated size is remembered, so the gauge and tile read the weekly quota anyway.
+const emptyWeek = (used: number) => ({ start: new Date(+now + 3_600_000), resets: new Date(+now + 7 * 86_400_000), used });
+const later = new Date(+now + 2 * 3_600_000); // the fixture's only turn is before this week began
+
+it("reads a new week from the remembered plan size when there is no local spend yet", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now: later, opencodeWeek: emptyWeek(5), limits: { opencode: 2_000_000 } })!.burns.opencode!;
+  expect(burn.pending).toBeNull();
+  expect(burn.used).toBe(5);
+  expect(burn.limit).toBe(2_000_000);
+  // 95% of the plan is left over the hours to the reset: the goal comes from the plan, not the 7-day average.
+  const hoursLeft = burn.hoursLeft!;
+  expect(burn.idealPct).toBeCloseTo(95 / hoursLeft);
+  expect(burn.goal).toBeCloseTo((2_000_000 * 0.95) / hoursLeft);
+  expect(burn.basis).not.toContain("7-day average");
+  expect(burn.weekBurndown!.at(-1)).toEqual([expect.any(String), 5, 5]); // ends at the plan's reading, not 0
+  db.close();
+});
+
+it("stays pending when there is no local spend and no remembered plan size", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now: later, opencodeWeek: emptyWeek(5) })!.burns.opencode!;
+  expect(burn.used).toBeNull(); expect(burn.pending?.used).toBe(5);
+  db.close();
+});
+
+it("prefers a fresh calibration over the remembered plan size", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const week = { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 5 };
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week, limits: { opencode: 99 } })!.burns.opencode!;
+  expect(burn.limit).not.toBe(99); expect(burn.limit).toBeGreaterThan(0);
+  db.close();
+});
+
+it("remembers the calibrated plan size on disk and uses it for a later week with no spend", async () => {
+  const { db, env } = fixture(); const { existsSync, readFileSync } = await import("node:fs");
+  const app = compose(env); await app.reports.refresh();
+  const week = { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 5 };
+  const calibrated = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week })!.burns.opencode!;
+  const file = join(env.HOME, ".cache", "token-furnace", "limits.json");
+  expect(existsSync(file)).toBe(true);
+  expect(JSON.parse(readFileSync(file, "utf8")).opencode).toBeCloseTo(calibrated.limit!, 0);
+  const next = app.reports.getReport(7, "opencode", { weeklyBudget: null, now: later, opencodeWeek: emptyWeek(3) })!.burns.opencode!;
+  expect(next.used).toBe(3); expect(next.limit).toBeCloseTo(calibrated.limit!, 0); expect(next.pending).toBeNull();
+  db.close();
+});
+
+it("writes no plan size with no-cache, and ignores a corrupt or nonsense file", async () => {
+  const { db, env } = fixture(); const { existsSync, mkdirSync: mk, writeFileSync } = await import("node:fs");
+  const week = { start: new Date(+now - 86_400_000), resets: new Date(+now + 6 * 86_400_000), used: 5 };
+  const off = compose({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, { noCache: true }); await off.reports.refresh();
+  off.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week });
+  const file = join(env.HOME, ".cache", "token-furnace", "limits.json");
+  expect(existsSync(file)).toBe(false);
+  mk(join(env.HOME, ".cache", "token-furnace"), { recursive: true });
+  for (const bad of ["{not json", JSON.stringify({ opencode: -5 }), JSON.stringify({ opencode: "big" }), "null"]) {
+    writeFileSync(file, bad);
+    const app = compose({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, { noCache: true }); await app.reports.refresh();
+    expect(app.reports.getReport(7, "opencode", { weeklyBudget: null, now: later, opencodeWeek: emptyWeek(5) })!.burns.opencode!.pending?.used).toBe(5);
+  }
+  db.close();
+});

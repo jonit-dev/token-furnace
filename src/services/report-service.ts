@@ -1,5 +1,7 @@
 import type { Headless } from "./processes";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { usageCachePath } from "./usage-client";
 import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
 import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week } from "../core/model";
@@ -14,6 +16,8 @@ export interface ReportOptions {
   /** The subscription window, read by the caller: the saved reading, refreshed from the network when a login exists. */
   planWeek?: Week | null;
   opencodeWeek?: Week | null;
+  /** Plan sizes to use for a week with no local spend; the remembered ones fill the rest. */
+  limits?: Partial<Record<Source, number>>;
   /** Headless agent runs from the process table, when the caller probed it. */
   headless?: Headless;
   /** The clock. Defaults to now, so a test can freeze it. */
@@ -171,9 +175,11 @@ export class ReportService {
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,
       opencodeWeek: opts.opencodeWeek ?? null,
+      limits: { ...this.readLimits(), ...opts.limits },
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
     });
     if (report) this.sessionAgents.enrich(report.active, sessions, this.sources, now);
+    if (report) this.rememberLimits(report);
     if (report && opts.headless) report.unseenAgents = unseen(opts.headless, report.active);
     return report;
   }
@@ -183,6 +189,43 @@ export class ReportService {
     const now = opts.now ?? new Date();
     const raw = this.getRaw(days, source, { ...opts, now });
     return raw ? reportView(raw, now) : null;
+  }
+
+  private limitsPath(): string {
+    return join(dirname(usageCachePath(this.env)), "limits.json");
+  }
+
+  /** The plan sizes last calibrated on this machine. A missing, corrupt or nonsense file reads as none. */
+  private readLimits(): Partial<Record<Source, number>> {
+    try {
+      const saved = JSON.parse(readFileSync(this.limitsPath(), "utf8"));
+      const out: Partial<Record<Source, number>> = {};
+      for (const source of ["claude", "codex", "opencode"] as const) {
+        const value = saved?.[source];
+        if (typeof value === "number" && Number.isFinite(value) && value > 0) out[source] = value;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
+  /** Saves each calibrated plan size once it moves more than 2%, so a quiet week keeps its last good one. */
+  private rememberLimits(report: RawReport): void {
+    if (this.env.TOKEN_FURNACE_NO_CACHE && this.env.TOKEN_FURNACE_NO_CACHE !== "0") return;
+    const stored = this.readLimits();
+    const next = { ...stored };
+    for (const source of ["claude", "codex", "opencode"] as const) {
+      const week = report.burns[source]?.week;
+      if (!week || !(week.limit > 0)) continue; // a week sized from the stored limit equals it: no write
+      const old = stored[source];
+      if (!old || Math.abs(week.limit - old) / old > 0.02) next[source] = week.limit;
+    }
+    if (JSON.stringify(next) === JSON.stringify(stored)) return;
+    try {
+      mkdirSync(dirname(this.limitsPath()), { recursive: true });
+      writeFileSync(this.limitsPath(), JSON.stringify(next));
+    } catch { /* A cache we cannot write is a slow run, not a wrong one. */ }
   }
 
   /** Every config file the checks read, through the agent that owns it. */
