@@ -217,6 +217,8 @@ export interface ActiveSession {
   peak: number;
   hours: number;
   context: number;
+  /** Weighted tokens the latest turn cost; grows with context, so it says when to compact. */
+  lastTurn: number;
   idle: number;
   flags: string[];
   model: string | null;

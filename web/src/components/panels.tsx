@@ -82,6 +82,7 @@ function SessionTable({
               <th className="px-1 text-right" title="Burn rate">Burn</th>
               <th className="px-1" title="Provider burn share">Share</th>
               <th className="px-1 text-right">Ctx</th>
+              <th className="px-1 text-right" title="Weighted tokens the latest turn cost">Turn</th>
               <th className="px-1 text-right">Age</th>
               <th className="px-1 text-right">Idle</th>
               <th className="px-1 text-right">Fixes</th>
@@ -133,6 +134,7 @@ function SessionTable({
                   </div>
                 </td>
                 <td data-label="Context" className="px-1 py-1.5 text-right">{fmt(s.context)}</td>
+                <td data-label="Last turn" className="px-1 py-1.5 text-right">{fmt(s.lastTurn)}</td>
                 <td data-label="Age" className="px-1 py-1.5 text-right whitespace-nowrap">{Number(s.hours || 0).toFixed(1)} h</td>
                 <td data-label="Idle" className="px-1 py-1.5 text-right whitespace-nowrap">
                   {(s.idle || 0) < 1 ? "now" : Math.round(s.idle) + " m"}
@@ -207,6 +209,7 @@ function SessionModal({
         ["Burn rate", burnText(s, burns)],
         ["Provider share", `${sharePct(Number(s.rateShare) || 0)} of ${sourceLabel(s.source)}`],
         ["Context", fmt(s.context)],
+        ["Last turn", fmt(s.lastTurn)],
         ["Peak", fmt(s.peak)],
         ["Turns", String(s.turns)],
         ["Age", `${Number(s.hours || 0).toFixed(1)} h`],

@@ -22,7 +22,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
   it("opens the eye button with agent counts, full models and parent/subagent details", () => {
     const session: ActiveSession = {
       source: "codex", project: "demo", id: "parent", title: "Inspect agents", share: 1,
-      turns: 1, peak: 1000, hours: 0.1, context: 1000, idle: 0, flags: [],
+      turns: 1, peak: 1000, hours: 0.1, context: 1000, lastTurn: 10, idle: 0, flags: [],
       model: "gpt-6.1-sol", rate: 1000, rateShare: 1,
       agents: { activeCount: 2, complete: true, members: [
         { id: "parent", parentId: null, role: "parent", model: "gpt-6.1-sol", lastSeen: null, active: true },
@@ -59,7 +59,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
         turns: 2,
         peak: 50000,
         hours: 0.5,
-        context: 50000,
+        context: 50000, lastTurn: 10,
         idle: 5,
         flags: [],
         model: "gpt-5.5",
@@ -76,7 +76,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
         turns: 5,
         peak: 250000,
         hours: 1,
-        context: 250000,
+        context: 250000, lastTurn: 10,
         idle: 2,
         flags: ["late compaction: peak 250k. Use a 160000 claude compaction window."],
         model: "claude-3-7-sonnet",
@@ -122,7 +122,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
         turns: 2,
         peak: 50000,
         hours: 0.5,
-        context: 50000,
+        context: 50000, lastTurn: 10,
         idle: 5,
         flags: [],
         model: "gpt-5.5",
@@ -144,7 +144,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
   const editableSession: ActiveSession = {
     source: "codex", project: "token-furnace", id: "abcdef01", fullId: "abcdef01-first",
     title: "Nonsense title", share: 5, turns: 2, peak: 50000, hours: 0.5,
-    context: 50000, idle: 5, flags: [], model: "gpt-6.1-sol", rate: 100000, rateShare: 20,
+    context: 50000, lastTurn: 10, idle: 5, flags: [], model: "gpt-6.1-sol", rate: 100000, rateShare: 20,
   };
 
   it("shows the short session ID beneath the project", () => {
@@ -238,7 +238,7 @@ describe("ActiveSessions and Sessions UI improvements", () => {
       turns: 8,
       peak: 120000,
       hours: 1.2,
-      context: 120000,
+      context: 120000, lastTurn: 10,
       idle: 1,
       flags: ["caller reads: 519 file/log reads. Send them to a cheap read-only agent."],
       model: "opencode-go/deepseek-v4.1-flash",

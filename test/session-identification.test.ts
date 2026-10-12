@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { extractCodexTitle } from "../src/sources/agent-source";
 import { buildReport } from "../src/core/analyze/report";
+import { modelRate } from "../src/core/analyze/pricing";
 import type { ReportInput, SessionInput, Turn } from "../src/core/model";
 
 describe("Session identification and actionability", () => {
@@ -81,6 +82,8 @@ describe("Session identification and actionability", () => {
     expect(active.id).toBe("01a127e3");
     expect(active.fullId).toBe("01a127e3-70f6-7dd3-9dfb-7504ffeb687d");
     expect(active.title).toBe("Inspect quota leaks");
+    // Last turn cost: 1000 fresh + 0.1 x 500 cache read + 5 x 100 output, at the model rate.
+    expect(active.lastTurn).toBeCloseTo((modelRate("gpt-5.5") ?? 1) * 1550);
 
     expect(report?.sessions).toHaveLength(1);
     const top = report!.sessions[0];

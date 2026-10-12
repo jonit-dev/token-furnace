@@ -551,7 +551,7 @@ afterEach(() => {
 });
 
 describe("session spike alerts", () => {
-  const session: Report["active"][number] = { source: "claude", project: "demo", id: "abcdefgh", fullId: "abcdefgh-1", title: "Culprit", share: 100, turns: 1, peak: 100, hours: 1, context: 100, idle: 1, flags: [], model: "sonnet", rate: 201, rateShare: 100 };
+  const session: Report["active"][number] = { source: "claude", project: "demo", id: "abcdefgh", fullId: "abcdefgh-1", title: "Culprit", share: 100, turns: 1, peak: 100, hours: 1, context: 100, lastTurn: 10, idle: 1, flags: [], model: "sonnet", rate: 201, rateShare: 100 };
   const report = (rate = 201): Pick<Report, "active" | "burns"> => ({ active: [{ ...session, rate }], burns: { claude: { goal: 100 } as Report["burns"]["claude"] } });
   const settings = () => onSettings({ conditions: { ...defaultSettings().conditions, sessionSpike: true } });
 

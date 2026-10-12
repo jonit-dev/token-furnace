@@ -67,7 +67,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   const recent = new Map<Source, Map<number, number>>();
   const quotaHour = new Map<Source, number>();
   const weekHourly = new Map<Source, Map<number, [number, number]>>();
-  const active: [string, number, number, string | null, number][] = [];
+  const active: [string, number, number, string | null, number, number][] = [];
   const sessions24 = new Map<string, [number, number, number, number]>();
   const signals24 = new Map<string, [number, WakeCounts]>();
   const per = new Map<Source, PerSource>();
@@ -103,6 +103,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       let firstSeen: Date | null = null;
       let lastSeen: Date | null = null;
       let lastContext = 0;
+      let lastTurn = 0;
       let cCost = 0;
       let cCount = 0;
       let cPeak = 0;
@@ -254,6 +255,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         }
         lastSeen = item.when;
         lastContext = context;
+        lastTurn = weighted;
       }
 
       if (!count) continue;
@@ -280,7 +282,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       paths.set(key, file.path);
       titles.set(key, file.title);
       const idle = lastSeen ? (now.getTime() - lastSeen.getTime()) / 60_000 : 0;
-      if (idle <= ACTIVE_MINUTES) active.push([key, lastContext, idle, model, hourCost]);
+      if (idle <= ACTIVE_MINUTES) active.push([key, lastContext, idle, model, hourCost, lastTurn]);
     }
   }
 
@@ -357,7 +359,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     unpriced: unpriced.size ? [share(unpricedCost), mostCommon(unpriced, 5)] : null,
     active: active
       .sort((a, b) => b[4] - a[4])
-      .map(([key, context, idle, model, rate]): ActiveSession => {
+      .map(([key, context, idle, model, rate, lastTurn]): ActiveSession => {
         const [source, project, session] = splitKey(key);
         const src = source as Source;
         const sessionData = sessions.get(key)!;
@@ -374,6 +376,7 @@ export function buildReport(input: ReportInput): RawReport | null {
           peak: sessionData[2],
           hours: sessionData[3],
           context,
+          lastTurn,
           idle,
           flags: flags24(key),
           model,

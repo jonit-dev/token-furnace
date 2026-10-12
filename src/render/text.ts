@@ -37,7 +37,7 @@ export function printDoctor(report: RawReport, htmlPath: string | null): string 
     out.push(
       `Active: ${(s.title || "(untitled)").slice(0, 40)} (${s.source} ${s.id}, ${s.model || "?"}) ` +
         `burning ${fixed(s.rate / 1e6, 1)}M/h (${fixed(s.rateShare)}% of the hour), ` +
-        `context ${fixed(s.context / 1000)}k, ${int0(s.turns)} turns, ${fixed(s.hours)}h old, ` +
+        `context ${fixed(s.context / 1000)}k, ${fixed(s.lastTurn / 1000)}k last turn, ${int0(s.turns)} turns, ${fixed(s.hours)}h old, ` +
         `idle ${fixed(s.idle)}m${flags}`,
     );
   }

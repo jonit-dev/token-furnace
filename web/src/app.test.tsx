@@ -181,7 +181,7 @@ describe("App", () => {
   it("shows every provider's active sessions independently of the burn selector", () => {
     const session: Report["active"][number] = {
       source: "claude", project: "demo", id: "session1", title: null,
-      share: 50, turns: 10, peak: 100_000, hours: 1, context: 100_000,
+      share: 50, turns: 10, peak: 100_000, hours: 1, context: 100_000, lastTurn: 10,
       idle: 1, flags: [], model: "test-model", rate: 1_000, rateShare: 50,
     };
     const report: Report = { ...fixtureReport, active: [
