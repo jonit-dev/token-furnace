@@ -429,32 +429,49 @@ export function buildReport(input: ReportInput): RawReport | null {
     const floor = remembered && Number.isFinite(remembered) && remembered > 0 ? remembered : 0;
     const local = week && week.used >= 1 && spent ? (spent * 100) / week.used : 0;
     const limit = Math.max(local, floor);
-    if (week && week.used >= 1 && limit > 0) {
-      const implied = (limit * week.used) / 100; // the spend the plan's reading stands for
-      const hoursLeft = Math.max((week.resets.getTime() - now.getTime()) / 3_600_000, 1);
+    // The plan's own meter over the week, when the provider exposes one: it counts every run billed
+    // to the plan, including those this machine never records, so it wins over local token spend.
+    const meter = week?.readings?.length ? week.readings : null;
+    if (week && (meter || (week.used >= 1 && limit > 0))) {
+      const sized = limit > 0 ? limit : null;
+      const nowMs = now.getTime();
+      const startMs = week.start.getTime();
+      const hoursLeft = Math.max((week.resets.getTime() - nowMs) / 3_600_000, 1);
       const weekRecent = recent.get(src) ?? new Map<number, number>();
       const gains: Record<string, number> = {};
-      for (const h of GAIN_HOURS) gains[h] = ((weekRecent.get(h) ?? 0) * 100) / limit;
+      for (const h of GAIN_HOURS) {
+        gains[h] = meter
+          ? Math.max(week.used - meterAt(meter, startMs, nowMs - h * 3_600_000)[1], 0)
+          : ((weekRecent.get(h) ?? 0) * 100) / sized!;
+      }
       // Quota points per hour over the last 24 h. A week younger than that has spent only its
       // own points, so divide by the time since the week began.
-      const age = Math.max((now.getTime() - week.start.getTime()) / 3_600_000, 1);
-      const rate24 = age < CHECK_HOURS ? week.used / age : gains[CHECK_HOURS] / CHECK_HOURS;
+      const age = Math.max((nowMs - startMs) / 3_600_000, 1);
+      const rate24 = meter
+        ? meterRate(meter, startMs, nowMs, week.used, CHECK_HOURS)
+        : age < CHECK_HOURS ? week.used / age : gains[CHECK_HOURS] / CHECK_HOURS;
       const left = 100 - week.used;
       const toEmpty = rate24 > 0 ? left / rate24 : null;
-      const dry = toEmpty ? new Date(now.getTime() + toEmpty * 3_600_000) : null;
+      const dry = toEmpty ? new Date(nowMs + toEmpty * 3_600_000) : null;
       const rawWeek: RawWeek = {
         resets: week.resets,
         hours_left: hoursLeft,
         used: week.used,
-        ideal: Math.max(limit - implied, 0) / hoursLeft,
-        limit,
+        // Tokens per hour to the reset: the spend the plan's reading stands for, off the plan size.
+        ideal: sized ? Math.max(sized - (sized * week.used) / 100, 0) / hoursLeft : null,
+        limit: sized,
         start: week.start,
-        rate_pct: ((quotaHour.get(src) ?? 0) * 100) / limit,
+        // Whole-percent readings are coarse over one hour, so the meter's rate spans the last 3 h.
+        rate_pct: meter
+          ? meterRate(meter, startMs, nowMs, week.used, METER_RATE_HOURS)
+          : ((quotaHour.get(src) ?? 0) * 100) / sized!,
         ideal_pct: Math.max(left, 0) / hoursLeft,
-        // Local shape, scaled to end at the plan's reading; flat when nothing was recorded locally.
-        burndown: local
-          ? weekPoints(weekHourly.get(src) ?? new Map(), week.start, now, local)
-          : [[week.start, 0, 0], [now, week.used, week.used]],
+        burndown: meter
+          ? meterPoints(meter, week, now)
+          // Local shape, scaled to end at the plan's reading; flat when nothing was recorded locally.
+          : local
+            ? weekPoints(weekHourly.get(src) ?? new Map(), week.start, now, local)
+            : [[week.start, 0, 0], [now, week.used, week.used]],
         projection: {
           rate_pct: rate24,
           hours_to_empty: toEmpty,
@@ -468,6 +485,32 @@ export function buildReport(input: ReportInput): RawReport | null {
     report.burns[src] = burn;
   }
   return report;
+}
+
+const METER_RATE_HOURS = 3;
+
+/** The meter at or before `t`: the newest reading by then, else 0 at the week's start. */
+function meterAt(readings: [number, number][], start: number, t: number): [number, number] {
+  let best: [number, number] = [start, 0];
+  for (const reading of readings) if (reading[0] <= t && reading[0] >= best[0]) best = reading;
+  return best;
+}
+
+/** Percent per hour from the newest reading at least `hours` old (or the week's start) to now. */
+function meterRate(readings: [number, number][], start: number, now: number, used: number, hours: number): number {
+  const [at, value] = meterAt(readings, start, now - hours * 3_600_000);
+  const span = (now - at) / 3_600_000;
+  return span > 0 ? Math.max(used - value, 0) / span : 0;
+}
+
+/** The week's curve straight from the meter: 0 at the start, every reading, then now. */
+function meterPoints(readings: [number, number][], week: Week, now: Date): [Date, number, number][] {
+  const points: [Date, number, number][] = [[week.start, 0, 0]];
+  for (const [at, value] of readings) {
+    if (at > week.start.getTime() && at <= now.getTime()) points.push([new Date(at), value, value]);
+  }
+  if (points[points.length - 1][0].getTime() < now.getTime()) points.push([now, week.used, week.used]);
+  return points;
 }
 
 function emptyWakes(): WakeCounts {

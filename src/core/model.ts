@@ -71,6 +71,8 @@ export interface Week {
   resets: Date;
   /** Percent of the weekly limit already spent. */
   used: number;
+  /** The plan's own meter over this week, oldest first: [epoch ms, percent]. Only OpenCode keeps one. */
+  readings?: [number, number][];
 }
 
 /** One recommended setting, judged from the config on disk. burn.py:434 */
@@ -236,8 +238,9 @@ export interface RawWeek {
   resets: Date;
   hours_left: number;
   used: number;
-  ideal: number;
-  limit: number;
+  /** Tokens per hour to the reset; null when the plan size is unknown and only the meter is read. */
+  ideal: number | null;
+  limit: number | null;
   start: Date;
   rate_pct: number;
   ideal_pct: number;

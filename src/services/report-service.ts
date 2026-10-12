@@ -217,9 +217,10 @@ export class ReportService {
     const next = { ...stored };
     for (const source of ["claude", "codex", "opencode"] as const) {
       const week = report.burns[source]?.week;
-      if (!week || !(week.limit > 0)) continue; // a week sized from the stored limit equals it: no write
+      const size = week?.limit ?? 0;
+      if (!(size > 0)) continue; // a week sized from the stored limit equals it: no write
       const old = stored[source];
-      if (!old || week.limit > old * 1.02) next[source] = week.limit; // raise only: delete the file to resize down
+      if (!old || size > old * 1.02) next[source] = size; // raise only: delete the file to resize down
     }
     if (JSON.stringify(next) === JSON.stringify(stored)) return;
     try {

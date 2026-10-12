@@ -119,7 +119,10 @@ function writeJson(path: string, value: unknown): void {
   }
 }
 
-const goReadings = new Map<string, { fetched: number; lastTry: number; data: Record<string, any> | null }>();
+type GoReading = { fetched: number; lastTry: number; data: Record<string, any> | null; history: [number, number][] };
+const goReadings = new Map<string, GoReading>();
+/** A week of 5-minute readings is about 2,000; the cap only guards a runaway file. */
+const HISTORY_CAP = 4096;
 
 /** Go supplies its actual weekly meter; local token totals only calibrate the burn estimate. */
 export async function openCodeWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
@@ -127,8 +130,9 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
   const path = join(dirname(usageCachePath(env)), "opencode-usage.json");
   const key = source.base();
   const saved = readJson(path);
-  const reading = goReadings.get(key) ?? { fetched: saved?.fetched ?? 0, lastTry: 0,
-    data: saved?.source === key ? saved?.seven_day ?? null : null };
+  const mine = saved?.source === key;
+  const reading: GoReading = goReadings.get(key) ?? { fetched: saved?.fetched ?? 0, lastTry: 0,
+    data: mine ? saved?.seven_day ?? null : null, history: mine ? savedHistory(saved) : [] };
   const at = now.getTime() / 1000;
   if (network && (!reading.data || at - reading.fetched >= REUSE_SECONDS) && at - reading.lastTry >= RETRY_SECONDS) {
     const auth = jsonAuth(source.readFile("auth.json"));
@@ -151,9 +155,12 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
           if (typeof weekly?.percent === "number" && Number.isFinite(weekly.percent) && weekly.percent >= 0) {
             const data = { utilization: weekly.percent, resets_at: weekly.resetsAt };
             if (toWeek(data, now)) {
+              // A new reset is a new week: its meter starts over.
+              if (reading.data?.resets_at !== data.resets_at) reading.history = [];
+              reading.history = [...reading.history, [now.getTime(), weekly.percent] as [number, number]].slice(-HISTORY_CAP);
               reading.data = data; reading.fetched = at;
               if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0"))
-                writeJson(path, { source: key, fetched: at, seven_day: data });
+                writeJson(path, { source: key, fetched: at, seven_day: data, history: reading.history });
             }
           }
           break;
@@ -161,7 +168,19 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
       }
     }
   }
-  return toWeek(reading.data, now);
+  const week = toWeek(reading.data, now);
+  if (!week) return null;
+  const readings = reading.history.filter((r): r is [number, number] =>
+    Array.isArray(r) && Number.isFinite(r[0]) && Number.isFinite(r[1]) && r[0] >= week.start.getTime() && r[0] <= now.getTime());
+  return { ...week, readings };
+}
+
+/** The saved meter. A file from before history existed still holds one reading: the last fetch. */
+function savedHistory(saved: Record<string, any> | null): [number, number][] {
+  if (Array.isArray(saved?.history)) return saved.history;
+  const used = Number(saved?.seven_day?.utilization);
+  const at = Number(saved?.fetched) * 1000;
+  return Number.isFinite(used) && Number.isFinite(at) && at > 0 ? [[at, used]] : [];
 }
 
 function jsonAuth(text: string | null): Record<string, any> | null {

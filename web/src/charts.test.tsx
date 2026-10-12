@@ -168,3 +168,9 @@ it("leaves the Active agents count alone when nothing is unseen", () => {
   const { container } = render(<ActiveAgents r={{ burns: { codex: burn() }, active: [] }} />);
   expect(container.querySelector("strong")?.textContent).toBe("0");
 });
+
+it("shows the gauge in %/h from the meter when the plan size in tokens is unknown", () => {
+  render(<Gauge burn={{ ...burn(), limit: null, ratePct: 1.2, idealPct: 0.6, pending: null }} />);
+  expect(screen.getByText(/1\.2/)).toBeTruthy();
+  expect(screen.queryByText("no quota reading")).toBeNull();
+});

@@ -42,7 +42,7 @@ export function burnGoal(report: RawReport, source: Source): [number, string] {
   const burn = report.burns[source];
   if (!burn) return [0, "no burn for this source"];
   const week = burn.week;
-  if (week) {
+  if (week && week.ideal !== null) {
     return [
       week.ideal,
       `ideal pace to the weekly reset ${localStamp(week.resets)} (${fixed(week.hours_left)} h left)`,
@@ -50,6 +50,14 @@ export function burnGoal(report: RawReport, source: Source): [number, string] {
   }
   if (report.budget && source === "claude") {
     return [report.budget / 168, `weekly budget ${fixed(report.budget / 1e6)}M / 168 h`];
+  }
+  if (week) {
+    // Only the plan's meter is known: the gauge reads %/h from it; tokens use the window's average.
+    return [
+      burn.total / (report.days * 24),
+      `ideal pace from the plan's meter to the weekly reset ${localStamp(week.resets)} (${fixed(week.hours_left)} h left); ` +
+        `token goal is your ${report.days}-day average until the plan size is known`,
+    ];
   }
   return [
     burn.total / (report.days * 24),

@@ -379,3 +379,87 @@ it("never lowers the remembered plan size, and raises it when a calibration is l
   expect(JSON.parse(readFileSync(file, "utf8")).opencode).toBeCloseTo(local, 0);
   db.close();
 });
+
+// Red/green: the gauge reads the plan's own meter over time, so spend this machine never records
+// (lanes, throwaway data dirs, other machines) still shows up as a burn rate.
+const H = 3_600_000;
+const meterWeek = (readings: [number, number][], used: number) =>
+  ({ start: new Date(+now - 6 * H), resets: new Date(+now + 162 * H), used, readings });
+
+it("builds the week from the meter alone when nothing is recorded locally and no plan size is known", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  // The clock is 10 h past the fixture's only turn, so this week has no local spend.
+  const t = new Date(+now + 10 * H);
+  const start = +t - 6 * H;
+  const week = { start: new Date(start), resets: new Date(+t + 162 * H), used: 7,
+    readings: [[start + 1 * H, 1], [start + 2 * H, 3], [+t - 0.5 * H, 6], [+t, 7]] as [number, number][] };
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now: t, opencodeWeek: week })!.burns.opencode!;
+  expect(burn.pending).toBeNull();
+  expect(burn.used).toBe(7);
+  expect(burn.limit).toBeNull();
+  // Last 3 h: the newest reading at or before t-3h is 3% at start+2h, 4 h ago -> (7-3)/4.
+  expect(burn.ratePct).toBeCloseTo(1);
+  expect(burn.idealPct).toBeCloseTo(93 / 162);
+  // A week younger than a day projects from its start, where the meter read 0.
+  expect(burn.projection!.ratePct).toBeCloseTo(7 / 6);
+  expect(burn.gains!["1"]).toBeCloseTo(4); // the newest reading at or before t-1h is 3% (t-4h)
+  expect(burn.gains!["6"]).toBeCloseTo(7);
+  // The chart is the meter itself, from 0 at the week start to the reading now.
+  expect(burn.weekBurndown![0].slice(1)).toEqual([0, 0]);
+  expect(burn.weekBurndown!.map((p) => p[1])).toEqual([0, 1, 3, 6, 7]);
+  // The gauge has an hourly goal to draw against, so it shows %/h instead of "no quota reading".
+  expect(burn.goal).toBeGreaterThan(0);
+  db.close();
+});
+
+it("prefers the meter's rate over local token spend when both exist", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const start = +now - 6 * H;
+  const week = { start: new Date(start), resets: new Date(+now + 162 * H), used: 9,
+    readings: [[start + H, 2], [+now - 3 * H, 3], [+now, 9]] as [number, number][] };
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now, opencodeWeek: week })!.burns.opencode!;
+  expect(burn.limit).toBeGreaterThan(0); // sized from the fixture's local turn
+  expect(burn.ratePct).toBeCloseTo(2); // (9-3)/3, not the local tokens over that size
+  db.close();
+});
+
+it("falls back to the average since the week began when the meter has a single reading", async () => {
+  const { db, env } = fixture(); const app = compose(env, { noCache: true }); await app.reports.refresh();
+  const t = new Date(+now + 10 * H);
+  const week = { start: new Date(+t - 6 * H), resets: new Date(+t + 162 * H), used: 6, readings: [[+t, 6]] as [number, number][] };
+  const burn = app.reports.getReport(7, "opencode", { weeklyBudget: null, now: t, opencodeWeek: week })!.burns.opencode!;
+  expect(burn.used).toBe(6); expect(burn.ratePct).toBeCloseTo(1); expect(burn.pending).toBeNull();
+  db.close();
+});
+
+it("records each meter reading for the week, keeps them across processes, and drops last week's", async () => {
+  const { db, env } = fixture(); await withAuth(env);
+  const { readFileSync } = await import("node:fs");
+  const fetcher = vi.fn().mockResolvedValue(goBody({ percent: 2, resetsAt: "2026-10-12T00:00:00Z" }));
+  vi.stubGlobal("fetch", fetcher);
+  await openCodeWeek(env, now, true);
+  fetcher.mockResolvedValue(goBody({ percent: 4, resetsAt: "2026-10-12T00:00:00Z" }));
+  const week = (await openCodeWeek(env, new Date(+now + 6 * 60_000), true))!;
+  expect(week.readings).toEqual([[+now, 2], [+now + 6 * 60_000, 4]]);
+  const file = join(env.HOME, ".cache", "token-furnace", "opencode-usage.json");
+  expect(JSON.parse(readFileSync(file, "utf8")).history).toEqual([[+now, 2], [+now + 6 * 60_000, 4]]);
+  // A reused reading (inside 5 minutes) still carries the history.
+  expect((await openCodeWeek(env, new Date(+now + 7 * 60_000), false))!.readings).toHaveLength(2);
+  // The next week starts a new history.
+  fetcher.mockResolvedValue(goBody({ percent: 1, resetsAt: "2026-10-19T00:00:00Z" }));
+  const next = (await openCodeWeek(env, new Date("2026-10-12T01:00:00Z"), true))!;
+  expect(next.readings).toEqual([[Date.parse("2026-10-12T01:00:00Z"), 1]]);
+  db.close();
+});
+
+it("treats a saved reading from before meter history existed as the first meter point", async () => {
+  const { db, env } = fixture();
+  const { mkdirSync: mk, writeFileSync } = await import("node:fs");
+  const dir = join(env.HOME, ".cache", "token-furnace"); mk(dir, { recursive: true });
+  writeFileSync(join(dir, "opencode-usage.json"), JSON.stringify({ source: env.OPENCODE_DATA_DIR, fetched: +now / 1000 - 60,
+    seven_day: { utilization: 8, resets_at: "2026-10-12T00:00:00.000Z" } }));
+  const week = (await openCodeWeek(env, now, false))!;
+  expect(week.used).toBe(8);
+  expect(week.readings).toEqual([[+now - 60_000, 8]]);
+  db.close();
+});
