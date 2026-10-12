@@ -26,7 +26,9 @@ export function fixed(value: number, digits = 0): string {
   if (Number.isNaN(value)) return "nan";
   if (!Number.isFinite(value)) return value > 0 ? "inf" : "-inf";
   const sign = value < 0 ? "-" : "";
-  const { digits: all, point } = exact(value);
+  let { digits: all, point } = exact(value);
+  // Below 0.1 the point sits left of the digits; pad with zeros so slice() never sees a negative index.
+  if (point < 0) [all, point] = ["0".repeat(-point) + all, 0];
   const text = all.padEnd(point + digits + 1, "0");
 
   const kept = text.slice(0, point + digits);

@@ -281,7 +281,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       if (hours > p.hours24) p.hours24 = hours;
       paths.set(key, file.path);
       titles.set(key, file.title);
-      const idle = lastSeen ? (now.getTime() - lastSeen.getTime()) / 60_000 : 0;
+      const idle = lastSeen ? Math.max(0, (now.getTime() - lastSeen.getTime()) / 60_000) : 0; // a turn written after now is idle 0
       if (idle <= ACTIVE_MINUTES) active.push([key, lastContext, idle, model, hourCost, lastTurn]);
     }
   }
