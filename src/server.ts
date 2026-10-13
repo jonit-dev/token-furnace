@@ -63,8 +63,12 @@ export async function startServer(app: App, options: ServeOptions): Promise<Live
     validation: false,
   });
 
-  const http = await new Promise<Server>((ready) => {
-    const bound = web.listen(options.port, "127.0.0.1", () => ready(bound));
+  const http = await new Promise<Server>((ready, fail) => {
+    // Express also calls this callback when listen fails, so check the server is listening.
+    const bound = web.listen(options.port, "127.0.0.1", (error?: NodeJS.ErrnoException) => {
+      if (!error && bound.listening) return ready(bound);
+      fail(error?.code === "EADDRINUSE" ? new Error(`Port ${options.port} is already in use. Pass another with --port.`) : (error ?? new Error("Server failed to start")));
+    });
   });
   // Scan after the port is bound. The scan yields, so requests are answered while it runs.
   warm(app);
