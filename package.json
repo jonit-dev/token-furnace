@@ -20,6 +20,10 @@
   ],
   "scripts": {
     "build": "tsup && vite build --config web/vite.config.ts && node --input-type=module -e \"import { copyFileSync } from 'node:fs'; copyFileSync('dist/web/index.html', 'dist/dashboard.html')\"",
+    "dev": "node scripts/dev.mjs",
+    "release": "node scripts/release.mjs",
+    "start": "npm run build && node dist/cli.js serve",
+    "check": "npm run typecheck && vitest run",
     "smoke": "node scripts/smoke.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",

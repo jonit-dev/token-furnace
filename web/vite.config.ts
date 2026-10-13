@@ -11,7 +11,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // Dev only. The live report comes from the CLI server on port 8780.
+    // Dev only. The live report comes from the CLI server on port 8765 (npm run dev).
     proxy: { "/api": { target: "http://127.0.0.1:8765", changeOrigin: true } },
   },
 });
