@@ -1,6 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { compose, type App } from "../src/compose";
@@ -267,5 +269,26 @@ describe("SqliteSessionRepository", () => {
     expect((db!.prepare("PRAGMA synchronous;").get() as { synchronous: number }).synchronous).toBe(1);
     expect(repo2.all()).toHaveLength(1);
     repo2.close();
+  });
+
+  it("save waits for another process that holds the write lock instead of failing with 'database is locked'", async () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), "tf-busy-cache-")), "cache.sqlite");
+    const repo = new SqliteSessionRepository(dbPath);
+    // A second connection on its own thread holds the write lock for 300 ms, like a second token-furnace process.
+    const holder = new Worker(
+      `const { DatabaseSync } = require("node:sqlite");
+       const { parentPort, workerData } = require("node:worker_threads");
+       const db = new DatabaseSync(workerData);
+       db.exec("BEGIN IMMEDIATE;");
+       parentPort.postMessage("locked");
+       setTimeout(() => { db.exec("COMMIT;"); db.close(); }, 300);`,
+      { eval: true, workerData: dbPath },
+    );
+    await once(holder, "message");
+
+    expect(() => repo.save({ source: "claude", path: "/a.jsonl", mtimeMs: 1, title: null, turns: [] }, 1)).not.toThrow();
+    expect(repo.all()).toHaveLength(1);
+    repo.close();
+    await holder.terminate();
   });
 });

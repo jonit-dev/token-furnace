@@ -105,6 +105,7 @@ export class SqliteSessionRepository implements SessionRepository {
   private openDb(path: string): DatabaseSync {
     const db = new DatabaseSync(path);
     try {
+      db.exec("PRAGMA busy_timeout = 5000;"); // another token-furnace process may hold the write lock
       db.exec("PRAGMA foreign_keys = ON;");
       db.exec("PRAGMA synchronous = NORMAL;");
       if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
