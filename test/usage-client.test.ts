@@ -231,3 +231,26 @@ it("canonicalizes helper paths before deciding default identity and hashing a cu
   expect(security).toHaveBeenCalledWith("security", ["find-generic-password", "-s",
     `Claude Code-credentials-${createHash("sha256").update(realpathSync(custom)).digest("hex").slice(0, 8)}`, "-w"], expect.anything());
 });
+
+it.each([false, true])("accepts newer status-line readings and weekly resets after a failed network attempt (custom=%s)", async (custom) => {
+  const home = tempRoot("tf-status-line-");
+  const dir = join(home, custom ? ".agentx" : ".claude");
+  mkdirSync(dir);
+  const env = { HOME: home, XDG_CACHE_HOME: join(home, ".cache") };
+  const install = { id: custom ? "claude:agentx" : "claude", label: "Claude Code", dir, isDefault: !custom, found: [] };
+  const { planWeek, usageCachePath } = await import("../src/services/usage-client");
+  const path = usageCachePath(env, install);
+  mkdirSync(join(env.XDG_CACHE_HOME, "token-furnace"), { recursive: true });
+  const save = (at: number, used: number, resets = CLOCK + 3 * 86_400_000) => writeFileSync(path, JSON.stringify({
+    ...(custom ? { source: dir } : {}), fetched: at / 1000,
+    seven_day: { utilization: used, resets_at: new Date(resets).toISOString() },
+  }));
+  save(CLOCK - 600_000, 37);
+  const security = vi.fn(() => { throw new Error("no login"); });
+  expect((await planWeek(env, new Date(CLOCK), true, install, security))?.used).toBe(37);
+  expect(security).toHaveBeenCalledTimes(1);
+  save(CLOCK + 1000, 95);
+  expect((await planWeek(env, new Date(CLOCK + 1000), false, install, security))?.used).toBe(95);
+  save(CLOCK + 4 * 86_400_000, 7, CLOCK + 10 * 86_400_000);
+  expect((await planWeek(env, new Date(CLOCK + 4 * 86_400_000), false, install, security))?.used).toBe(7);
+});

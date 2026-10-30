@@ -244,3 +244,36 @@ describe("per-install limit floors", () => {
     }
   });
 });
+
+it.each(["claude", "codex"])("omits a legacy %s burn with no spend while keeping provider metadata", async (idle) => {
+  const { rmSync } = await import("node:fs");
+  const app = fixtureApp();
+  try {
+    await app.reports.refresh();
+    for (const session of app.repo.all().filter((row) => row.source === idle)) app.repo.save({ ...session,
+      turns: session.turns.map((turn) => ({ ...turn, when: new Date(now.getTime() - 10 * 86_400_000) })),
+    }, 1);
+    const active = idle === "claude" ? "codex" : "claude";
+    const report = app.reports.getReport(1, "all", { now, weeklyBudget: null })!;
+    expect(Object.keys(report.burns)).toEqual([active]);
+    expect(report.burn).toEqual(report.burns[active]);
+    expect(report.providers.map((provider) => provider.id).sort()).toEqual(["claude", "codex"]);
+  } finally {
+    (app.repo as { close?: () => void }).close?.();
+    rmSync(app.env.HOME!, { recursive: true, force: true });
+  }
+});
+
+it("does not treat a settings-only default Claude directory as a live source", async () => {
+  const { rmSync } = await import("node:fs");
+  const app = fixtureApp();
+  try {
+    rmSync(join(app.env.CLAUDE_CONFIG_DIR!, "projects"), { recursive: true });
+    expect(app.reports.live("all")).toEqual(["codex"]);
+    await app.reports.refresh();
+    expect(app.reports.getReport(7, "claude", { now, weeklyBudget: null })).toBeNull();
+  } finally {
+    (app.repo as { close?: () => void }).close?.();
+    rmSync(app.env.HOME!, { recursive: true, force: true });
+  }
+});

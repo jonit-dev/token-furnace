@@ -133,8 +133,6 @@ export function runSetup(
   const verifyOnly = Boolean(opts.verify);
 
   const hub = join(home, ".agents", "skills");
-  const claudeInstalls = discoverClaudeInstalls(env);
-  const claudeDirs = claudeInstalls.map((install) => install.dir);
   const codexDir = env.CODEX_HOME || join(home, ".codex");
   const backupRoot = join(home, ".agents", "token-furnace-backups");
 
@@ -157,17 +155,6 @@ export function runSetup(
       : existsSync(join(repoSkill(s), "SKILL.md"))
         ? repoSkill(s)
         : join(skillsParent, s);
-
-  const backupLabel = (id: string, name: string): string => id === "claude" ? name : `${id.replace(/[^a-zA-Z0-9_-]+/g, "-")}-${name}`;
-  const tracked: Array<{ label: string; path: string }> = claudeInstalls.flatMap((install) => [
-    { label: backupLabel(install.id, "claude-settings.json"), path: join(install.dir, "settings.json") },
-    { label: backupLabel(install.id, "claude-mcp.json"), path: install.isDefault ? join(home, ".claude.json") : join(install.dir, ".claude.json") },
-    { label: backupLabel(install.id, "claude-CLAUDE.md"), path: join(install.dir, "CLAUDE.md") },
-  ]);
-  tracked.push(
-    { label: "codex-config.toml", path: join(codexDir, "config.toml") },
-    { label: "codex-AGENTS.md", path: join(codexDir, "AGENTS.md") },
-  );
 
   const say = (s: string) => out.write(`  ${s}\n`);
   const ok = (s: string) => out.write(`  \x1b[32mok\x1b[0m    ${s}\n`);
@@ -198,7 +185,15 @@ export function runSetup(
     }
     out.write(`restoring ${latest}\n`);
     const saved = join(latest, "files.json");
-    const restoreFiles: typeof tracked = existsSync(saved) ? JSON.parse(readFileSync(saved, "utf8")) : tracked;
+    const claudeDir = env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+    const legacyTracked = [
+      { label: "claude-settings.json", path: join(claudeDir, "settings.json") },
+      { label: "claude-mcp.json", path: join(home, ".claude.json") },
+      { label: "claude-CLAUDE.md", path: join(claudeDir, "CLAUDE.md") },
+      { label: "codex-config.toml", path: join(codexDir, "config.toml") },
+      { label: "codex-AGENTS.md", path: join(codexDir, "AGENTS.md") },
+    ];
+    const restoreFiles: typeof legacyTracked = existsSync(saved) ? JSON.parse(readFileSync(saved, "utf8")) : legacyTracked;
     for (const item of restoreFiles) {
       const backupFile = join(latest, item.label);
       if (existsSync(backupFile)) {
@@ -215,6 +210,21 @@ export function runSetup(
     out.write("restored\n");
     return 0;
   }
+
+  const found = discoverClaudeInstalls(env);
+  const claudeInstalls = found.filter((install) => !install.isDefault || existsSync(install.dir) || found.length === 1);
+  const claudeDirs = claudeInstalls.map((install) => install.dir);
+
+  const backupLabel = (id: string, name: string): string => id === "claude" ? name : `${id.replace(/[^a-zA-Z0-9_-]+/g, "-")}-${name}`;
+  const tracked: Array<{ label: string; path: string }> = claudeInstalls.flatMap((install) => [
+    { label: backupLabel(install.id, "claude-settings.json"), path: join(install.dir, "settings.json") },
+    { label: backupLabel(install.id, "claude-mcp.json"), path: install.isDefault ? join(home, ".claude.json") : join(install.dir, ".claude.json") },
+    { label: backupLabel(install.id, "claude-CLAUDE.md"), path: join(install.dir, "CLAUDE.md") },
+  ]);
+  tracked.push(
+    { label: "codex-config.toml", path: join(codexDir, "config.toml") },
+    { label: "codex-AGENTS.md", path: join(codexDir, "AGENTS.md") },
+  );
 
   // --- Verify ---
   const runVerification = (): number => {
@@ -749,7 +759,9 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
     if (!repairs.length) { out.write("No repairs selected. No files changed.\n"); return 0; }
     const selected = (id: ConfigRepairId) => repairs.includes(id);
     const home = env.HOME || homedir();
-    const claudePaths = discoverClaudeInstalls(env).map((install) => join(install.dir, "settings.json"));
+    const found = discoverClaudeInstalls(env);
+    const claudePaths = found.filter((install) => !install.isDefault || existsSync(install.dir) || found.length === 1)
+      .map((install) => join(install.dir, "settings.json"));
     const codexPath = join(env.CODEX_HOME || join(home, ".codex"), "config.toml");
     const changes: { path: string; before: string | null; after: string }[] = [];
     const withinCap = (value: unknown, cap: number) => {

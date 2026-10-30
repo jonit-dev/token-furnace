@@ -13,6 +13,7 @@ import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { ProviderId, RawReport, Week } from "./core/model";
+import { kindOf } from "./core/providers";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { pendingRepairs, runFixConfig } from "./setup/agents";
 import { claudePlanWeeks, openCodeWeek, planWeek } from "./services/usage-client";
@@ -208,7 +209,7 @@ function reportController(app: App, options: ServeOptions, page: string) {
     @Get("/api/fix-config")
     pendingFixes(@Res() res: Response) {
       const live = app.reports.live("all"); // repairs for agents that are not installed are not offered
-      const pending = pendingRepairs(app.env).filter((id) => live.some((agent) => id.startsWith(`${agent}-`)));
+      const pending = pendingRepairs(app.env).filter((id) => live.some((agent) => id.startsWith(`${kindOf(agent)}-`)));
       return res.set("Cache-Control", "no-store").json({ pending });
     }
 

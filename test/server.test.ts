@@ -317,3 +317,19 @@ describe("configuration repair endpoint", () => {
     }
   });
 });
+
+it("offers Claude repairs for an env-only custom install", async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-custom-only-repairs-"));
+  const custom = buildClaudeInstall(home, ".agentx", { now });
+  const app = compose({ HOME: home, CLAUDE_CONFIG_DIR: custom.dir }, { noCache: true });
+  const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+  try {
+    const response = await fetch(`${server.url}/api/fix-config`);
+    expect(response.status).toBe(200);
+    const { pending } = await response.json() as { pending: string[] };
+    expect(pending).toContain("claude-context");
+    expect(pending).toContain("claude-workers");
+    expect(pending.every((id) => id.startsWith("claude-"))).toBe(true);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+  } finally { await server.close(); rmSync(home, { recursive: true, force: true }); }
+});

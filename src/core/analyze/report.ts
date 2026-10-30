@@ -427,6 +427,7 @@ export function buildReport(input: ReportInput): RawReport | null {
 
   for (const src of input.live) {
     const spend = bySource.get(src) ?? 0;
+    if (!spend && !src.startsWith("claude:")) continue;
     const week = weeks[src];
     const spent = weekNow.get(src) ?? 0;
     const burn: RawReport["burns"][ProviderId] = { rate: lastHour.get(src) ?? 0, total: spend, week: null };

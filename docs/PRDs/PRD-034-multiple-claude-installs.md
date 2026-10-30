@@ -1,6 +1,6 @@
 # PRD-034 — Multiple Claude Code installs on one machine
 
-**Status:** IMPLEMENTED — local verification complete; awaiting PR review.
+**Status:** IMPLEMENTED — review corrections verified locally; approval pending.
 **Priority:** P1 — Every Claude Code install on the machine is found automatically and reported as its own provider, with its own plan reading, limits and cache rows.
 **Complexity:** 6 (MEDIUM); breadth 16+ files (3), credential selection across accounts (2), external keychain/OAuth integration (1). Each phase is independently verifiable and reversible; the cache is regenerable.
 **Owner:** Unassigned
@@ -240,9 +240,23 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 
 - The single-install characterization snapshot was recorded before production changes and remains unchanged. The final suite verifies it.
 - `npm run build`: passed. With `CLAUDE_CONFIG_DIR` unset, `--list-sources` found both real Claude installs (290 and 168 transcripts) and Codex (1,198 transcripts).
-- `npm run check`: type checking passed; 32 test files passed, 358 tests passed, one existing test skipped. Coverage includes concurrent suffix reservation, A/A+B/A cache reuse, exact HOME expansion and quoted aliases, injected Keychain service selection, independent limits, 100% readings, dashboard loading/empty/unavailable states, and setup/fix/rollback after discovery changes.
+- `npm run check`: type checking passed; 32 test files passed, 367 tests passed, one existing test skipped. Coverage includes concurrent suffix reservation, A/A+B/A cache reuse, exact HOME expansion and quoted aliases, injected Keychain service selection, independent limits, 100% readings, dashboard loading/empty/unavailable states, and setup/fix/rollback after discovery changes.
 - `npm run smoke`: all package, installed CLI, HTML, and server checks passed.
 - PRD-009 snapshot flow: froze 1,656 actual transcripts totaling 6,090,509,442 bytes from two Claude installs and Codex. The manifest contains 1,658 files including two empty config markers. Credentials and secret configuration were excluded.
-- `node scripts/bench-scan.mjs run --base <private snapshot directory> --mode warm --runs 1 --timeout 240`: 0.727 seconds, exit 0, valid report, matching frozen report oracle. This verifies the warm scan budget on this machine; it does not measure cold scans or other hardware.
+- `node scripts/bench-scan.mjs run --base <private snapshot directory> --mode warm --runs 1 --timeout 240`: 0.821 seconds, exit 0, valid report, matching frozen report oracle. This verifies the warm scan budget on this machine; it does not measure cold scans or other hardware.
 - Symlink regression: discovery directories equal `realpathSync`; the single-install helper canonicalizes both config and default directories before selecting the Keychain service. Temporary HOME roots are canonical; characterization snapshot bytes remain unchanged.
 - No live Keychain access or usage API request was needed for verification. Credential tests use temporary homes and an injected runner. Windows and Linux custom token stores remain unverified.
+
+### Review corrections
+
+Nine regression cases first reproduced the reported failures, then passed with the fixes:
+
+- Newer saved usage readings update a running process after a failed login attempt, including weekly resets; another install’s readings remain isolated.
+- Rollback runs before discovery. Backups without a file manifest restore only the original five tracked files, preserving secondary installs even when identity reservations are blocked.
+- Idle legacy providers keep their previous `burns` and top-level `burn` behavior. Secondary providers remain selectable when empty. A settings-only default directory is not treated as a transcript source.
+- Auto Fixes offers Claude repairs for a custom-only install by matching the provider kind.
+- Setup, verify, and fix-config leave an absent default directory absent when a custom install exists. Fresh-machine setup still creates the default install.
+
+The original performance oracle is preserved. It included the idle default burn corrected above, so its report comparison fails as expected.
+A separate snapshot contains identical frozen file bytes and the same clock. After snapshot-path normalization, the only report changes are removal of the idle default burn and the resulting top-level fallback.
+The new warm benchmark matches its own oracle in 0.821 seconds. Type checking, all 32 test files, and package smoke pass after these corrections.

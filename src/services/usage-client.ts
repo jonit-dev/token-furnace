@@ -42,7 +42,13 @@ export async function planWeek(
   const path = usageCachePath(env, install);
   const saved = readJson(path);
   const key = `${path}:${install.dir}`;
-  const reading = claudeReadings.get(key) ?? { lastTry: 0, fetched: saved?.fetched ?? 0, data: install.id === "claude" || saved?.source === install.dir ? saved?.seven_day ?? null : null };
+  const reading = claudeReadings.get(key) ?? { lastTry: 0, fetched: 0, data: null as Record<string, any> | null };
+  const own = install.id === "claude" || saved?.source === install.dir;
+  const savedAt = typeof saved?.fetched === "number" && Number.isFinite(saved.fetched) ? saved.fetched : 0;
+  if (own && saved?.seven_day && savedAt >= reading.fetched) {
+    reading.data = saved.seven_day;
+    reading.fetched = savedAt;
+  }
   const stale = !reading.data || at - reading.fetched >= REUSE_SECONDS;
   if (network && stale && at - reading.lastTry >= RETRY_SECONDS) {
     reading.lastTry = at;

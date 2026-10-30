@@ -72,8 +72,7 @@ describe("token-furnace setup", () => {
     expect(readFileSync(settings, "utf8")).toBe('{"keep":true}');
     expect(readFileSync(config, "utf8")).toBe('keep = true\n');
     if (custom) {
-      // The absent default install is also configured by setup.
-      expect(existsSync(join(testHome, ".claude", "settings.json"))).toBe(false);
+      expect(existsSync(join(testHome, ".claude"))).toBe(false);
       expect(existsSync(join(testHome, ".codex"))).toBe(false);
     }
   });
@@ -623,4 +622,42 @@ describe("token-furnace fix-config", () => {
       expect(readFileSync(codexPath, "utf8")).toBe('');
     }
   });
+});
+
+it.each([false, true])("legacy rollback preserves secondary configs and bypasses discovery (blocked reservations=%s)", async (blocked) => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-legacy-isolation-"));
+  const { buildClaudeInstall } = await import("./fixtures/build");
+  const secondary = buildClaudeInstall(home, ".agentx", { now: new Date() });
+  const paths = ["settings.json", ".claude.json", "CLAUDE.md"].map((name) => join(secondary.dir, name));
+  const originals = ['{"secondary":true}', '{"account":"secondary"}', "secondary instructions\n"];
+  paths.forEach((path, i) => writeFileSync(path, originals[i]));
+  const backup = join(home, ".agents", "token-furnace-backups", "20200101");
+  mkdirSync(backup, { recursive: true });
+  writeFileSync(join(backup, "claude-settings.json"), '{"restored":true}');
+  const cache = join(home, "cache");
+  if (blocked) writeFileSync(cache, "not a directory");
+  try {
+    expect(runSetup({ rollback: true }, { HOME: home, XDG_CACHE_HOME: cache }, { write: () => {} })).toBe(0);
+    expect(readFileSync(join(home, ".claude", "settings.json"), "utf8")).toBe('{"restored":true}');
+    paths.forEach((path, i) => expect(readFileSync(path, "utf8")).toBe(originals[i]));
+    paths.forEach((path) => expect(existsSync(`${path}.token-furnace-removed`)).toBe(false));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+it("setup, verify and fix-config leave an absent default install absent for a custom-only home", async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-custom-only-setup-"));
+  const { buildClaudeInstall } = await import("./fixtures/build");
+  const { runFixConfig } = await import("../src/setup/agents");
+  const secondary = buildClaudeInstall(home, ".agentx", { now: new Date() });
+  const env = { HOME: home, CLAUDE_CONFIG_DIR: secondary.dir };
+  const out = { write: () => {} };
+  try {
+    expect(runSetup({ apply: true }, env, out)).toBe(0);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(runSetup({ verify: true }, env, out)).toBe(0);
+    expect(runFixConfig(env, out)).toBe(0);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(secondary.dir, "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+    expect(runSetup({ verify: true }, env, out)).toBe(0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

@@ -66,7 +66,7 @@ export class ReportService {
   }
 
   private async scan(onProgress?: (progress: ScanProgress) => void): Promise<void> {
-    const live = this.sources.filter((agent) => (existsSync(agent.root()) || agent.kind === "claude" && existsSync(join(agent.base(), "settings.json")))); // not installed
+    const live = this.sources.filter((agent) => existsSync(agent.root())); // not installed
     const files = live.flatMap((source) => source.files().map((file) => ({ source, file })));
     this.order = new Map(files.map(({ file }, index) => [file.path, index]));
     const changed = new Set(this.repo.changed(files.map(({ source, file }) => ({ ...file, source: source.name })), live.map((source) => source.name)).map((file) => file.path));
@@ -138,7 +138,7 @@ export class ReportService {
   /** The agents to scan: the ones installed, in source order. burn.py:289 */
   live(source: ProviderId | "all"): ProviderId[] {
     return this.sources
-      .filter((agent) => (source === "all" || source === agent.name) && (existsSync(agent.root()) || agent.kind === "claude" && existsSync(join(agent.base(), "settings.json"))))
+      .filter((agent) => (source === "all" || source === agent.name) && existsSync(agent.root()))
       .map((agent) => agent.name);
   }
 
