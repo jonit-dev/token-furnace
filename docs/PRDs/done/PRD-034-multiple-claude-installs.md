@@ -1,6 +1,8 @@
 # PRD-034 — Multiple Claude Code installs on one machine
 
-**Status:** IMPLEMENTED — review corrections verified locally; approval pending.
+**Closed:** 2026-10-30 at `80e95b6`, archived to `done/`.
+
+**Status:** DONE — 2026-10-30. Every phase and acceptance box verified.
 **Priority:** P1 — Every Claude Code install on the machine is found automatically and reported as its own provider, with its own plan reading, limits and cache rows.
 **Complexity:** 6 (MEDIUM); breadth 16+ files (3), credential selection across accounts (2), external keychain/OAuth integration (1). Each phase is independently verifiable and reversible; the cache is regenerable.
 **Owner:** Unassigned
