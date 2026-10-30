@@ -243,6 +243,27 @@ describe("per-install limit floors", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("keeps an idle default install next to another Claude install", async () => {
+    const { rmSync } = await import("node:fs");
+    const { buildClaudeInstall } = await import("./fixtures/build");
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-idle-default-"));
+    buildClaudeInstall(home, ".claude", { now });
+    buildClaudeInstall(home, ".cc-work", { now });
+    const app = compose({ HOME: home, XDG_CACHE_HOME: join(home, ".cache"), TOKEN_FURNACE_WORKERS: "0" });
+    try {
+      await app.reports.refresh();
+      for (const session of app.repo.all().filter((row) => row.source === "claude")) app.repo.save({ ...session,
+        turns: session.turns.map((turn) => ({ ...turn, when: new Date(now.getTime() - 10 * 86_400_000) })),
+      }, 1);
+      const report = app.reports.getReport(1, "all", { now, weeklyBudget: null })!;
+      expect(report.burns.claude).toBeDefined();
+      expect(report.burns["claude:cc-work"]).toBeDefined();
+    } finally {
+      (app.repo as { close?: () => void }).close?.();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 it.each(["claude", "codex"])("omits a legacy %s burn with no spend while keeping provider metadata", async (idle) => {

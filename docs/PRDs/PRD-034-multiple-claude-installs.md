@@ -253,7 +253,7 @@ Nine regression cases first reproduced the reported failures, then passed with t
 
 - Newer saved usage readings update a running process after a failed login attempt, including weekly resets; another install’s readings remain isolated.
 - Rollback runs before discovery. Backups without a file manifest restore only the original five tracked files, preserving secondary installs even when identity reservations are blocked.
-- Idle legacy providers keep their previous `burns` and top-level `burn` behavior. Secondary providers remain selectable when empty. A settings-only default directory is not treated as a transcript source.
+- Idle legacy providers keep their previous `burns` and top-level `burn` behavior, except that an idle default Claude install keeps its `burns` row when another Claude install exists, so it reads as quiet rather than missing. Secondary providers remain selectable when empty. A settings-only default directory is not treated as a transcript source.
 - Auto Fixes offers Claude repairs for a custom-only install by matching the provider kind.
 - Setup, verify, and fix-config leave an absent default directory absent when a custom install exists. Fresh-machine setup still creates the default install.
 

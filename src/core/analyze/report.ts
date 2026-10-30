@@ -425,9 +425,11 @@ export function buildReport(input: ReportInput): RawReport | null {
   }
   report.baseline = baseline(report, config);
 
+  // With several Claude installs, an idle one keeps its row so it reads as quiet, not missing.
+  const claudes = input.live.filter((src) => kindOf(src) === "claude").length;
   for (const src of input.live) {
     const spend = bySource.get(src) ?? 0;
-    if (!spend && !src.startsWith("claude:")) continue;
+    if (!spend && !(claudes > 1 && kindOf(src) === "claude")) continue;
     const week = weeks[src];
     const spent = weekNow.get(src) ?? 0;
     const burn: RawReport["burns"][ProviderId] = { rate: lastHour.get(src) ?? 0, total: spend, week: null };
