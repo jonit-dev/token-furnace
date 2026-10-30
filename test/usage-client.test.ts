@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ let apps: { repo: unknown }[] = [];
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function tempRoot(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), prefix));
   roots.push(dir);
   return dir;
 }
@@ -208,4 +208,26 @@ it("queries the default Keychain service for the default install only", async ()
   expect(accessToken({ id: "claude", label: "Claude Code", dir, isDefault: true, found: [] }, security)).toBe(TOKEN);
   expect(security.mock.calls[0]).toBeDefined();
   expect(security).toHaveBeenCalledWith("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], expect.anything());
+});
+
+it("canonicalizes helper paths before deciding default identity and hashing a custom Keychain service", async () => {
+  const home = tempRoot("tf-canonical-home-");
+  const standard = tempRoot("tf-canonical-default-");
+  const custom = tempRoot("tf-canonical-custom-");
+  symlinkSync(standard, join(home, ".claude"), "dir");
+  const alias = join(home, "alias");
+  symlinkSync(standard, alias, "dir");
+  const { defaultClaudeInstall } = await import("../src/sources/claude-installs");
+  const { accessToken } = await import("../src/services/usage-client");
+  expect(defaultClaudeInstall({ HOME: home, CLAUDE_CONFIG_DIR: alias })).toMatchObject({
+    dir: realpathSync(standard), isDefault: true,
+  });
+  rmSync(alias);
+  symlinkSync(custom, alias, "dir");
+  const install = defaultClaudeInstall({ HOME: home, CLAUDE_CONFIG_DIR: alias });
+  expect(install).toMatchObject({ dir: realpathSync(custom), isDefault: false });
+  const security = vi.fn(() => JSON.stringify({ claudeAiOauth: { accessToken: TOKEN } }));
+  expect(accessToken(install, security)).toBe(TOKEN);
+  expect(security).toHaveBeenCalledWith("security", ["find-generic-password", "-s",
+    `Claude Code-credentials-${createHash("sha256").update(realpathSync(custom)).digest("hex").slice(0, 8)}`, "-w"], expect.anything());
 });

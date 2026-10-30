@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, realpathSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -20,7 +20,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 /** A synthetic HOME with all three providers at their default roots. */
 function setupHome(): string {
-  const home = mkdtempSync(join(tmpdir(), "tf-providers-"));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-providers-"));
   roots.push(home);
   buildFull(join(home, ".claude"), now);
   renameSync(join(home, ".claude", "codex"), join(home, ".codex")); // Codex default root is ~/.codex

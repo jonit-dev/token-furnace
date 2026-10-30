@@ -1,6 +1,7 @@
 import {
   existsSync,
   mkdirSync,
+  realpathSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -28,7 +29,7 @@ describe("token-furnace setup", () => {
   let out: string;
 
   beforeEach(() => {
-    testHome = mkdtempSync(join(tmpdir(), "tf-setup-test-"));
+    testHome = mkdtempSync(join(realpathSync(tmpdir()), "tf-setup-test-"));
     out = "";
   });
 
@@ -273,7 +274,7 @@ describe("token-furnace setup", () => {
   });
 
   it("Defect 2: restores cleanly with hostile HOME containing spaces, apostrophe, $(), and backticks", async () => {
-    const hostileRoot = mkdtempSync(join(tmpdir(), "tf-test 'with space' $(echo evil) `touch marker`-"));
+    const hostileRoot = mkdtempSync(join(realpathSync(tmpdir()), "tf-test 'with space' $(echo evil) `touch marker`-"));
     try {
       const app = compose({ HOME: hostileRoot }, { noCache: true });
       const claudeSettings = join(hostileRoot, ".claude", "settings.json");
@@ -551,7 +552,7 @@ describe("token-furnace setup", () => {
 
 describe("token-furnace fix-config", () => {
   let testHome: string;
-  beforeEach(() => { testHome = mkdtempSync(join(tmpdir(), "tf-fix-config-")); });
+  beforeEach(() => { testHome = mkdtempSync(join(realpathSync(tmpdir()), "tf-fix-config-")); });
   afterEach(() => { rmSync(testHome, { recursive: true, force: true }); });
 
   it("repairs both custom config paths, backs up original bytes, and is idempotent", async () => {

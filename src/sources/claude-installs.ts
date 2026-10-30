@@ -86,8 +86,8 @@ export function discoverClaudeInstalls(env: Env): ClaudeInstall[] {
 
 /** The default install identity used by callers that intentionally request one install. */
 export function defaultClaudeInstall(env: Env): ClaudeInstall {
-  const dir = resolve(env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude"));
-  const home = resolve(join(env.HOME || homedir(), ".claude"));
+  const dir = realpathSafe(env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude"));
+  const home = realpathSafe(join(env.HOME || homedir(), ".claude"));
   return { id: "claude", label: "Claude Code", dir, isDefault: dir === home, found: ["default"] };
 }
 
@@ -123,9 +123,7 @@ function slug(dir: string): string {
 
 function realpathSafe(path: string): string {
   try {
-    const resolved = realpathSync(path);
-    // macOS exposes /var through /private/var; retain the user's spelling after resolving links.
-    return process.platform === "darwin" && resolved.startsWith("/private/var/") ? resolved.slice("/private".length) : resolved;
+    return realpathSync(path);
   } catch { return resolve(path); }
 }
 

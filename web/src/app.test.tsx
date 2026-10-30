@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { realpathSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./App";
@@ -12,7 +12,7 @@ import { buildFull, saveUsageReading } from "../../test/fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "../../test/harness";
 
 // The fixture Report the analysis tests use, built once from the shared harness.
-const root = mkdtempSync(join(tmpdir(), "tf-web-"));
+const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-web-"));
 const now = fixedNow();
 buildFull(root, now);
 saveUsageReading(root, now);

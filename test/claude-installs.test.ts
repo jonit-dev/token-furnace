@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { request } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, mkdtempSync, readFileSync, rmSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -56,7 +56,7 @@ function getReport(port: number): Promise<{ status: number; body: string }> {
 
 describe("single Claude install baseline", () => {
   it("keeps the report, cache rows, limits, usage and API payload stable", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-claude-baseline-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-baseline-"));
     roots.push(home);
     const install = buildClaudeInstall(home, ".claude", { now: NOW });
     const env = baselineEnv(home);
@@ -1478,7 +1478,7 @@ describe("single Claude install baseline", () => {
   });
 
   it("still reads an install selected by CLAUDE_CONFIG_DIR", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-claude-env-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-env-"));
     roots.push(home);
     const install = buildClaudeInstall(home, ".agentx", { now: NOW });
     const app = compose({ ...baselineEnv(home), CLAUDE_CONFIG_DIR: install.dir }, { noCache: true });
@@ -1489,7 +1489,7 @@ describe("single Claude install baseline", () => {
 
 describe("Claude install discovery", () => {
   it("finds arbitrary named installs from the default, env, scan and shell rc signals", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-claude-discovery-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-discovery-"));
     roots.push(home);
     const outside = buildClaudeInstall(home, "../tf-claude-outside", { now: NOW });
     roots.push(outside.dir);
@@ -1516,6 +1516,7 @@ describe("Claude install discovery", () => {
     expect(installs.map((install) => install.id)).toEqual([
       "claude", "claude:agentx", "claude:cc-work", "claude:from-env", "claude:tf-claude-outside",
     ]);
+    expect(installs[0].dir).toBe(realpathSync(linked));
     expect(installs[0]).toMatchObject({ dir: defaultInstall.dir, isDefault: true, found: ["default", "scan"] });
     expect(installs.find((install) => install.dir === outside.dir)?.found).toEqual(["shell-rc"]);
     expect(installs.find((install) => install.dir === scanned.dir)?.id).toBe("claude:cc-work");
@@ -1524,7 +1525,7 @@ describe("Claude install discovery", () => {
   });
 
   it("deduplicates the default env path and suffixes slug collisions", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-claude-slugs-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-slugs-"));
     roots.push(home);
     buildClaudeInstall(home, ".claude", { now: NOW });
     buildClaudeInstall(home, ".claude-work", { now: NOW });
@@ -1550,7 +1551,7 @@ describe("Claude install discovery", () => {
   });
 
   it("composes one Claude source per discovered install", () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-claude-compose-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-compose-"));
     roots.push(home);
     buildClaudeInstall(home, ".claude", { now: NOW });
     buildClaudeInstall(home, ".cc-work", { now: NOW });
@@ -1562,9 +1563,9 @@ describe("Claude install discovery", () => {
   });
 
   it("scopes cache eviction to the installs scanned in that run", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-claude-cache-home-"));
-    const outside = mkdtempSync(join(tmpdir(), "tf-claude-cache-outside-"));
-    const cache = mkdtempSync(join(tmpdir(), "tf-claude-cache-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-cache-home-"));
+    const outside = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-cache-outside-"));
+    const cache = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-cache-"));
     roots.push(home, outside, cache);
     const a = buildClaudeInstall(home, ".claude", { now: NOW, session: "a" });
     const b = buildClaudeInstall(outside, ".cc-work", { now: NOW, session: "b" });
@@ -1600,11 +1601,11 @@ describe("Claude install discovery", () => {
   });
 
   it("lets concurrent apps share a cache without showing each other's sessions", async () => {
-    const homeA = mkdtempSync(join(tmpdir(), "tf-claude-concurrent-a-"));
-    const homeB = mkdtempSync(join(tmpdir(), "tf-claude-concurrent-b-"));
+    const homeA = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-concurrent-a-"));
+    const homeB = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-concurrent-b-"));
     const customA = buildClaudeInstall(homeA, "../.cc-a", { now: NOW, session: "a" });
     const customB = buildClaudeInstall(homeB, "../.cc-b", { now: NOW, session: "b" });
-    const cache = mkdtempSync(join(tmpdir(), "tf-claude-concurrent-cache-"));
+    const cache = mkdtempSync(join(realpathSync(tmpdir()), "tf-claude-concurrent-cache-"));
     roots.push(homeA, homeB, customA.dir, customB.dir, cache);
     writeFileSync(join(homeA, ".zshrc"), `CLAUDE_CONFIG_DIR=${customA.dir}\n`);
     writeFileSync(join(homeB, ".zshrc"), `CLAUDE_CONFIG_DIR=${customB.dir}\n`);
@@ -1623,7 +1624,7 @@ describe("Claude install discovery", () => {
 
 describe("Claude install isolation edge cases", () => {
   it("reads quoted aliases and exact HOME variables without executing shell content", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-aliases-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-aliases-"));
     roots.push(home);
     const alias = buildClaudeInstall(home, "nested/alias dir", { now: NOW });
     const braced = buildClaudeInstall(home, "nested/braced", { now: NOW });
@@ -1645,7 +1646,7 @@ describe("Claude install isolation edge cases", () => {
   });
 
   it("reserves collision suffixes across A, A+B, B and A discovery", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-stable-identity-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-stable-identity-"));
     roots.push(home);
     const a = buildClaudeInstall(home, "z/.claude-work", { now: NOW });
     const b = buildClaudeInstall(home, "a/.claude-work", { now: NOW });
@@ -1666,7 +1667,7 @@ describe("Claude install isolation edge cases", () => {
   });
 
   it("reserves different ids for concurrent CLI discovery of colliding paths", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-concurrent-identity-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-concurrent-identity-"));
     roots.push(home);
     const dirs = ["a/.claude-work", "b/.claude-work"].map((path) => buildClaudeInstall(home, path, { now: NOW }).dir);
     const env = baselineEnv(home);
@@ -1683,7 +1684,7 @@ describe("Claude install isolation edge cases", () => {
   });
 
   it("does not promote a custom env install into the default account's identity", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-env-identity-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-env-identity-"));
     roots.push(home);
     const custom = buildClaudeInstall(home, ".agentx", { now: NOW });
     const { discoverClaudeInstalls } = await import("../src/sources/claude-installs");
@@ -1693,7 +1694,7 @@ describe("Claude install isolation edge cases", () => {
 
 
 it("targets custom install paths in config advice and compaction prompts", async () => {
-  const home = mkdtempSync(join(tmpdir(), "tf-install-advice-"));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-install-advice-"));
   roots.push(home);
   buildClaudeInstall(home, ".claude", { now: NOW });
   const custom = buildClaudeInstall(home, ".agentx", { now: NOW, context: 500_000 });
@@ -1709,7 +1710,7 @@ it("targets custom install paths in config advice and compaction prompts", async
 
 
 it("refuses a corrupt identity reservation instead of reusing another install's quota id", async () => {
-  const home = mkdtempSync(join(tmpdir(), "tf-reservation-failure-"));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-reservation-failure-"));
   roots.push(home);
   buildClaudeInstall(home, ".claude-work", { now: NOW });
   const env = baselineEnv(home);

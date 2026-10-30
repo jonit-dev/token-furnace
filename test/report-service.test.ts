@@ -3,7 +3,7 @@
  * harness, and a second scan must not parse a file that did not change.
  */
 
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import { fixedNow, harnessEnv, planWeek, tsReport } from "./harness";
 const now = fixedNow();
 
 function fixtureApp(): App {
-  const root = mkdtempSync(join(tmpdir(), "tf-service-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-service-"));
   buildFull(root, now);
   return compose({ ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString() });
 }
@@ -117,7 +117,7 @@ describe("getReport", () => {
   });
 
   it("has no report when no agent is installed, and the plan week is opt-in", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tf-service-empty-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-service-empty-"));
     const app = compose({ ...harnessEnv(root, now), CLAUDE_CONFIG_DIR: join(root, "none") });
     await app.reports.refresh();
     expect(app.reports.getRaw(7, "all", { weeklyBudget: null, now })).toBeNull();
@@ -149,7 +149,7 @@ const UUID = "01a127e3-70f6-7dd3-9dfb-7504ffeb687d";
 
 /** A codex-only fixture whose rollout filename carries a full UUID, plus an optional native index. */
 function codexNativeApp(indexLines: string[] | null): { app: App; index: string } {
-  const root = mkdtempSync(join(tmpdir(), "tf-native-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-native-"));
   const rollout = join(root, "codex", "sessions", "2026", "10", "10", `rollout-2026-10-10T12-00-00-${UUID}.jsonl`);
   mkdirSync(dirname(rollout), { recursive: true });
   writeFileSync(rollout, [
@@ -213,7 +213,7 @@ describe("per-install limit floors", () => {
   it("honors independent floors and the legacy default slot without sharing calibration", async () => {
     const { readFileSync, rmSync } = await import("node:fs");
     const { buildClaudeInstall } = await import("./fixtures/build");
-    const home = mkdtempSync(join(tmpdir(), "tf-install-limits-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-install-limits-"));
     buildClaudeInstall(home, ".claude", { now });
     buildClaudeInstall(home, ".cc-work", { now });
     const env = { HOME: home, XDG_CACHE_HOME: join(home, ".cache"), TOKEN_FURNACE_WORKERS: "0" };

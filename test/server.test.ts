@@ -2,7 +2,7 @@
 
 import { request } from "node:http";
 import { Server as NetServer } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -12,7 +12,7 @@ import { buildClaudeInstall, buildFull, saveUsageReading } from "./fixtures/buil
 import { fixedNow, harnessEnv, tsReport } from "./harness";
 
 const now = fixedNow();
-const root = mkdtempSync(join(tmpdir(), "tf-server-"));
+const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-server-"));
 buildFull(root, now);
 // A saved subscription reading: the default run makes no network call and still has a Claude week.
 saveUsageReading(root, now);
@@ -65,7 +65,7 @@ describe("serve", () => {
   });
 
   it("filters a discovered Claude install and rejects an unknown source", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-server-installs-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-server-installs-"));
     buildClaudeInstall(home, ".claude", { now });
     buildClaudeInstall(home, ".cc-work", { now, session: "work" });
     const custom = compose({ HOME: home, XDG_CACHE_HOME: join(home, "cache"), TOKEN_FURNACE_NOW: now.toISOString() }, { noCache: true });
@@ -155,7 +155,7 @@ describe("quota refresh", () => {
 
   /** A fresh fixture with a login, at an instant `offsetMs` after `now` so the minute gate lets a call through. */
   function quotaRoot(offsetMs: number) {
-    const root = mkdtempSync(join(tmpdir(), "tf-quota-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-quota-"));
     buildFull(root, now);
     writeFileSync(join(root, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test" } }));
     const at = new Date(now.getTime() + offsetMs);
@@ -260,7 +260,7 @@ function sevenDay(utilization: number, now: Date): Response {
 }
 describe("configuration repair endpoint", () => {
   it("rejects unconfirmed or cross-origin writes and applies the shared CLI repair after confirmation", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-server-fix-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-server-fix-"));
     const app = compose({ HOME: home }, { noCache: true });
     const server = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
     const post = (headers: Record<string, string>) => new Promise<{ status: number; body: string }>((done, reject) => {
@@ -294,7 +294,7 @@ describe("configuration repair endpoint", () => {
   });
 
   it("lists only repairs that would still change a file", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tf-server-pending-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-server-pending-"));
     mkdirSync(join(home, ".claude", "projects"), { recursive: true });
     mkdirSync(join(home, ".codex", "sessions"), { recursive: true });
     const app = compose({ HOME: home }, { noCache: true });
