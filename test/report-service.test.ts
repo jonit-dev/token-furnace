@@ -3,7 +3,7 @@
  * harness, and a second scan must not parse a file that did not change.
  */
 
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import { fixedNow, harnessEnv, planWeek, tsReport } from "./harness";
 const now = fixedNow();
 
 function fixtureApp(): App {
-  const root = mkdtempSync(join(tmpdir(), "tf-service-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-service-"));
   buildFull(root, now);
   return compose({ ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString() });
 }
@@ -117,7 +117,7 @@ describe("getReport", () => {
   });
 
   it("has no report when no agent is installed, and the plan week is opt-in", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tf-service-empty-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-service-empty-"));
     const app = compose({ ...harnessEnv(root, now), CLAUDE_CONFIG_DIR: join(root, "none") });
     await app.reports.refresh();
     expect(app.reports.getRaw(7, "all", { weeklyBudget: null, now })).toBeNull();
@@ -149,7 +149,7 @@ const UUID = "01a127e3-70f6-7dd3-9dfb-7504ffeb687d";
 
 /** A codex-only fixture whose rollout filename carries a full UUID, plus an optional native index. */
 function codexNativeApp(indexLines: string[] | null): { app: App; index: string } {
-  const root = mkdtempSync(join(tmpdir(), "tf-native-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-native-"));
   const rollout = join(root, "codex", "sessions", "2026", "10", "10", `rollout-2026-10-10T12-00-00-${UUID}.jsonl`);
   mkdirSync(dirname(rollout), { recursive: true });
   writeFileSync(rollout, [
@@ -207,4 +207,94 @@ describe("native Codex session names", () => {
     await app.reports.refresh();
     expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("fix the thing");
   });
+});
+
+describe("per-install limit floors", () => {
+  it("honors independent floors and the legacy default slot without sharing calibration", async () => {
+    const { readFileSync, rmSync } = await import("node:fs");
+    const { buildClaudeInstall } = await import("./fixtures/build");
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-install-limits-"));
+    buildClaudeInstall(home, ".claude", { now });
+    buildClaudeInstall(home, ".cc-work", { now });
+    const env = { HOME: home, XDG_CACHE_HOME: join(home, ".cache"), TOKEN_FURNACE_WORKERS: "0" };
+    const app = compose(env);
+    try {
+      await app.reports.refresh();
+      const path = join(env.XDG_CACHE_HOME, "token-furnace", "limits.json");
+      const week = { start: new Date(now.getTime() - 4 * 86_400_000), resets: new Date(now.getTime() + 3 * 86_400_000), used: 50 };
+      writeFileSync(path, JSON.stringify({ claude: 30_000, "claude:cc-work": 70_000 }));
+      const report = app.reports.getReport(7, "all", { now, weeklyBudget: null,
+        planWeeks: { claude: week, "claude:cc-work": { ...week, used: 100 } } })!;
+      expect(report.burns.claude?.limit).toBe(30_000);
+      expect(report.burns["claude:cc-work"]?.limit).toBe(70_000);
+      expect(report.burns["claude:cc-work"]?.used).toBe(100);
+      app.reports.getReport(7, "all", { now, weeklyBudget: null,
+        planWeeks: { claude: { ...week, used: 1 }, "claude:cc-work": { ...week, used: 100 } } });
+      const saved = JSON.parse(readFileSync(path, "utf8"));
+      expect(saved.claude).toBeGreaterThan(30_000);
+      expect(saved["claude:cc-work"]).toBe(70_000);
+      writeFileSync(path, JSON.stringify({ claude: 30_000 }));
+      const legacy = app.reports.getReport(7, "all", { now, weeklyBudget: null,
+        planWeeks: { claude: week, "claude:cc-work": week } })!;
+      expect(legacy.burns.claude?.limit).toBe(30_000);
+      expect(legacy.burns["claude:cc-work"]?.limit).toBeLessThan(30_000);
+    } finally {
+      (app.repo as { close?: () => void }).close?.();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an idle default install next to another Claude install", async () => {
+    const { rmSync } = await import("node:fs");
+    const { buildClaudeInstall } = await import("./fixtures/build");
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-idle-default-"));
+    buildClaudeInstall(home, ".claude", { now });
+    buildClaudeInstall(home, ".cc-work", { now });
+    const app = compose({ HOME: home, XDG_CACHE_HOME: join(home, ".cache"), TOKEN_FURNACE_WORKERS: "0" });
+    try {
+      await app.reports.refresh();
+      for (const session of app.repo.all().filter((row) => row.source === "claude")) app.repo.save({ ...session,
+        turns: session.turns.map((turn) => ({ ...turn, when: new Date(now.getTime() - 10 * 86_400_000) })),
+      }, 1);
+      const report = app.reports.getReport(1, "all", { now, weeklyBudget: null })!;
+      expect(report.burns.claude).toBeDefined();
+      expect(report.burns["claude:cc-work"]).toBeDefined();
+    } finally {
+      (app.repo as { close?: () => void }).close?.();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+it.each(["claude", "codex"])("omits a legacy %s burn with no spend while keeping provider metadata", async (idle) => {
+  const { rmSync } = await import("node:fs");
+  const app = fixtureApp();
+  try {
+    await app.reports.refresh();
+    for (const session of app.repo.all().filter((row) => row.source === idle)) app.repo.save({ ...session,
+      turns: session.turns.map((turn) => ({ ...turn, when: new Date(now.getTime() - 10 * 86_400_000) })),
+    }, 1);
+    const active = idle === "claude" ? "codex" : "claude";
+    const report = app.reports.getReport(1, "all", { now, weeklyBudget: null })!;
+    expect(Object.keys(report.burns)).toEqual([active]);
+    expect(report.burn).toEqual(report.burns[active]);
+    expect(report.providers.map((provider) => provider.id).sort()).toEqual(["claude", "codex"]);
+  } finally {
+    (app.repo as { close?: () => void }).close?.();
+    rmSync(app.env.HOME!, { recursive: true, force: true });
+  }
+});
+
+it("does not treat a settings-only default Claude directory as a live source", async () => {
+  const { rmSync } = await import("node:fs");
+  const app = fixtureApp();
+  try {
+    rmSync(join(app.env.CLAUDE_CONFIG_DIR!, "projects"), { recursive: true });
+    expect(app.reports.live("all")).toEqual(["codex"]);
+    await app.reports.refresh();
+    expect(app.reports.getReport(7, "claude", { now, weeklyBudget: null })).toBeNull();
+  } finally {
+    (app.repo as { close?: () => void }).close?.();
+    rmSync(app.env.HOME!, { recursive: true, force: true });
+  }
 });

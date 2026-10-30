@@ -1,5 +1,6 @@
 import { fixed } from "./format";
-import type { Burn, RawReport, Source } from "../model";
+import { kindOf } from "../providers";
+import type { Burn, ProviderId, RawReport } from "../model";
 
 /** Match critical burn severity using the session's contribution, not the provider total. */
 export function isSessionSpike(session: { rate: number }, burn?: Pick<Burn, "goal"> & Partial<Pick<Burn, "limit">>): boolean {
@@ -38,7 +39,7 @@ export function weekPoints(
  * reset, else (Claude only) a weekly budget over 168 h, else the window's own average.
  * burn.py:912
  */
-export function burnGoal(report: RawReport, source: Source): [number, string] {
+export function burnGoal(report: RawReport, source: ProviderId): [number, string] {
   const burn = report.burns[source];
   if (!burn) return [0, "no burn for this source"];
   const week = burn.week;
@@ -48,7 +49,7 @@ export function burnGoal(report: RawReport, source: Source): [number, string] {
       `ideal pace to the weekly reset ${localStamp(week.resets)} (${fixed(week.hours_left)} h left)`,
     ];
   }
-  if (report.budget && source === "claude") {
+  if (report.budget && kindOf(source) === "claude") {
     return [report.budget / 168, `weekly budget ${fixed(report.budget / 1e6)}M / 168 h`];
   }
   if (week) {

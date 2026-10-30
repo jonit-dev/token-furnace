@@ -1,4 +1,4 @@
-import type { ActivityTurn, SessionInput, SourceFile } from "../core/model";
+import type { ActivityTurn, ProviderId, SessionInput, SourceFile } from "../core/model";
 
 /**
  * Where parsed turns live between runs. PRD-003 ships the memory map only; PRD-004 adds
@@ -9,7 +9,7 @@ export interface SessionRepository {
    * The files whose mtime or size changed since the last scan, in scan order. Files that are
    * gone from disk are dropped. The repository keeps the rest as they are.
    */
-  changed(files: SourceFile[]): SourceFile[];
+  changed(files: SourceFile[], sources?: ProviderId[]): SourceFile[];
   /**
    * Every session held, in scan order: the order the analysis ranks ties by. With a cutoff, each
    * session keeps only the turns at or after it, so the report reads no turn the analysis skips.

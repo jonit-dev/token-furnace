@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react";
-import type { Burn, Report, Source } from "../../src/core/model";
+import type { Burn, ProviderId, Report } from "../../src/core/model";
 import { useReport } from "./use-report";
 import { useUi, type Tab } from "./store";
 import { FixConfig } from "./components/fix-config";
@@ -44,8 +44,8 @@ export function App() {
   }, [setTab]);
 
   const r: Partial<Report> = report ?? {};
-  const burns: Partial<Record<Source, Burn>> = r.burns ?? (r.burn ? { claude: r.burn } : {});
-  const sources = Object.keys(burns) as Source[];
+  const burns: Partial<Record<ProviderId, Burn>> = r.burns ?? (r.burn ? { claude: r.burn } : {});
+  const sources = [...(r.providers?.map((provider) => provider.id) ?? Object.keys(burns))].sort((a, b) => a === "claude" ? -1 : b === "claude" ? 1 : 0);
   const current = sources.includes(source) ? source : sources[0];
   const burn = current ? burns[current] : undefined;
   const hours = r.checkHours ?? 24;
@@ -60,7 +60,7 @@ export function App() {
       </div>
     ),
     sessions: <Sessions r={r} />,
-    tips: <Tips />,
+    tips: <Tips providers={r.providers} source={current} />,
     resets: <Resets />,
     notifications: <Notifications />,
   };
@@ -92,7 +92,7 @@ export function App() {
           ))}
         </nav>
         <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted py-2.5">
-          <FixConfig />
+          <FixConfig providers={r.providers} />
           <span className={`px-2 py-0.5 rounded ${linkClass}`}>
             {filePage ? "snapshot" : online ? "live" : "offline"}
           </span>

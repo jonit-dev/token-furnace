@@ -7,10 +7,11 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import type { Level, Source } from "../../../src/core/model";
+import type { Level, ProviderId } from "../../../src/core/model";
+import { kindOf } from "../../../src/core/providers";
 import { Icon } from "./icons";
 import { Modal } from "./modal";
-import { copyText, LEVEL, SOURCE_LABEL, sourceLabel, stamp, toDate } from "./format";
+import { copyText, LEVEL, sourceLabel, stamp, toDate } from "./format";
 
 export function CopyButton({
   text,
@@ -48,13 +49,14 @@ export function LevelTag({ level }: { level: Level }) {
   );
 }
 
-export function SourceBadge({ source }: { source: Source | "all" | null | undefined }) {
-  const label = source ? SOURCE_LABEL[source] : undefined;
+export function SourceBadge({ source }: { source: ProviderId | "all" | null | undefined }) {
+  const label = source === "all" ? "All providers" : source ? sourceLabel(source) : undefined;
   if (!label) return null;
+  const kind = source && source !== "all" ? kindOf(source) : undefined;
   const cls =
-    source === "claude"
+    kind === "claude"
       ? "bg-accent/10 text-accent"
-      : source === "codex"
+      : kind === "codex"
         ? "bg-bar/15 text-bar"
         : "bg-chip text-muted";
   return (
@@ -63,9 +65,9 @@ export function SourceBadge({ source }: { source: Source | "all" | null | undefi
 }
 
 export function SourceSelect({ sources, value, onChange, label, pinned, onPin }: {
-  sources: (Source | "all")[];
-  value: Source | "all";
-  onChange: (source: Source | "all") => void;
+  sources: (ProviderId | "all")[];
+  value: ProviderId | "all";
+  onChange: (source: ProviderId | "all") => void;
   label: string;
   pinned: boolean;
   onPin: () => void;
@@ -73,7 +75,7 @@ export function SourceSelect({ sources, value, onChange, label, pinned, onPin }:
   return (
     <div className="flex shrink-0 items-center gap-1">
       <select aria-label={`${label} provider`} value={value}
-        onChange={(event) => onChange(event.target.value as Source | "all")}
+        onChange={(event) => onChange(event.target.value as ProviderId | "all")}
         className="max-w-32 rounded-md border border-line bg-chip px-2 py-1 text-xs text-ink">
         {sources.map((source) => <option key={source} value={source}>{source === "all" ? "All providers" : sourceLabel(source)}</option>)}
       </select>

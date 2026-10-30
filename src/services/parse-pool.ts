@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import type { ParsedFile, Source } from "../core/model";
+import type { ParsedFile, ProviderId } from "../core/model";
 import type { Env } from "../sources/agent-source";
 import type { ParseReply } from "../scan-worker";
 
@@ -29,7 +29,7 @@ export class ParsePool {
   }
 
   /** The caller keeps one request in flight per worker, so a big file never queues a small one. */
-  parse(worker: number, source: Source, path: string): Promise<ParsedFile> {
+  parse(worker: number, source: ProviderId, path: string): Promise<ParsedFile> {
     if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
       const id = this.nextId++;

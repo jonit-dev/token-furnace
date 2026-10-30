@@ -1,6 +1,7 @@
 import {
   existsSync,
   mkdirSync,
+  realpathSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -28,7 +29,7 @@ describe("token-furnace setup", () => {
   let out: string;
 
   beforeEach(() => {
-    testHome = mkdtempSync(join(tmpdir(), "tf-setup-test-"));
+    testHome = mkdtempSync(join(realpathSync(tmpdir()), "tf-setup-test-"));
     out = "";
   });
 
@@ -76,7 +77,52 @@ describe("token-furnace setup", () => {
     }
   });
 
+  it("applies and rolls back every discovered Claude install independently", async () => {
+    const installs = [
+      { dir: join(testHome, ".claude"), initial: JSON.stringify({ keep: "default" }) + "\n" },
+      { dir: join(testHome, ".cc-work"), initial: JSON.stringify({ keep: "work" }) + "\n" },
+    ];
+    for (const install of installs) {
+      mkdirSync(join(install.dir, "projects", "demo"), { recursive: true });
+      writeFileSync(join(install.dir, "projects", "demo", "session.jsonl"), "{}\n");
+      writeFileSync(join(install.dir, "settings.json"), install.initial);
+    }
+    const mcp = [join(testHome, ".claude.json"), join(installs[1].dir, ".claude.json")];
+    mcp.forEach((path, i) => writeFileSync(path, JSON.stringify({ account: i })));
+    const app = appFor();
+
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    for (const install of installs) {
+      const settings = JSON.parse(readFileSync(join(install.dir, "settings.json"), "utf8"));
+      expect(settings.keep).toBe(install.initial.includes("default") ? "default" : "work");
+      expect(settings.env.ENABLE_TOOL_SEARCH).toBe("true");
+      expect(readFileSync(join(install.dir, "CLAUDE.md"), "utf8")).toContain("token-furnace:begin");
+      expect(existsSync(join(install.dir, "skills", "token-furnace", "SKILL.md"))).toBe(true);
+    }
+
+    const backupRoot = join(testHome, ".agents", "token-furnace-backups");
+    const latest = readdirSync(backupRoot).sort().at(-1)!;
+    expect(existsSync(join(backupRoot, latest, "claude-settings.json"))).toBe(true);
+    expect(existsSync(join(backupRoot, latest, "claude-cc-work-claude-settings.json"))).toBe(true);
+
+    expect(await main(["fix-config"], app)).toBe(0);
+    for (const install of installs) {
+      expect(JSON.parse(readFileSync(join(install.dir, "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+      expect(existsSync(join(install.dir, "settings.json.token-furnace-backup"))).toBe(true);
+    }
+    mcp.forEach((path) => writeFileSync(path, "changed"));
+    // The backup remembers the install even if its discovery markers later disappear.
+    rmSync(join(installs[1].dir, "projects"), { recursive: true });
+    expect(await main(["setup", "--rollback"], app)).toBe(0);
+    mcp.forEach((path, i) => expect(readFileSync(path, "utf8")).toBe(JSON.stringify({ account: i })));
+    for (const install of installs) {
+      expect(readFileSync(join(install.dir, "settings.json"), "utf8")).toBe(install.initial);
+    }
+  });
+
   it("repairs configuration without HOME when explicit agent directories are supplied", async () => {
+    vi.stubEnv("HOME", testHome);
+    vi.stubEnv("USERPROFILE", testHome);
     const app = appFor({ HOME: undefined, CLAUDE_CONFIG_DIR: join(testHome, "claude"), CODEX_HOME: join(testHome, "codex") });
     expect(await main(["fix-config"], app)).toBe(0);
     expect(JSON.parse(readFileSync(join(testHome, "claude", "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
@@ -227,7 +273,7 @@ describe("token-furnace setup", () => {
   });
 
   it("Defect 2: restores cleanly with hostile HOME containing spaces, apostrophe, $(), and backticks", async () => {
-    const hostileRoot = mkdtempSync(join(tmpdir(), "tf-test 'with space' $(echo evil) `touch marker`-"));
+    const hostileRoot = mkdtempSync(join(realpathSync(tmpdir()), "tf-test 'with space' $(echo evil) `touch marker`-"));
     try {
       const app = compose({ HOME: hostileRoot }, { noCache: true });
       const claudeSettings = join(hostileRoot, ".claude", "settings.json");
@@ -505,7 +551,7 @@ describe("token-furnace setup", () => {
 
 describe("token-furnace fix-config", () => {
   let testHome: string;
-  beforeEach(() => { testHome = mkdtempSync(join(tmpdir(), "tf-fix-config-")); });
+  beforeEach(() => { testHome = mkdtempSync(join(realpathSync(tmpdir()), "tf-fix-config-")); });
   afterEach(() => { rmSync(testHome, { recursive: true, force: true }); });
 
   it("repairs both custom config paths, backs up original bytes, and is idempotent", async () => {
@@ -576,4 +622,42 @@ describe("token-furnace fix-config", () => {
       expect(readFileSync(codexPath, "utf8")).toBe('');
     }
   });
+});
+
+it.each([false, true])("legacy rollback preserves secondary configs and bypasses discovery (blocked reservations=%s)", async (blocked) => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-legacy-isolation-"));
+  const { buildClaudeInstall } = await import("./fixtures/build");
+  const secondary = buildClaudeInstall(home, ".agentx", { now: new Date() });
+  const paths = ["settings.json", ".claude.json", "CLAUDE.md"].map((name) => join(secondary.dir, name));
+  const originals = ['{"secondary":true}', '{"account":"secondary"}', "secondary instructions\n"];
+  paths.forEach((path, i) => writeFileSync(path, originals[i]));
+  const backup = join(home, ".agents", "token-furnace-backups", "20200101");
+  mkdirSync(backup, { recursive: true });
+  writeFileSync(join(backup, "claude-settings.json"), '{"restored":true}');
+  const cache = join(home, "cache");
+  if (blocked) writeFileSync(cache, "not a directory");
+  try {
+    expect(runSetup({ rollback: true }, { HOME: home, XDG_CACHE_HOME: cache }, { write: () => {} })).toBe(0);
+    expect(readFileSync(join(home, ".claude", "settings.json"), "utf8")).toBe('{"restored":true}');
+    paths.forEach((path, i) => expect(readFileSync(path, "utf8")).toBe(originals[i]));
+    paths.forEach((path) => expect(existsSync(`${path}.token-furnace-removed`)).toBe(false));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+it("setup, verify and fix-config leave an absent default install absent for a custom-only home", async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-custom-only-setup-"));
+  const { buildClaudeInstall } = await import("./fixtures/build");
+  const { runFixConfig } = await import("../src/setup/agents");
+  const secondary = buildClaudeInstall(home, ".agentx", { now: new Date() });
+  const env = { HOME: home, CLAUDE_CONFIG_DIR: secondary.dir };
+  const out = { write: () => {} };
+  try {
+    expect(runSetup({ apply: true }, env, out)).toBe(0);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(runSetup({ verify: true }, env, out)).toBe(0);
+    expect(runFixConfig(env, out)).toBe(0);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(secondary.dir, "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+    expect(runSetup({ verify: true }, env, out)).toBe(0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

@@ -1,9 +1,13 @@
 import { readdirSync } from "node:fs";
-import type { ParsedFile, Source, SourceFile, Week } from "../core/model";
+import type { ParsedFile, ProviderId, Source, SourceFile, Week } from "../core/model";
+import type { ClaudeInstall } from "./claude-installs";
 
 /** Read-only adapter for one agent's transcripts on disk. */
 export interface AgentSource {
-  name: Source;
+  name: ProviderId;
+  kind: Source;
+  label: string;
+  install?: ClaudeInstall;
   /** Directory that proves the agent is installed. */
   root(): string;
   files(): SourceFile[];

@@ -3,7 +3,7 @@
  * which scripts/burn.py wrote on this same fixture before PRD-003 deleted it.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,9 +16,9 @@ const HOUR = 3_600_000;
 const MINUTE = 60_000;
 
 const now = fixedNow();
-const leaksRoot = mkdtempSync(join(tmpdir(), "tf-cli-leaks-"));
-const cleanRoot = mkdtempSync(join(tmpdir(), "tf-cli-clean-"));
-const emptyRoot = mkdtempSync(join(tmpdir(), "tf-cli-empty-"));
+const leaksRoot = mkdtempSync(join(realpathSync(tmpdir()), "tf-cli-leaks-"));
+const cleanRoot = mkdtempSync(join(realpathSync(tmpdir()), "tf-cli-clean-"));
+const emptyRoot = mkdtempSync(join(realpathSync(tmpdir()), "tf-cli-empty-"));
 const htmlPath = join(leaksRoot, "out", "report.html");
 
 buildFull(leaksRoot, now);
@@ -156,7 +156,7 @@ describe("network", () => {
   });
 
   it("calls api.anthropic.com once by default when a login exists, and uses the answer", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tf-login-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-login-"));
     buildFull(root, now);
     writeJson(join(root, ".credentials.json"), { claudeAiOauth: { accessToken: "tok-1" } });
     const resets = new Date(now.getTime() + 3 * 86_400_000).toISOString();
@@ -181,7 +181,7 @@ describe("network", () => {
       throw new Error("fetch must not be called");
     });
     vi.stubGlobal("fetch", fetchSpy);
-    const root = mkdtempSync(join(tmpdir(), "tf-saved-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-saved-"));
     buildWeeklyQuota(root, now);
     const run1 = await run(["--json"], root);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -230,8 +230,8 @@ describe("--list-sources", () => {
   it("names each agent, its path and its transcript count", async () => {
     const run1 = await run(["--list-sources"], leaksRoot);
     expect(run1.code).toBe(0);
-    expect(run1.out).toMatch(/^ {2}claude\s+\S*projects\s+3 transcripts$/m);
-    expect(run1.out).toMatch(/^ {2}codex\s+\S*codex[\\/]sessions\s+1 transcripts$/m);
+    expect(run1.out).toMatch(/^ {2}claude\s+Claude Code\s+\S*projects\s+3 transcripts$/m);
+    expect(run1.out).toMatch(/^ {2}codex\s+Codex\s+\S*codex[\\/]sessions\s+1 transcripts$/m);
     const missing = await run(["--list-sources"], emptyRoot);
     expect(missing.out).toContain("not installed");
   });

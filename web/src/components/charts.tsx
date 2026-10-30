@@ -1,5 +1,6 @@
-import { CONTEXT_TARGET, CONTEXT_TARGET_LABEL } from "../../../src/core/context";
-import type { Burn, Report, Source } from "../../../src/core/model";
+import { CONTEXT_TARGET_LABEL } from "../../../src/core/context";
+import type { Burn, ProviderId, Report } from "../../../src/core/model";
+import { contextTargetOf, kindOf } from "../../../src/core/providers";
 import { clock, dayLabel, fmt, quota, sourceLabel, toDate } from "./format";
 import { MetricInfo, useSize } from "./ui";
 
@@ -201,10 +202,15 @@ export function Burndown({
   );
 }
 
+const KIND_COLORS: Record<string, string> = { claude: "#f97316", codex: "#4a9eff", opencode: "#a78bfa" };
+// Extra Claude installs get none of the kind colors, so no two lines match.
+const INSTALL_COLORS = ["#f472b6", "#facc15", "#2dd4bf"];
+
 // Both providers use their own quota percentage, plotted against the same calendar time.
-export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> }) {
+export function WeeklyQuota({ burns }: { burns: Partial<Record<ProviderId, Burn>> }) {
   const [ref, { w, h }] = useSize();
-  const series = (Object.entries(burns) as [Source, Burn][]).flatMap(([source, burn]) => {
+  const installs = Object.keys(burns).filter((id) => id.includes(":"));
+  const series = (Object.entries(burns) as [ProviderId, Burn][]).flatMap(([source, burn]) => {
     // A new week with no local spend has the plan's reading but no burndown: draw 0 to that reading.
     const pending = !burn.weekBurndown && burn.pending ? burn.pending : null;
     if (!pending && (!burn.weekBurndown || burn.weekBurndown.length < 2)) return [];
@@ -219,7 +225,9 @@ export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> })
     const end = rate > 0 && used < 100 ? Math.max(now, Math.min(reset, now + (100 - used) / rate * 3600000)) : now;
     const endV = used + rate * (end - now) / 3600000;
     return [{ source, start, reset, pts, now, used, rate, end, endV,
-      color: source === "claude" ? "#f97316" : source === "opencode" ? "#a78bfa" : "#4a9eff" }];
+      color: source.includes(":")
+        ? INSTALL_COLORS[installs.indexOf(source) % INSTALL_COLORS.length]
+        : KIND_COLORS[kindOf(source) ?? "codex"] }];
   });
   if (!series.length) return null;
   const t0 = Math.min(...series.map(s => s.start));
@@ -254,7 +262,8 @@ export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> })
                   <path d={path(2)} fill="none" stroke={s.color} strokeWidth="1.5" strokeDasharray="1 3" opacity="0.6" />
                   {s.end > s.now ? <line data-series="projection" x1={x(s.now)} y1={y(s.used)} x2={x(s.end)} y2={y(s.endV)}
                     stroke={s.color} strokeWidth="1.5" strokeDasharray="4 3" /> : null}
-                  <path data-series="used" d={path(1)} fill="none" stroke={s.color} strokeWidth="2">
+                  <path data-series="used" d={path(1)} fill="none" stroke={s.color} strokeWidth="2"
+                    strokeDasharray={s.source.startsWith("claude:") ? "6 3" : undefined}>
                     <title>{sourceLabel(s.source)}: {s.used.toFixed(0)}% used</title>
                   </path>
                   <line x1={x(s.reset)} x2={x(s.reset)} y1={y(100) - 4} y2={y(100) + 4} stroke={s.color} />
@@ -270,7 +279,7 @@ export function WeeklyQuota({ burns }: { burns: Partial<Record<Source, Burn>> })
           <span key={s.source}>
             <span className="inline-block w-4 border-t-2 align-middle" style={{ borderColor: s.color }} />{" "}
             <span className="text-ink">{sourceLabel(s.source)} {s.used.toFixed(0)}%</span>
-            {" · cap "}{fmt(CONTEXT_TARGET[s.source])}
+            {" · cap "}{fmt(contextTargetOf(s.source))}
             {s.end > s.now && s.end < s.reset ? ` · runs out ${when(s.end)}` : ` · resets ${when(s.reset)}`}
           </span>
         ))}

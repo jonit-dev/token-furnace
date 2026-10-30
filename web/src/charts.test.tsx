@@ -31,6 +31,10 @@ it("shares percentage and calendar coordinates despite unequal limits and reset 
   expect(groups).toHaveLength(2);
   expect(groups[0].querySelector('[data-series="used"]')?.getAttribute("stroke")).toBe("#f97316");
   expect(groups[1].querySelector('[data-series="used"]')?.getAttribute("stroke")).toBe("#4a9eff");
+  const all = render(<WeeklyQuota burns={{ claude: burn(), "claude:personal": burn(), codex: burn(), opencode: burn() }} />);
+  const strokes = [...all.container.querySelectorAll('[data-series="used"]')].map((p) => p.getAttribute("stroke"));
+  expect(new Set(strokes).size).toBe(4);
+  all.unmount();
   // Shared range Oct 1–9: 550 pixels wide. Now Oct 4 is 72/192 across it.
   for (const g of groups) {
     expect(Number(g.querySelector("circle")?.getAttribute("cx"))).toBeCloseTo(38 + 550 * 72 / 192);

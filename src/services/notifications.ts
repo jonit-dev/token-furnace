@@ -13,7 +13,8 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Report, Source } from "../core/model";
+import type { ProviderId, Report, Source } from "../core/model";
+import { kindOf } from "../core/providers";
 import { isSessionSpike } from "../core/analyze/burn";
 import { eventKey, type ResetsFeed, type ResetEvent } from "./resets-client";
 import { usageCachePath } from "./usage-client";
@@ -353,7 +354,7 @@ export interface AlertInput {
   feed: ResetsFeed | null;
   fresh: boolean;
   /** Subscription utilization per provider, the same number the report shows. */
-  usage: Partial<Record<Source, number | null>>;
+  usage: Partial<Record<ProviderId, number | null>>;
   report?: Pick<Report, "active" | "burns"> | null;
   settings?: NotificationSettings | null;
   send?: Sender;
@@ -442,9 +443,9 @@ export async function runAlerts(env: Env, input: AlertInput): Promise<{ alerts: 
   const threshold = settings.conditions.usage.percent;
   const wanted = settings.conditions.usage.provider;
   if (settings.conditions.usage.enabled) {
-    for (const source of ["claude", "codex", "opencode"] as Source[]) {
-      if (wanted !== "any" && wanted !== source) continue;
-      const used = input.usage[source];
+    for (const [source, used] of Object.entries(input.usage)) {
+      const kind = kindOf(source);
+      if (!kind || (wanted !== "any" && wanted !== kind)) continue;
       if (typeof used !== "number" || !Number.isFinite(used)) continue;
       const key = `usage:${source}`;
       if (used < threshold) {

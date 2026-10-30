@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import type { ActivityTurn, SessionInput, Source, SourceFile, Turn, Wake } from "../core/model";
+import type { ActivityTurn, ProviderId, SessionInput, SourceFile, Turn, Wake } from "../core/model";
 import type { SessionRepository } from "./session-repo";
-import { PROVIDERS } from "../core/providers";
+import { kindOf, providerOf } from "../core/providers";
 
 const SCHEMA_VERSION = 1;
 
@@ -67,6 +67,7 @@ interface TurnRow {
 
 export class SqliteSessionRepository implements SessionRepository {
   private db: DatabaseSync | null = null;
+  private readonly unknownSources = new Set<string>();
   private readonly dbPath: string;
   private stmtDeleteFile: StatementSync | null = null;
   private stmtInsertFile: StatementSync | null = null;
@@ -167,7 +168,7 @@ export class SqliteSessionRepository implements SessionRepository {
     }
   }
 
-  changed(files: SourceFile[]): SourceFile[] {
+  changed(files: SourceFile[], sources?: ProviderId[]): SourceFile[] {
     this.ensureDb();
     if (!this.db || !this.stmtAllFiles || !this.stmtDeleteFile) return files;
 
@@ -182,13 +183,14 @@ export class SqliteSessionRepository implements SessionRepository {
     for (const file of files) {
       seen.add(file.path);
       const held = cachedFiles.get(file.path);
-      if (held && held.mtime_ns === file.mtimeMs && held.size === file.size &&
-          held.parser_version === PROVIDERS[held.source as Source]?.parserVersion) continue;
+      if (held && (!file.source || held.source === file.source) && held.mtime_ns === file.mtimeMs && held.size === file.size &&
+          held.parser_version === (kindOf(held.source) ? providerOf(held.source).parserVersion : -1)) continue;
       out.push(file);
     }
 
-    for (const path of cachedFiles.keys()) {
-      if (!seen.has(path)) {
+    const scoped = sources && new Set(sources);
+    for (const [path, held] of cachedFiles) {
+      if (!seen.has(path) && (!scoped || scoped.has(held.source))) {
         this.stmtDeleteFile.run(path);
       }
     }
@@ -242,7 +244,7 @@ export class SqliteSessionRepository implements SessionRepository {
     }
 
     return fileRows.map((f) => {
-      const source = f.source as Source;
+      const source = f.source as ProviderId;
       const turns = (turnsByPath.get(f.path) ?? []).map((t) => ({ ...t, source }));
       return {
         source,
@@ -258,10 +260,15 @@ export class SqliteSessionRepository implements SessionRepository {
     this.ensureDb();
     if (!this.db || !this.stmtDeleteFile || !this.stmtInsertFile || !this.stmtInsertTurn) return;
 
+    if (!kindOf(session.source)) {
+      if (!this.unknownSources.has(session.source)) console.error(`Cache: unknown provider id ${session.source}; session skipped`);
+      this.unknownSources.add(session.source);
+      return;
+    }
     this.db.exec("BEGIN IMMEDIATE;");
     try {
       this.stmtDeleteFile.run(session.path);
-      this.stmtInsertFile.run(session.path, session.source, session.mtimeMs, size, session.title ?? null, PROVIDERS[session.source].parserVersion);
+      this.stmtInsertFile.run(session.path, session.source, session.mtimeMs, size, session.title ?? null, providerOf(session.source).parserVersion);
 
       for (let seq = 0; seq < session.turns.length; seq++) {
         const t = session.turns[seq];

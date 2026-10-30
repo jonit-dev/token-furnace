@@ -1,10 +1,10 @@
 import { MAX_OVER_TARGET_SHARE } from "../context";
-import { PROVIDERS } from "../providers";
+import { contextTargetOf, kindOf, providerLabel } from "../providers";
 import { burnGoal, isSessionSpike } from "./burn";
 import { fixed, int0 } from "./format";
 import { CONTEXT_TARGET, CHECK_HOURS, LEVELS, LONG_LIVED_HOURS } from "./flags";
 import { issuePrompt, topIssues } from "./issues";
-import type { Burn, RawBurn, RawReport, Report, Source } from "../model";
+import type { Burn, ProviderId, ProviderInfo, RawBurn, RawReport, Report } from "../model";
 
 /** Python's datetime.isoformat() for a UTC datetime: seconds, optional microseconds, +00:00. */
 function iso(when: Date): string {
@@ -35,7 +35,7 @@ export function reportView(report: RawReport, now: Date): Report {
     burndown.push([iso(new Date(when.getTime() + 3_600_000)), runA, runB]);
   }
 
-  const blocks = new Map<number, { ctx: number[]; ctxBySource: Partial<Record<Source, number[]>>; aboveTurns: number; reads: number; calls: number }>();
+  const blocks = new Map<number, { ctx: number[]; ctxBySource: Partial<Record<ProviderId, number[]>>; aboveTurns: number; reads: number; calls: number }>();
   for (const [when, slot] of report.hourly) {
     const key = when.getTime() - (when.getUTCHours() % 3) * 3_600_000;
     const block = blocks.get(key) ?? { ctx: [], ctxBySource: {}, aboveTurns: 0, reads: 0, calls: 0 };
@@ -43,7 +43,7 @@ export function reportView(report: RawReport, now: Date): Report {
     block.ctx.push(...slot.ctx);
     block.aboveTurns += slot.aboveTurns;
     for (const [source, values] of Object.entries(slot.ctxBySource)) {
-      (block.ctxBySource[source as Source] ??= []).push(...values);
+      (block.ctxBySource[source] ??= []).push(...(values ?? []));
     }
     block.reads += slot.reads;
     block.calls += slot.calls;
@@ -51,8 +51,8 @@ export function reportView(report: RawReport, now: Date): Report {
   const blockList = [...blocks.values()];
   const kpis: Report["kpis"] = [
     ...report.sources.map(([source]) => ({
-      name: `${PROVIDERS[source].label} median context per turn`, unit: "k" as const,
-      target: CONTEXT_TARGET[source], values: blockList.map((b) => median(b.ctxBySource[source] ?? [])),
+      name: `${providerLabel(source)} median context per turn`, unit: "k" as const,
+      target: contextTargetOf(source), values: blockList.map((b) => median(b.ctxBySource[source] ?? [])),
     })),
     {
       name: "Turns over provider context target",
@@ -74,17 +74,17 @@ export function reportView(report: RawReport, now: Date): Report {
     const name = s.title || s.id;
     const [goal] = burnGoal(report, s.source);
     if (isSessionSpike(s, { goal, limit: report.burns[s.source]?.week?.limit })) {
-      actions.push(`Burn spike in “${name}” (${PROVIDERS[s.source].label}): ${int0(s.rate)} tokens/h, above twice the ideal pace. Pause or finish this session.`);
+      actions.push(`Burn spike in “${name}” (${providerLabel(s.source)}): ${int0(s.rate)} tokens/h, above twice the ideal pace. Pause or finish this session.`);
     }
-    if (s.context > CONTEXT_TARGET[s.source]) {
+    if (s.context > contextTargetOf(s.source)) {
       actions.push(`Run /compact in “${name}”: its context is ${int0(s.context / 1000)}k.`);
     } else if (s.hours >= LONG_LIVED_HOURS) {
       actions.push(`Finish “${name}” and start a fresh session: it is ${fixed(s.hours)}h old.`);
     }
   }
 
-  const burns: Partial<Record<Source, Burn>> = {};
-  for (const [source, burn] of Object.entries(report.burns) as [Source, RawBurn][]) {
+  const burns: Partial<Record<ProviderId, Burn>> = {};
+  for (const [source, burn] of Object.entries(report.burns) as [ProviderId, RawBurn][]) {
     const [goal, basis] = burnGoal(report, source);
     const week = burn.week;
     burns[source] = {
@@ -111,6 +111,10 @@ export function reportView(report: RawReport, now: Date): Report {
     };
   }
 
+  const contextTargets: Record<ProviderId, number> = { ...CONTEXT_TARGET };
+  for (const [source] of report.sources) contextTargets[source] = contextTargetOf(source);
+  const providers: ProviderInfo[] = report.providers ?? report.sources.map(([id]) => ({ id, kind: kindOf(id)!, label: providerLabel(id) }));
+
   return {
     generated: iso(now),
     days: report.days,
@@ -131,18 +135,18 @@ export function reportView(report: RawReport, now: Date): Report {
       source: i.source,
       share: i.share,
       sessions: i.hits.length,
-      prompt: issuePrompt(i),
+      prompt: issuePrompt(i, providers.find((p) => p.id === i.source)?.dir),
     })),
     active: report.active.map(named),
-    unseenAgents: report.unseenAgents,
+    ...(report.unseenAgents === undefined ? {} : { unseenAgents: report.unseenAgents }),
     agentActivity: report.agentActivity,
     burndown,
-    contextTargets: CONTEXT_TARGET,
+    contextTargets,
     budget: report.budget,
     kpis,
     timeline: report.timeline.map(([t, [cool, hot]]) => [iso(t), cool, hot]),
     timelines: Object.fromEntries(Object.entries(report.timelines ?? {}).map(([source, rows]) => [source,
-      rows.map(([t, [cool, hot]]) => [iso(t), cool, hot]),
+      (rows ?? []).map(([t, [cool, hot]]) => [iso(t), cool, hot]),
     ])),
     checkHours: CHECK_HOURS,
     baseline: report.baseline,
@@ -155,6 +159,7 @@ export function reportView(report: RawReport, now: Date): Report {
     })),
     projects: report.projects,
     config: report.config,
+    providers,
     tools: report.tools,
     unpriced: report.unpriced,
   };

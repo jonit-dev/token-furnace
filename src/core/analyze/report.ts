@@ -1,6 +1,5 @@
 import {
   ACTIVE_MINUTES,
-  CONTEXT_TARGET,
   CHECK_HOURS,
   GAIN_HOURS,
   sessionFlags,
@@ -18,7 +17,7 @@ import {
 import { configChecks } from "./config-checks";
 import { baseline } from "./baseline";
 import { weekPoints } from "./burn";
-import { PROVIDERS } from "../providers";
+import { contextTargetOf, kindOf, providerOf } from "../providers";
 import { activityTurns, agentActivity } from "./agent-activity";
 import type {
   ActiveSession,
@@ -29,7 +28,7 @@ import type {
   RawWeek,
   ReportInput,
   SessionRow,
-  Source,
+  ProviderId,
   Totals,
   WakeCounts,
   Week,
@@ -58,21 +57,27 @@ export function buildReport(input: ReportInput): RawReport | null {
   const paths = new Map<string, string>();
   const titles = new Map<string, string | null>();
   const timeline = new Map<number, [number, number]>();
-  const timelines: Partial<Record<Source, Map<number, [number, number]>>> = {};
+  const timelines: Partial<Record<ProviderId, Map<number, [number, number]>>> = {};
   const hourly = new Map<number, HourSlot>();
   const contexts: number[] = [];
   const preambles: number[] = [];
   const totals = emptyTotals();
-  const lastHour = new Map<Source, number>();
-  const recent = new Map<Source, Map<number, number>>();
-  const quotaHour = new Map<Source, number>();
-  const weekHourly = new Map<Source, Map<number, [number, number]>>();
+  const lastHour = new Map<ProviderId, number>();
+  const recent = new Map<ProviderId, Map<number, number>>();
+  const quotaHour = new Map<ProviderId, number>();
+  const weekHourly = new Map<ProviderId, Map<number, [number, number]>>();
   const active: [string, number, number, string | null, number, number][] = [];
   const sessions24 = new Map<string, [number, number, number, number]>();
   const signals24 = new Map<string, [number, WakeCounts]>();
-  const per = new Map<Source, PerSource>();
-  const weeks: Record<Source, Week | null> = { claude: input.planWeek, codex: input.codexWeek, opencode: input.opencodeWeek ?? null };
-  const weekNow = new Map<Source, number>();
+  const per = new Map<ProviderId, PerSource>();
+  const weeks: Partial<Record<ProviderId, Week | null>> = {};
+  const weekNow = new Map<ProviderId, number>();
+  for (const source of input.live) {
+    const kind = kindOf(source);
+    weeks[source] = kind === "claude"
+      ? input.planWeeks?.[source] ?? (source === "claude" ? input.planWeek : null)
+      : kind === "codex" ? input.codexWeek : input.opencodeWeek ?? null;
+  }
 
   let total = 0;
   let unpricedCost = 0;
@@ -82,7 +87,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   const last24: RawRecent = { ...emptyRecent(), sessions: 0 };
   const topRate = Math.max(...Object.values(MODEL_RATE));
 
-  const filesBySource = new Map<Source, typeof input.sessions>();
+  const filesBySource = new Map<ProviderId, typeof input.sessions>();
   for (const session of input.sessions) {
     const list = filesBySource.get(session.source);
     if (list) list.push(session);
@@ -115,7 +120,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       for (const item of file.turns) {
         if (item.when < cutoff) continue;
         const context = item.baseIn + item.cacheRead + item.cacheWrite;
-        const target = CONTEXT_TARGET[source];
+        const target = contextTargetOf(source);
         const aboveTarget = context > target;
         if (!context) continue;
 
@@ -154,7 +159,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         const isTop = rate !== null && rate >= topRate;
         stats7.turns += 1;
         if (isTop) stats7.top += weighted;
-        if (PROVIDERS[source].cacheWrites) {
+        if (providerOf(source).cacheWrites) {
           // Codex logs no cache writes, so it would read as 0%
           stats7.cache_write += item.cacheWrite;
           stats7.cache_input += context;
@@ -211,7 +216,7 @@ export function buildReport(input: ReportInput): RawReport | null {
         p.totals.tool_calls += item.tools.length;
         p.totals.reads += item.reads;
         for (const wake of item.wakes) p.totals[wake] += 1;
-        if (PROVIDERS[source].cacheWrites) {
+        if (providerOf(source).cacheWrites) {
           p.stats7.cache_write += item.cacheWrite;
           p.stats7.cache_input += context;
         }
@@ -230,7 +235,7 @@ export function buildReport(input: ReportInput): RawReport | null {
           last24.reads += item.reads;
           for (const wake of item.wakes) last24.wakes[wake] += 1;
           if (isTop) last24.top += weighted;
-          if (PROVIDERS[source].cacheWrites) {
+          if (providerOf(source).cacheWrites) {
             last24.cache_write += item.cacheWrite;
             last24.cache_input += context;
           }
@@ -243,7 +248,7 @@ export function buildReport(input: ReportInput): RawReport | null {
           p24.reads += item.reads;
           for (const wake of item.wakes) p24.wakes[wake] += 1;
           if (isTop) p24.top += weighted;
-          if (PROVIDERS[source].cacheWrites) {
+          if (providerOf(source).cacheWrites) {
             p24.cache_write += item.cacheWrite;
             p24.cache_input += context;
           }
@@ -307,7 +312,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     if (!row) return [];
     const [, turns, cPeak, hours] = row;
     const [cReads, cWakes] = signals24.get(key)!;
-    return sessionFlags(turns, cPeak, hours, cReads, cWakes, splitKey(key)[0] as Source);
+    return sessionFlags(turns, cPeak, hours, cReads, cWakes, splitKey(key)[0]);
   };
   const sessionRow = (
     key: string,
@@ -316,7 +321,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   ): SessionRow => {
     const [source, project, session] = splitKey(key);
     return {
-      source: source as Source,
+      source,
       project: project || "?",
       id: (session || "?").slice(0, 8),
       fullId: session || undefined,
@@ -338,7 +343,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     session_count: sessions.size,
     project_count: byProject.size,
     tool_calls: totals.tool_calls,
-    sources: [...bySource.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([name, value]) => [name as Source, share(value)]),
+    sources: [...bySource.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([name, value]) => [name, share(value)]),
     buckets,
     over_target: share([...aboveBySize.values()].reduce((sum, cost) => sum + cost, 0)),
     preamble: preambles.length
@@ -361,7 +366,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       .sort((a, b) => b[4] - a[4])
       .map(([key, context, idle, model, rate, lastTurn]): ActiveSession => {
         const [source, project, session] = splitKey(key);
-        const src = source as Source;
+        const src = source;
         const sessionData = sessions.get(key)!;
         const hourSpend = lastHour.get(src) ?? 0;
         return {
@@ -386,7 +391,7 @@ export function buildReport(input: ReportInput): RawReport | null {
       }),
     timeline: [...timeline.entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
     timelines: Object.fromEntries(Object.entries(timelines).map(([source, rows]) => [source,
-      [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
+      [...(rows ?? new Map()).entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
     ])),
     hourly: [...hourly.entries()].sort((a, b) => a[0] - b[0]).map(([hour, slot]) => [new Date(hour), slot]),
     bench_total: [...hourly.values()].reduce((sum, slot) => sum + slot.bench, 0),
@@ -395,6 +400,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     per_source: {},
     baseline: [],
     burns: {},
+    providers: input.providers,
   };
 
   for (const src of input.live) {
@@ -419,12 +425,14 @@ export function buildReport(input: ReportInput): RawReport | null {
   }
   report.baseline = baseline(report, config);
 
+  // With several Claude installs, an idle one keeps its row so it reads as quiet, not missing.
+  const claudes = input.live.filter((src) => kindOf(src) === "claude").length;
   for (const src of input.live) {
-    const spend = bySource.get(src);
-    if (!spend) continue;
+    const spend = bySource.get(src) ?? 0;
+    if (!spend && !(claudes > 1 && kindOf(src) === "claude")) continue;
     const week = weeks[src];
     const spent = weekNow.get(src) ?? 0;
-    const burn: RawReport["burns"][Source] = { rate: lastHour.get(src) ?? 0, total: spend, week: null };
+    const burn: RawReport["burns"][ProviderId] = { rate: lastHour.get(src) ?? 0, total: spend, week: null };
     // Local spend can under-count the plan: runs on other machines or in throwaway data dirs are
     // billed to it but never recorded here. So the last calibrated size is a floor, and a week with
     // no local spend at all can still be read from it.
@@ -566,7 +574,7 @@ interface PerSource {
   hours_all: number;
 }
 
-function perSource(per: Map<Source, PerSource>, src: Source): PerSource {
+function perSource(per: Map<ProviderId, PerSource>, src: ProviderId): PerSource {
   let p = per.get(src);
   if (!p) {
     p = {
@@ -593,12 +601,12 @@ function hourStart(when: Date): number {
 }
 
 /** Session identity: the source, project and session id Python used as a tuple key. */
-function sessionKey(source: Source, project: string, session: string): string {
+function sessionKey(source: ProviderId, project: string, session: string): string {
   return JSON.stringify([source, project, session]);
 }
 
-function splitKey(key: string): [Source, string, string] {
-  const [source, project, session] = JSON.parse(key) as [Source, string, string];
+function splitKey(key: string): [ProviderId, string, string] {
+  const [source, project, session] = JSON.parse(key) as [ProviderId, string, string];
   return [source, project, session];
 }
 
@@ -606,11 +614,11 @@ function bump(map: Map<string, number>, key: string, value = 1): void {
   map.set(key, (map.get(key) ?? 0) + value);
 }
 
-function bumpMap(map: Map<Source, number>, key: Source, value: number): void {
+function bumpMap(map: Map<ProviderId, number>, key: ProviderId, value: number): void {
   map.set(key, (map.get(key) ?? 0) + value);
 }
 
-function bumpGain(map: Map<Source, Map<number, number>>, key: Source, hours: number, value: number): void {
+function bumpGain(map: Map<ProviderId, Map<number, number>>, key: ProviderId, hours: number, value: number): void {
   let inner = map.get(key);
   if (!inner) {
     inner = new Map();

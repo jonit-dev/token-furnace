@@ -1,6 +1,6 @@
 /** PRD-008: the first scan never blocks the server, and the page shows progress while it runs. */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, mkdtempSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { assistant, buildFull } from "./fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "./harness";
 
 const now = fixedNow();
-const root = mkdtempSync(join(tmpdir(), "tf-progress-"));
+const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-progress-"));
 buildFull(root, now);
 // Forty more small sessions, so the scan has many files and yields many times.
 const many = join(root, "projects", "many");

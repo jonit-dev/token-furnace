@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { realpathSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./App";
@@ -12,7 +12,7 @@ import { buildFull, saveUsageReading } from "../../test/fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "../../test/harness";
 
 // The fixture Report the analysis tests use, built once from the shared harness.
-const root = mkdtempSync(join(tmpdir(), "tf-web-"));
+const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-web-"));
 const now = fixedNow();
 buildFull(root, now);
 saveUsageReading(root, now);
@@ -257,6 +257,31 @@ describe("App", () => {
     expect(selector.value).toBe("codex");
   });
 
+  it("shows each Claude install by its provider label and pins the install id", async () => {
+    const report: Report = {
+      ...fixtureReport,
+      providers: [
+        { id: "claude", kind: "claude", label: "Claude Code", dir: "/tmp/.claude" },
+        { id: "claude:work", kind: "claude", label: "Claude Code (work)", dir: "/tmp/.cc-work" },
+      ],
+      burns: { claude: fixtureReport.burns.claude, "claude:work": { ...fixtureReport.burns.claude! } },
+      timelines: { claude: fixtureReport.timelines!.claude, "claude:work": fixtureReport.timelines!.claude },
+    };
+    window.__REPORT__ = report;
+    vi.stubGlobal("fetch", okFetch(report));
+    render(<App />);
+    const selector = screen.getByRole("combobox", { name: "Combustion rate provider" }) as HTMLSelectElement;
+    expect(within(selector).getByRole("option", { name: "Claude Code (work)" })).toBeTruthy();
+    fireEvent.change(selector, { target: { value: "claude:work" } });
+    expect(selector.value).toBe("claude:work");
+    fireEvent.click(screen.getByRole("button", { name: "Pin combustion rate provider" }));
+    const saved = localStorage.getItem("token-furnace-provider-pins")!;
+    useUi.setState({ source: "claude", hourlySource: "all", pins: {} });
+    localStorage.setItem("token-furnace-provider-pins", saved);
+    await act(async () => { await useUi.persist.rehydrate(); });
+    expect(useUi.getState().source).toBe("claude:work");
+  });
+
   it("filters hourly bars independently and only draws the selected provider's goal", () => {
     render(<App />);
     const hourly = screen.getByRole("combobox", { name: "Hourly spend provider" });
@@ -291,7 +316,7 @@ describe("App", () => {
 
   it("keeps controls usable when storage is unavailable and falls back for old snapshots", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("storage denied"); });
-    window.__REPORT__ = { ...fixtureReport, timelines: undefined };
+    window.__REPORT__ = { ...fixtureReport, providers: undefined, timelines: undefined } as unknown as Report;
     render(<App />);
     fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "codex" } });
     fireEvent.click(screen.getByRole("button", { name: "Pin combustion rate provider" }));
@@ -315,7 +340,7 @@ describe("App", () => {
 
   it("falls back from a missing pinned provider and lets the visible provider be pinned", () => {
     useUi.setState({ source: "codex", hourlySource: "codex", pins: { source: "codex", hourlySource: "codex" } });
-    window.__REPORT__ = { ...fixtureReport, burns: { claude: fixtureReport.burns.claude },
+    window.__REPORT__ = { ...fixtureReport, providers: fixtureReport.providers.filter((p) => p.id === "claude"), burns: { claude: fixtureReport.burns.claude },
       timelines: { claude: fixtureReport.timelines!.claude } };
     render(<App />);
     expect((screen.getByRole("combobox", { name: "Combustion rate provider" }) as HTMLSelectElement).value).toBe("claude");
@@ -405,7 +430,7 @@ describe("tips", () => {
     act(() => useUi.getState().setTab("tips"));
     fireEvent.click(screen.getByRole("button", { name: "Copy skill" }));
     const copied = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0] as string;
-    expect(copied).toContain("~/.claude/skills/save-tokens-creator/SKILL.md");
+    expect(copied).toContain(`${root}/skills/save-tokens-creator/SKILL.md`);
     expect(copied).toContain("npx -y token-furnace setup --apply");
     expect(copied).toContain("name: save-tokens-creator");
   });
@@ -550,6 +575,7 @@ describe("context configuration repair", () => {
 
 it("selects and persists OpenCode independently for both dashboard charts", async () => {
   const report = { ...fixtureReport,
+    providers: [...fixtureReport.providers, { id: "opencode", kind: "opencode" as const, label: "OpenCode" }],
     burns: { ...fixtureReport.burns, opencode: { ...fixtureReport.burns.claude!, used: 63 } },
     timelines: { ...fixtureReport.timelines, opencode: fixtureReport.timelines!.claude },
   };
@@ -575,4 +601,53 @@ it("tags a high-burn active session as critical without leak flags using its own
   view.rerender(<ActiveSessions sessions={[{ ...session, rate: 200 }]} burns={burns} />);
   expect(screen.queryByText("Critical")).toBeNull();
   expect(screen.getByText("Other active sessions (1)")).toBeTruthy();
+});
+
+it("keeps an empty install selectable and shows unavailable usage without 0%", () => {
+  const report: Report = { ...fixtureReport,
+    providers: [...fixtureReport.providers, { id: "claude:empty", kind: "claude", label: "Claude Code (empty)", dir: "/tmp/.empty" }],
+    timelines: { ...fixtureReport.timelines, "claude:empty": [] },
+  };
+  window.__REPORT__ = report;
+  vi.stubGlobal("fetch", okFetch(report));
+  render(<App />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "claude:empty" } });
+  expect(screen.getByText("No sessions in range")).toBeTruthy();
+  const weekly = screen.getByText("Weekly limit").closest(".card")!;
+  expect(weekly.textContent).toContain("no subscription reading yet");
+  expect(weekly.textContent).not.toContain("0%");
+  expect(within(screen.getByRole("combobox", { name: "Hourly spend provider" })).getByRole("option", { name: "Claude Code (empty)" })).toBeTruthy();
+  act(() => useUi.getState().setTab("tips"));
+  fireEvent.click(screen.getByRole("button", { name: "Copy skill" }));
+  const copied = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0] as string;
+  expect(copied).toContain("/tmp/.empty/skills/save-tokens-creator/SKILL.md");
+  expect(copied).not.toContain(`${root}/skills/save-tokens-creator/SKILL.md`);
+});
+
+it("renders 100% usage and a dashed weekly line for a secondary install", () => {
+  const burn = { ...fixtureReport.burns.claude!, used: 100 };
+  const report: Report = { ...fixtureReport,
+    providers: [...fixtureReport.providers, { id: "claude:work", kind: "claude", label: "Claude Code (work)" }],
+    burns: { ...fixtureReport.burns, "claude:work": burn },
+    timelines: { ...fixtureReport.timelines, "claude:work": fixtureReport.timelines!.claude },
+  };
+  window.__REPORT__ = report;
+  vi.stubGlobal("fetch", okFetch(report));
+  const { container } = render(<App />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Combustion rate provider" }), { target: { value: "claude:work" } });
+  expect(screen.getAllByText("100%").length).toBeGreaterThan(0);
+  expect(container.querySelector('[stroke-dasharray="6 3"]')).toBeTruthy();
+  expect(screen.getAllByText("Claude Code (work)").length).toBeGreaterThan(1);
+});
+
+it("shows loading until a report with multiple installs arrives", async () => {
+  window.__REPORT__ = null;
+  const report: Report = { ...fixtureReport, providers: [...fixtureReport.providers,
+    { id: "claude:work", kind: "claude", label: "Claude Code (work)" }] };
+  let deliver!: (response: unknown) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => { deliver = resolve; })));
+  render(<App />);
+  expect(screen.getByText("Loading report…")).toBeTruthy();
+  await act(async () => { deliver({ ok: true, status: 200, json: async () => report }); });
+  expect(within(screen.getByRole("combobox", { name: "Combustion rate provider" })).getByRole("option", { name: "Claude Code (work)" })).toBeTruthy();
 });

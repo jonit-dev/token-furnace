@@ -8,6 +8,8 @@ import { isRead, jsonParse, num, type AgentSource, type Env } from "./agent-sour
 /** OpenCode's current SQLite store. Connections are read-only, including live WAL data. */
 export class OpenCodeSource implements AgentSource {
   readonly name = "opencode" as const;
+  readonly kind = "opencode" as const;
+  readonly label = "OpenCode";
   constructor(private readonly env: Env) {}
   home(): string { return join(this.env.XDG_DATA_HOME || join(this.env.HOME || homedir(), ".local", "share"), "opencode"); }
   base(): string { return this.env.OPENCODE_DATA_DIR || this.home(); }

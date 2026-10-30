@@ -1,9 +1,10 @@
 import { CONFIG_REPAIRS, type ConfigRepairId } from "../../../src/core/config-repairs";
+import type { ProviderInfo } from "../../../src/core/model";
 import { useEffect, useState } from "react";
 import { useUi } from "../store";
 import { Modal } from "./modal";
 
-export function FixConfig() {
+export function FixConfig({ providers }: { providers?: ProviderInfo[] }) {
   const open = useUi((state) => state.modal === "auto-fixes");
   const setModal = useUi((state) => state.setModal);
   const [pending, setPending] = useState<ConfigRepairId[]>(() => CONFIG_REPAIRS.map((repair) => repair.id));
@@ -78,8 +79,8 @@ export function FixConfig() {
       {checking && <p className="text-sm text-muted" role="status">Checking configuration…</p>}
       {!checking && !done && <div className="space-y-4">
         {!pending.length && <p className="text-sm" role="status">Everything is already set. Nothing to repair.</p>}
-        {(["claude", "codex"] as const).filter((provider) => CONFIG_REPAIRS.some((repair) => repair.provider === provider && pending.includes(repair.id))).map((provider) => <fieldset key={provider} disabled={busy} className="space-y-2">
-          <legend className="mb-2 font-heading font-semibold">{provider === "claude" ? "Claude Code" : "Codex"}</legend>
+        {[...new Set(providers?.map((item) => item.kind) ?? CONFIG_REPAIRS.map((repair) => repair.provider))].filter((provider) => CONFIG_REPAIRS.some((repair) => repair.provider === provider && pending.includes(repair.id))).map((provider) => <fieldset key={provider} disabled={busy} className="space-y-2">
+          <legend className="mb-2 font-heading font-semibold">{providers?.filter((item) => item.kind === provider).map((item) => item.label).join(", ") || (provider === "claude" ? "Claude Code" : "Codex")}</legend>
           {CONFIG_REPAIRS.filter((repair) => repair.provider === provider && pending.includes(repair.id)).map((repair) => <label key={repair.id} className="flex items-start gap-3 rounded-lg border border-line p-3 cursor-pointer hover:border-accent">
             <input type="checkbox" checked={selected.includes(repair.id)} onChange={(event) => {
               setSelected((current) => event.target.checked ? [...current, repair.id] : current.filter((id) => id !== repair.id));

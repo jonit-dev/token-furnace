@@ -1,4 +1,4 @@
-import type { ActivityTurn, AgentActivity, SessionInput, Source } from "../model";
+import type { ActivityTurn, AgentActivity, ProviderId, SessionInput } from "../model";
 import { ACTIVE_MINUTES } from "./flags";
 
 /** Memory repository and pure-report fallback; SQLite streams these columns directly. */
@@ -10,7 +10,7 @@ export function activityTurns(sessions: SessionInput[]): ActivityTurn[] {
 }
 
 /** Input is chronological. Merge each session's active intervals before sweeping boundaries. */
-export function agentActivity(turns: Iterable<ActivityTurn>, now: Date, sources: readonly Source[]): AgentActivity {
+export function agentActivity(turns: Iterable<ActivityTurn>, now: Date, sources: readonly ProviderId[]): AgentActivity {
   const end = now.getTime();
   const window = ACTIVE_MINUTES * 60_000;
   const day = 86_400_000;

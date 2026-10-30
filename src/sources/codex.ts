@@ -21,6 +21,8 @@ const ROLLOUT = /^rollout-.*\.jsonl$/;
 /** Codex transcripts under $CODEX_HOME/sessions (default ~/.codex). burn.py:212-282 */
 export class CodexSource implements AgentSource {
   readonly name = "codex" as const;
+  readonly kind = "codex" as const;
+  readonly label = "Codex";
 
   constructor(private readonly env: Env) {}
 

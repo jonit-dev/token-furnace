@@ -1,10 +1,10 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { compose, type App } from "../src/compose";
 import type { Turn } from "../src/core/model";
 import { MemorySessionRepository } from "../src/repo/memory-repo";
@@ -16,8 +16,8 @@ import { fixedNow, harnessEnv, planWeek, tsReport } from "./harness";
 const now = fixedNow();
 
 function fixtureApp(dbPath?: string, noCache?: boolean): { app: App; root: string; cacheDir: string } {
-  const root = mkdtempSync(join(tmpdir(), "tf-sqlite-test-root-"));
-  const cacheDir = mkdtempSync(join(tmpdir(), "tf-sqlite-test-cache-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-sqlite-test-root-"));
+  const cacheDir = mkdtempSync(join(realpathSync(tmpdir()), "tf-sqlite-test-cache-"));
   buildFull(root, now);
   const env = {
     ...harnessEnv(root, now),
@@ -61,8 +61,8 @@ describe("SqliteSessionRepository", () => {
   });
 
   it("AC-1: report from SQLite repository equals report from memory repository", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tf-ac1-root-"));
-    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac1-cache-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac1-root-"));
+    const cacheDir = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac1-cache-"));
     buildFull(root, now);
     const env = {
       ...harnessEnv(root, now),
@@ -116,7 +116,7 @@ describe("SqliteSessionRepository", () => {
   });
 
   it("AC-3: user_version = 0 or garbage bytes rebuilds cache and run succeeds", () => {
-    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac3-cache-"));
+    const cacheDir = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac3-cache-"));
     const dbPath = join(cacheDir, "token-furnace", "cache.sqlite");
 
     // 1. Corrupt with user_version = 0
@@ -164,8 +164,8 @@ describe("SqliteSessionRepository", () => {
   });
 
   it("AC-5: cache holds no message text", async () => {
-    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac5-cache-"));
-    const root = mkdtempSync(join(tmpdir(), "tf-ac5-root-"));
+    const cacheDir = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac5-cache-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac5-root-"));
     const SECRET = "SUPER_SECRET_TOKEN_TEXT_12345";
     const lines = [
       JSON.stringify({ type: "custom-title", customTitle: "Regular Title" }),
@@ -201,7 +201,7 @@ describe("SqliteSessionRepository", () => {
   });
 
   it("AC-7: all(cutoff) keeps only turns at or after the cutoff, leaving files and the default read intact", () => {
-    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac7-cache-"));
+    const cacheDir = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac7-cache-"));
     const repos: SessionRepository[] = [
       new MemorySessionRepository(),
       new SqliteSessionRepository(join(cacheDir, "cache.sqlite")),
@@ -253,7 +253,7 @@ describe("SqliteSessionRepository", () => {
   });
 
   it("AC-6: reopened connection uses WAL/NORMAL pragmas and preserves rows", () => {
-    const cacheDir = mkdtempSync(join(tmpdir(), "tf-ac6-cache-"));
+    const cacheDir = mkdtempSync(join(realpathSync(tmpdir()), "tf-ac6-cache-"));
     const dbPath = join(cacheDir, "token-furnace", "cache.sqlite");
     const session = { source: "claude" as const, path: "/tmp/sample.jsonl", mtimeMs: 100, title: "demo", turns: [] };
 
@@ -272,7 +272,7 @@ describe("SqliteSessionRepository", () => {
   });
 
   it("save waits for another process that holds the write lock instead of failing with 'database is locked'", async () => {
-    const dbPath = join(mkdtempSync(join(tmpdir(), "tf-busy-cache-")), "cache.sqlite");
+    const dbPath = join(mkdtempSync(join(realpathSync(tmpdir()), "tf-busy-cache-")), "cache.sqlite");
     const repo = new SqliteSessionRepository(dbPath);
     // A second connection on its own thread holds the write lock for 300 ms, like a second token-furnace process.
     const holder = new Worker(
@@ -291,4 +291,20 @@ describe("SqliteSessionRepository", () => {
     repo.close();
     await holder.terminate();
   });
+});
+
+
+it("reports an unknown cache source once without replacing existing sessions", () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), "tf-cache-unknown-"));
+  const repo = new SqliteSessionRepository(join(home, "cache.sqlite"));
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const session = { source: "claude", path: "session.jsonl", mtimeMs: 1, title: null, turns: [] };
+    repo.save(session, 1);
+    repo.save({ ...session, source: "unrecognized" }, 1);
+    repo.save({ ...session, source: "unrecognized" }, 1);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("unknown provider id"));
+    expect(repo.all().map((row) => row.source)).toEqual(["claude"]);
+  } finally { error.mockRestore(); repo.close(); rmSync(home, { recursive: true, force: true }); }
 });

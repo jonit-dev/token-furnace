@@ -15,8 +15,8 @@ import { reportView } from "./core/analyze/view";
 import { renderHtml } from "./render/html";
 import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
-import type { RawReport, ScanProgress, Source } from "./core/model";
-import { openCodeWeek, planWeek } from "./services/usage-client";
+import type { ProviderId, RawReport, ScanProgress } from "./core/model";
+import { claudePlanWeeks, openCodeWeek } from "./services/usage-client";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { runFixConfig, runSetup } from "./setup/agents";
 
@@ -29,7 +29,7 @@ const USAGE = `Usage: token-furnace [days] [options]
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
   days                 how many days back to look (default 7)
-  --source <agent>     all (default), claude, codex, or opencode
+  --source <id>        all (default), or a discovered provider id
   --json               print the Report JSON and nothing else, for agents and scripts
   --full               the full text report (the old burn.py output)
   --html <path>        also write a self-contained HTML report
@@ -44,7 +44,7 @@ Where the token budget actually went. Reads local Claude Code and Codex transcri
 
 interface Options {
   days: number;
-  source: Source | "all";
+  source: ProviderId | "all";
   json: boolean;
   full: boolean;
   html: string | null;
@@ -133,7 +133,7 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
     process.stderr.write(`token-furnace: days must be a whole number, got "${positionals[0] ?? ""}"\n`);
     return 2;
   }
-  const source = (parsed.values.source ?? "all") as Source | "all";
+  const source = (parsed.values.source ?? "all") as ProviderId | "all";
   if (source !== "all" && !app.sources.some((agent) => agent.name === source)) {
     process.stderr.write(`token-furnace: --source must be all, ${app.sources.map((agent) => agent.name).join(" or ")}\n`);
     return 2;
@@ -167,10 +167,13 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
 
   const now = app.now();
   await app.reports.refresh(stderrProgress());
-  const [plan, goPlan] = await Promise.all([planWeek(app.env, now, options.planUsage), openCodeWeek(app.env, now, options.planUsage)]);
+  const [planWeeks, goPlan] = await Promise.all([
+    claudePlanWeeks(app.env, app.sources.flatMap((agent) => agent.install ? [agent.install] : []), now, options.planUsage),
+    openCodeWeek(app.env, now, options.planUsage),
+  ]);
   const report = app.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
-    planWeek: plan,
+    planWeeks,
     opencodeWeek: goPlan,
     now,
   });
@@ -219,7 +222,7 @@ function listSources(app: App): void {
     const path = agent.root();
     const found = existsDir(path) ? agent.files().length : 0;
     process.stdout.write(
-      `  ${agent.name.padEnd(8)} ${path.padEnd(46)} ${found ? `${found} transcripts` : "not installed"}\n`,
+      `  ${agent.name.padEnd(18)} ${agent.label.padEnd(24)} ${path.padEnd(46)} ${found ? `${found} transcripts` : "not installed"}\n`,
     );
   }
 }
