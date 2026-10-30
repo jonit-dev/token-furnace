@@ -1,11 +1,12 @@
 import { parse as parseToml } from "smol-toml";
 import { int0 } from "./format";
 import { CONTEXT_TARGET, MEMORY_INDEX_LINES, SUBAGENT_CAP, SUBAGENT_DEPTH, TOOL_CONCURRENCY, SUBAGENT_ENV, CODEX_SUBAGENT_KEY } from "./flags";
-import type { ConfigInput, ConfigNote, Source } from "../model";
+import type { ConfigInput, ConfigNote, ProviderId } from "../model";
+import { kindOf } from "../providers";
 
 /** A numeric note where lower is better: unset or over the limit warns. burn.py:410 */
 function atMost(
-  agent: Source,
+  agent: ProviderId,
   label: string,
   key: string,
   value: number | null,
@@ -39,7 +40,7 @@ function atMost(
 
 /** A string note: unset warns, set is ok. `want` is the advice when unset. burn.py:424 */
 function isSet(
-  agent: Source,
+  agent: ProviderId,
   label: string,
   key: string,
   value: string | null,
@@ -134,10 +135,14 @@ export function codexSubagentCap(config: ConfigInput): [number | null, string | 
 }
 
 /** Recommended settings, one per agent, judged from actual config. burn.py:434 */
-export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
+export function configNotes(live: ProviderId[], config: ConfigInput): ConfigNote[] {
   const notes: ConfigNote[] = [];
-  if (live.includes("claude")) {
-    const [window, wsource] = compactWindow(config);
+  for (const agent of live.filter((id) => kindOf(id) === "claude")) {
+    const scoped = config.claudeInstalls?.[agent];
+    const current = scoped
+      ? { ...config, claudeBase: scoped.base, claudeHome: scoped.home, settings: scoped.settings, memoryIndexes: scoped.memoryIndexes }
+      : config;
+    const [window, wsource] = compactWindow(current);
     const within = window === CONTEXT_TARGET.claude;
     let line: string;
     if (window === null) {
@@ -150,7 +155,7 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
     }
     notes.push({
       name: "autoCompactWindow",
-      source: "claude",
+      source: agent,
       value: window ? `${int0(window / 1000)}k` : "unset (model max)",
       target: `${int0(CONTEXT_TARGET.claude / 1000)}k`,
       ok: within,
@@ -158,16 +163,16 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
       ratio: window ? window / CONTEXT_TARGET.claude : null,
       line,
     });
-    const [cap, csrc] = claudeSubagentCap(config);
-    notes.push(atMost("claude", "Max concurrent subagents", SUBAGENT_ENV, cap, csrc, SUBAGENT_CAP));
-    const [depth, dsrc] = claudeEnvInt(config, "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH");
+    const [cap, csrc] = claudeSubagentCap(current);
+    notes.push(atMost(agent, "Max concurrent subagents", SUBAGENT_ENV, cap, csrc, SUBAGENT_CAP));
+    const [depth, dsrc] = claudeEnvInt(current, "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH");
     notes.push(
-      atMost("claude", "Subagent spawn depth", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", depth, dsrc, SUBAGENT_DEPTH),
+      atMost(agent, "Subagent spawn depth", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", depth, dsrc, SUBAGENT_DEPTH),
     );
-    const [model, msrc] = claudeEnvStr(config, "CLAUDE_CODE_SUBAGENT_MODEL");
+    const [model, msrc] = claudeEnvStr(current, "CLAUDE_CODE_SUBAGENT_MODEL");
     notes.push(
       isSet(
-        "claude",
+        agent,
         "Subagent model",
         "CLAUDE_CODE_SUBAGENT_MODEL",
         model,
@@ -175,12 +180,12 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
         "subagents inherit the main model; pin a cheap worker (e.g. CLAUDE_CODE_SUBAGENT_MODEL=sonnet).",
       ),
     );
-    const [tools, tsrc] = claudeEnvInt(config, "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+    const [tools, tsrc] = claudeEnvInt(current, "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
     notes.push(
-      atMost("claude", "Tool-call concurrency", "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", tools, tsrc, TOOL_CONCURRENCY),
+      atMost(agent, "Tool-call concurrency", "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", tools, tsrc, TOOL_CONCURRENCY),
     );
   }
-  if (live.includes("codex")) {
+  if (live.some((id) => kindOf(id) === "codex")) {
     const [cap, csrc] = codexSubagentCap(config);
     notes.push(
       atMost("codex", "Max concurrent subagents", `agents.${CODEX_SUBAGENT_KEY}`, cap, csrc, SUBAGENT_CAP),
@@ -229,13 +234,19 @@ export function configNotes(live: Source[], config: ConfigInput): ConfigNote[] {
 }
 
 /** The config check sentences. burn.py:498 */
-export function configChecks(live: Source[], config: ConfigInput): string[] {
-  const lines = configNotes(live, config).map((note) => note.line);
-  if (live.includes("claude")) {
-    for (const index of config.memoryIndexes) {
+export function configChecks(live: ProviderId[], config: ConfigInput): string[] {
+  const lines = configNotes(live, config).map((note) => note.source.startsWith("claude:")
+    ? `${note.source} (${config.claudeInstalls?.[note.source]?.base}/settings.json): ${note.line}`
+    : note.line);
+  for (const agent of live.filter((id) => kindOf(id) === "claude")) {
+    const scoped = config.claudeInstalls?.[agent];
+    const current = scoped
+      ? { ...config, claudeBase: scoped.base, claudeHome: scoped.home, settings: scoped.settings, memoryIndexes: scoped.memoryIndexes }
+      : config;
+    for (const index of current.memoryIndexes) {
       const shown =
-        config.claudeBase === config.claudeHome
-          ? index.path.replace(config.claudeBase, "~/.claude")
+        current.claudeBase === current.claudeHome
+          ? index.path.replace(current.claudeBase, "~/.claude")
           : index.path;
       if (index.lines > MEMORY_INDEX_LINES) {
         lines.push(

@@ -2,22 +2,31 @@ import { useEffect, type ReactNode } from "react";
 import { useUi } from "../store";
 import { Card, CopyButton } from "./ui";
 import { Icon } from "./icons";
+import type { ProviderId, ProviderInfo } from "../../../src/core/model";
 import skillText from "../../../skills/save-tokens-creator/SKILL.md?raw";
 
 const LEADERBOARD = "https://artificialanalysis.ai/leaderboards/models";
 const GO = "https://opencode.ai/go";
 
-// The whole skill, plus the steps to install it, so it can be pasted into any agent.
-const SETUP_PROMPT = `Set up the save-tokens-creator agent skill on this machine.
+// The whole skill, plus install paths for the selected discovered provider.
+function setupPrompt(providers: ProviderInfo[] | undefined, source: ProviderId | undefined): string {
+  const claude = providers?.filter((provider) => provider.kind === "claude") ?? [];
+  const selected = claude.find((provider) => provider.id === source);
+  const claudeDirs = selected ? [selected.dir ?? "~/.claude"] : claude.map((provider) => provider.dir ?? "~/.claude");
+  const targets = [...new Set(claudeDirs.length ? claudeDirs : ["~/.claude"])]
+    .map((dir) => `${dir}/skills/save-tokens-creator/SKILL.md`);
+  const codexDir = providers?.find((provider) => provider.kind === "codex")?.dir ?? "~/.codex";
+  targets.push(`${codexDir}/skills/save-tokens-creator/SKILL.md`);
+  return `Set up the save-tokens-creator agent skill on this machine.
 
-Write the Markdown below to ~/.claude/skills/save-tokens-creator/SKILL.md and to
-~/.codex/skills/save-tokens-creator/SKILL.md (create the directories if they are missing).
+Write the Markdown below to ${targets.join(" and to\n")} (create the directories if they are missing).
 Keep the YAML front matter. Then read the file and follow it whenever you pick a model for a task.
 
 If you prefer the packaged route, run: npx -y token-furnace setup --apply
-That installs this skill for both agents.
+That installs this skill for each discovered Claude Code install and Codex.
 
 ${skillText}`;
+}
 
 interface Tip {
   id: string;
@@ -26,7 +35,7 @@ interface Tip {
   action: ReactNode;
 }
 
-export function Tips() {
+export function Tips({ providers, source }: { providers?: ProviderInfo[]; source?: ProviderId }) {
   const done = useUi((state) => state.doneTips);
   const toggleTip = useUi((state) => state.toggleTip);
   const setModal = useUi((state) => state.setModal);
@@ -102,7 +111,7 @@ export function Tips() {
       action: (
         <CopyButton
           label="Copy skill"
-          text={SETUP_PROMPT}
+          text={setupPrompt(providers, source)}
           className="text-xs px-2.5 py-1 bg-chip rounded-lg border border-line hover:border-accent"
         />
       ),

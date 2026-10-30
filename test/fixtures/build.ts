@@ -59,6 +59,31 @@ export function user(when: Date, text: string): string {
   return line({ type: "user", timestamp: iso(when), message: { content: text } });
 }
 
+export interface ClaudeInstallFixture {
+  dir: string;
+  session: string;
+}
+
+/** A minimal Claude config at any path, independent of the directory name. */
+export function buildClaudeInstall(
+  root: string,
+  relDir: string,
+  options: { now: Date; project?: string; session?: string; context?: number },
+): ClaudeInstallFixture {
+  const dir = relDir.startsWith("/") ? relDir : join(root, relDir);
+  const project = options.project ?? "demo";
+  const session = options.session ?? "session";
+  const sessionPath = join(dir, "projects", project, `${session}.jsonl`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".claude.json"), "{}\n");
+  writeFileSync(join(dir, "settings.json"), "{}\n");
+  write(sessionPath, [
+    user(options.now, "hello"),
+    assistant(options.now, options.context ?? 100_000),
+  ]);
+  return { dir, session: sessionPath };
+}
+
 /** A codex token_count record, with reasoning tokens billed as output. */
 export function codexToken(
   when: Date,

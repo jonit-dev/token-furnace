@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
+import { PROVIDERS as PROVIDER_KINDS } from "../src/core/providers";
+import type { Source } from "../src/core/model";
 import { compose } from "../src/compose";
 import { SqliteSessionRepository } from "../src/repo/sqlite-repo";
 import { ClaudeSource } from "../src/sources/claude";
@@ -12,7 +14,7 @@ import { buildFull } from "./fixtures/build";
 
 const now = new Date("2026-10-10T20:00:00Z");
 const roots: string[] = [];
-const PROVIDERS = ["claude", "codex", "opencode"] as const;
+const PROVIDERS = Object.keys(PROVIDER_KINDS).sort() as Source[];
 
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
@@ -83,7 +85,7 @@ it("lets explicit CLAUDE_CONFIG_DIR, CODEX_HOME and OPENCODE_DATA_DIR override d
   expect(new OpenCodeSource({ ...envFor(home), XDG_DATA_HOME: xdg }).base()).toBe(join(xdg, "opencode"));
   const app = compose(env, { noCache: true });
   await app.reports.refresh();
-  expect(Object.keys(app.reports.getReport(7, "all", options)!.burns).sort()).toEqual([...PROVIDERS]);
+  expect(Object.keys(app.reports.getReport(7, "all", options)!.burns).sort()).toEqual(["claude:explicit-claude", "codex", "opencode"]);
   mkdirSync(xdg, { recursive: true });
   renameSync(opencodeDir, join(xdg, "opencode"));
   const xdgEnv = { ...envFor(home), CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexDir, OPENCODE_DATA_DIR: undefined, XDG_DATA_HOME: xdg };

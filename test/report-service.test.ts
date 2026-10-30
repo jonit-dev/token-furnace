@@ -208,3 +208,39 @@ describe("native Codex session names", () => {
     expect(app.reports.getReport(7, "codex", { weeklyBudget: null, now })!.active[0].title).toBe("fix the thing");
   });
 });
+
+describe("per-install limit floors", () => {
+  it("honors independent floors and the legacy default slot without sharing calibration", async () => {
+    const { readFileSync, rmSync } = await import("node:fs");
+    const { buildClaudeInstall } = await import("./fixtures/build");
+    const home = mkdtempSync(join(tmpdir(), "tf-install-limits-"));
+    buildClaudeInstall(home, ".claude", { now });
+    buildClaudeInstall(home, ".cc-work", { now });
+    const env = { HOME: home, XDG_CACHE_HOME: join(home, ".cache"), TOKEN_FURNACE_WORKERS: "0" };
+    const app = compose(env);
+    try {
+      await app.reports.refresh();
+      const path = join(env.XDG_CACHE_HOME, "token-furnace", "limits.json");
+      const week = { start: new Date(now.getTime() - 4 * 86_400_000), resets: new Date(now.getTime() + 3 * 86_400_000), used: 50 };
+      writeFileSync(path, JSON.stringify({ claude: 30_000, "claude:cc-work": 70_000 }));
+      const report = app.reports.getReport(7, "all", { now, weeklyBudget: null,
+        planWeeks: { claude: week, "claude:cc-work": { ...week, used: 100 } } })!;
+      expect(report.burns.claude?.limit).toBe(30_000);
+      expect(report.burns["claude:cc-work"]?.limit).toBe(70_000);
+      expect(report.burns["claude:cc-work"]?.used).toBe(100);
+      app.reports.getReport(7, "all", { now, weeklyBudget: null,
+        planWeeks: { claude: { ...week, used: 1 }, "claude:cc-work": { ...week, used: 100 } } });
+      const saved = JSON.parse(readFileSync(path, "utf8"));
+      expect(saved.claude).toBeGreaterThan(30_000);
+      expect(saved["claude:cc-work"]).toBe(70_000);
+      writeFileSync(path, JSON.stringify({ claude: 30_000 }));
+      const legacy = app.reports.getReport(7, "all", { now, weeklyBudget: null,
+        planWeeks: { claude: week, "claude:cc-work": week } })!;
+      expect(legacy.burns.claude?.limit).toBe(30_000);
+      expect(legacy.burns["claude:cc-work"]?.limit).toBeLessThan(30_000);
+    } finally {
+      (app.repo as { close?: () => void }).close?.();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

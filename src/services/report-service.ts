@@ -1,10 +1,12 @@
 import type { Headless } from "./processes";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { usageCachePath } from "./usage-client";
 import { buildReport } from "../core/analyze/report";
 import { reportView } from "../core/analyze/view";
-import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week } from "../core/model";
+import type { ConfigInput, ParsedFile, ProviderId, ProviderInfo, RawReport, Report, ScanProgress, SessionInput, Week } from "../core/model";
+import { kindOf } from "../core/providers";
 import type { SessionRepository } from "../repo/session-repo";
 import { SessionAgents } from "./session-agents";
 import { ParsePool } from "./parse-pool";
@@ -15,9 +17,10 @@ export interface ReportOptions {
   weeklyBudget: number | null;
   /** The subscription window, read by the caller: the saved reading, refreshed from the network when a login exists. */
   planWeek?: Week | null;
+  planWeeks?: Partial<Record<ProviderId, Week | null>>;
   opencodeWeek?: Week | null;
   /** Plan sizes to use for a week with no local spend; the remembered ones fill the rest. */
-  limits?: Partial<Record<Source, number>>;
+  limits?: Partial<Record<ProviderId, number>>;
   /** Headless agent runs from the process table, when the caller probed it. */
   headless?: Headless;
   /** The clock. Defaults to now, so a test can freeze it. */
@@ -63,10 +66,10 @@ export class ReportService {
   }
 
   private async scan(onProgress?: (progress: ScanProgress) => void): Promise<void> {
-    const live = this.sources.filter((agent) => existsSync(agent.root())); // not installed
+    const live = this.sources.filter((agent) => (existsSync(agent.root()) || agent.kind === "claude" && existsSync(join(agent.base(), "settings.json")))); // not installed
     const files = live.flatMap((source) => source.files().map((file) => ({ source, file })));
     this.order = new Map(files.map(({ file }, index) => [file.path, index]));
-    const changed = new Set(this.repo.changed(files.map(({ file }) => file)).map((file) => file.path));
+    const changed = new Set(this.repo.changed(files.map(({ source, file }) => ({ ...file, source: source.name })), live.map((source) => source.name)).map((file) => file.path));
     const todo = files.filter(({ file }) => changed.has(file.path)).sort((a, b) => b.file.mtimeMs - a.file.mtimeMs);
     const progress = this.progress;
     Object.assign(progress, {
@@ -133,21 +136,21 @@ export class ReportService {
   }
 
   /** The agents to scan: the ones installed, in source order. burn.py:289 */
-  live(source: Source | "all"): Source[] {
+  live(source: ProviderId | "all"): ProviderId[] {
     return this.sources
-      .filter((agent) => (source === "all" || source === agent.name) && existsSync(agent.root()))
+      .filter((agent) => (source === "all" || source === agent.name) && (existsSync(agent.root()) || agent.kind === "claude" && existsSync(join(agent.base(), "settings.json"))))
       .map((agent) => agent.name);
   }
 
   /** The raw report, which the text renderers read with burn.py's own key names. */
-  getRaw(days: number, source: Source | "all", opts: ReportOptions): RawReport | null {
+  getRaw(days: number, source: ProviderId | "all", opts: ReportOptions): RawReport | null {
     const now = opts.now ?? new Date();
     const live = this.live(source);
     if (!live.length) return null;
     const cutoff = new Date(now.getTime() - days * 86_400_000);
 
     // Load native session metadata once per report, without mutating cached session titles
-    const metadataBySource = new Map<Source, Map<string, string>>();
+    const metadataBySource = new Map<ProviderId, Map<string, string>>();
     for (const agent of this.sources) {
       if (live.includes(agent.name) && agent.sessionMetadata) {
         metadataBySource.set(agent.name, agent.sessionMetadata());
@@ -173,10 +176,14 @@ export class ReportService {
       sessions,
       activity: this.repo.activity(),
       config: this.readConfig(live),
-      planWeek: opts.planWeek ?? null,
+      providers: this.providers(live),
+      planWeek: opts.planWeek ?? opts.planWeeks?.claude ?? null,
+      planWeeks: opts.planWeeks,
       opencodeWeek: opts.opencodeWeek ?? null,
       limits: { ...this.readLimits(), ...opts.limits },
-      codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
+      codexWeek: live.some((id) => kindOf(id) === "codex")
+        ? (this.sources.find((s) => kindOf(s.name) === "codex")?.week?.(now) ?? null)
+        : null,
     });
     if (report) this.sessionAgents.enrich(report.active, sessions, this.sources, now);
     if (report) this.rememberLimits(report);
@@ -185,7 +192,7 @@ export class ReportService {
   }
 
   /** The Report JSON: /api/report, --json and the inlined --html page all read this. */
-  getReport(days: number, source: Source | "all", opts: ReportOptions): Report | null {
+  getReport(days: number, source: ProviderId | "all", opts: ReportOptions): Report | null {
     const now = opts.now ?? new Date();
     const raw = this.getRaw(days, source, { ...opts, now });
     return raw ? reportView(raw, now) : null;
@@ -196,12 +203,11 @@ export class ReportService {
   }
 
   /** The plan sizes last calibrated on this machine. A missing, corrupt or nonsense file reads as none. */
-  private readLimits(): Partial<Record<Source, number>> {
+  private readLimits(): Partial<Record<ProviderId, number>> {
     try {
       const saved = JSON.parse(readFileSync(this.limitsPath(), "utf8"));
-      const out: Partial<Record<Source, number>> = {};
-      for (const source of ["claude", "codex", "opencode"] as const) {
-        const value = saved?.[source];
+      const out: Partial<Record<ProviderId, number>> = {};
+      for (const [source, value] of Object.entries(saved ?? {})) {
         if (typeof value === "number" && Number.isFinite(value) && value > 0) out[source] = value;
       }
       return out;
@@ -215,7 +221,7 @@ export class ReportService {
     if (this.env.TOKEN_FURNACE_NO_CACHE && this.env.TOKEN_FURNACE_NO_CACHE !== "0") return;
     const stored = this.readLimits();
     const next = { ...stored };
-    for (const source of ["claude", "codex", "opencode"] as const) {
+    for (const source of Object.keys(report.burns)) {
       const week = report.burns[source]?.week;
       const size = week?.limit ?? 0;
       if (!(size > 0)) continue; // a week sized from the stored limit equals it: no write
@@ -230,17 +236,32 @@ export class ReportService {
   }
 
   /** Every config file the checks read, through the agent that owns it. */
-  private readConfig(live: Source[]): ConfigInput {
-    const claude = this.sources.find((s) => s.name === "claude");
-    const codex = this.sources.find((s) => s.name === "codex");
+  private readConfig(live: ProviderId[]): ConfigInput {
+    const claudes = this.sources.filter((s) => kindOf(s.name) === "claude");
+    const claude = claudes.find((s) => s.name === "claude") ?? claudes[0];
+    const codex = this.sources.find((s) => kindOf(s.name) === "codex");
+    const defaultHome = join(this.env.HOME || homedir(), ".claude");
+    const claudeInstalls = Object.fromEntries(claudes.map((agent) => [agent.name, {
+      base: agent.base(),
+      home: defaultHome,
+      settings: agent.readFile("settings.json"),
+      memoryIndexes: agent.memoryIndexes?.() ?? [],
+    }]));
     return {
       claudeBase: claude?.base() ?? "",
-      claudeHome: claude?.home() ?? "",
+      claudeHome: defaultHome,
       settings: claude?.readFile("settings.json") ?? null,
       codexConfig: codex?.readFile("config.toml") ?? null,
       memoryIndexes: live.includes("claude") ? (claude?.memoryIndexes?.() ?? []) : [],
+      claudeInstalls,
       env: this.env,
     };
+  }
+
+  private providers(live: ProviderId[]): ProviderInfo[] {
+    return this.sources
+      .filter((agent) => live.includes(agent.name))
+      .map((agent) => ({ id: agent.name, kind: agent.kind, label: agent.label, dir: agent.base() }));
   }
 }
 
@@ -259,10 +280,10 @@ function fullSessionId(session: SessionInput): string | null {
 }
 
 /** Hidden runs always add. Visible ones add only past the sessions the transcripts already show. */
-function unseen(found: Headless, active: { source: Source }[]): Partial<Record<Source, number>> {
-  const out: Partial<Record<Source, number>> = {};
+function unseen(found: Headless, active: { source: ProviderId }[]): Partial<Record<ProviderId, number>> {
+  const out: Partial<Record<ProviderId, number>> = {};
   for (const source of ["claude", "codex", "opencode"] as const) {
-    const seen = active.filter((a) => a.source === source).length;
+    const seen = active.filter((a) => kindOf(a.source) === source).length;
     const extra = (found.hidden[source] ?? 0) + Math.max((found.visible[source] ?? 0) - seen, 0);
     if (extra) out[source] = extra;
   }

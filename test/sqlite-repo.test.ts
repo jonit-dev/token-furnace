@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { compose, type App } from "../src/compose";
 import type { Turn } from "../src/core/model";
 import { MemorySessionRepository } from "../src/repo/memory-repo";
@@ -291,4 +291,20 @@ describe("SqliteSessionRepository", () => {
     repo.close();
     await holder.terminate();
   });
+});
+
+
+it("reports an unknown cache source once without replacing existing sessions", () => {
+  const home = mkdtempSync(join(tmpdir(), "tf-cache-unknown-"));
+  const repo = new SqliteSessionRepository(join(home, "cache.sqlite"));
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const session = { source: "claude", path: "session.jsonl", mtimeMs: 1, title: null, turns: [] };
+    repo.save(session, 1);
+    repo.save({ ...session, source: "unrecognized" }, 1);
+    repo.save({ ...session, source: "unrecognized" }, 1);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("unknown provider id"));
+    expect(repo.all().map((row) => row.source)).toEqual(["claude"]);
+  } finally { error.mockRestore(); repo.close(); rmSync(home, { recursive: true, force: true }); }
 });

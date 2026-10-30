@@ -4,20 +4,20 @@
  */
 
 import { parentPort, workerData } from "node:worker_threads";
-import type { ParsedFile } from "./core/model";
+import type { ParsedFile, ProviderId } from "./core/model";
 import { createSources } from "./sources";
 import type { Env } from "./sources/agent-source";
 
 const env = (workerData as { env: Env }).env;
 const sources = new Map(createSources(env).map((source) => [source.name, source]));
 
-export type ParseRequest = { id: number; source: string; path: string };
+export type ParseRequest = { id: number; source: ProviderId; path: string };
 export type ParseReply = { id: number; parsed: ParsedFile } | { id: number; error: string };
 
 parentPort?.on("message", (request: ParseRequest) => {
   let reply: ParseReply;
   try {
-    const source = sources.get(request.source as import("./core/model").Source);
+    const source = sources.get(request.source);
     if (!source) throw new Error(`Unknown source: ${request.source}`);
     reply = { id: request.id, parsed: source.parse(request.path) };
   } catch (error) {

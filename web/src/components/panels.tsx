@@ -2,7 +2,7 @@ import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/c
 import { sessionFixPrompt } from "../../../src/core/analyze/issues";
 import { isSessionSpike } from "../../../src/core/analyze/burn";
 import { useId, useState, type ReactNode } from "react";
-import type { Burn, Report, Source } from "../../../src/core/model";
+import type { Burn, ProviderId, Report } from "../../../src/core/model";
 import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
 import { Bar, Card, CopyButton, MetricInfo, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
@@ -361,7 +361,7 @@ export function ActiveAgents({ r }: { r: Partial<Report> }) {
   const total = [...counts.values()].reduce((a, b) => a + b, 0);
   return <Card title="Active agents" sub="Across all providers" icon="Users"
     right={<MetricInfo label="Active agents">
-      <p>Sessions with a recorded assistant turn in the last 30 minutes, added across all providers. The provider counts break down that total. The server also counts running headless agent processes that leave no transcript (<code>codex exec --ephemeral</code>, <code>opencode run</code>, <code>claude -p</code>). Their history is not recorded, so the chart and peaks use transcripts only.</p>
+      <p>Sessions with a recorded assistant turn in the last 30 minutes, added across all providers. The provider counts break down that total. The server also counts running headless agent processes that leave no transcript (<code>codex exec --ephemeral</code>, <code>opencode run</code>, <code>claude -p</code>). Headless Claude processes count toward the default install. Their history is not recorded, so the chart and peaks use transcripts only.</p>
       <p>The line reconstructs the last 24 hours, sampled every 30 minutes. A session stays active for 30 minutes after each recorded turn; repeated turns from the same session do not add extra agents.</p>
       <p>7d peak is the highest simultaneous count in the last seven days. Lifetime peak covers all available local transcripts, including activity before Token Furnace started. Peaks use exact activity times, so brief overlaps between chart samples still count. Deleted transcripts are excluded.</p>
     </MetricInfo>}>
@@ -397,7 +397,7 @@ export function KpiStrip({
 }: {
   r: Partial<Report>;
   burn?: Burn;
-  source?: Source;
+  source?: ProviderId;
 }) {
   const rate = Number(burn?.rate) || 0;
   const goal = Number(burn?.goal) || 0;
@@ -503,7 +503,7 @@ export function KpiStrip({
   }
   const days = r.days ?? 0;
   // One "spend over the context target" tile; the all-provider tile and each provider tile share it.
-  const overTile = (key: string, label: string, rows: Report["timeline"], over: number, total: number, tip: string, provider?: Source) => {
+  const overTile = (key: string, label: string, rows: Report["timeline"], over: number, total: number, tip: string, provider?: ProviderId) => {
     const max = MAX_OVER_TARGET_SHARE * 100;
     return (
       <Tile
@@ -576,7 +576,7 @@ export function KpiStrip({
       </Tile>,
     );
   }
-  for (const provider of Object.keys(r.timelines ?? {}) as Source[]) {
+  for (const provider of Object.keys(r.timelines ?? {}) as ProviderId[]) {
     const rows = r.timelines?.[provider] ?? [];
     const [cool, hot] = rows.reduce<[number, number]>((sum, row) => [sum[0] + row[1], sum[1] + row[2]], [0, 0]);
     tiles.push(
@@ -603,16 +603,16 @@ export function Dashboard({
 }: {
   r: Partial<Report>;
   burn?: Burn;
-  sources: Source[];
-  source?: Source;
-  onSource: (source: Source) => void;
+  sources: ProviderId[];
+  source?: ProviderId;
+  onSource: (source: ProviderId) => void;
 }) {
   const hourlySource = useUi((state) => state.hourlySource);
   const setHourlySource = useUi((state) => state.setHourlySource);
   const pins = useUi((state) => state.pins);
   const togglePin = useUi((state) => state.togglePin);
-  const hourlySources = Object.keys(r.timelines ?? {}) as Source[];
-  const hourlyCurrent = hourlySources.includes(hourlySource as Source) ? hourlySource : "all";
+  const hourlySources = r.providers?.map((provider) => provider.id) ?? Object.keys(r.timelines ?? {});
+  const hourlyCurrent = hourlySources.includes(hourlySource) ? hourlySource : "all";
   const hourlyRows = hourlyCurrent === "all" ? r.timeline ?? [] : r.timelines?.[hourlyCurrent] ?? [];
   const hourlyGoal = hourlyCurrent === "all" ? undefined : r.burns?.[hourlyCurrent]?.goal;
   const toggle = source ? <SourceSelect sources={sources} value={source}
@@ -622,6 +622,7 @@ export function Dashboard({
   const weekly = Object.values(weeklyBurns).some(b => (b?.weekBurndown?.length ?? 0) > 1 || b?.pending);
   return (
     <div className="space-y-4">
+      {source && r.providers && !(r.timelines?.[source]?.length) ? <p className="text-muted">No sessions in range</p> : null}
       <div className="grid gap-4 lg:grid-cols-4">
         <Card title="Combustion rate" sub="Token burn, last hour" icon="Flame" right={toggle}>
           <div className="flex-1 flex items-center justify-center">

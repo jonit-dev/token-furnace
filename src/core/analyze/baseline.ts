@@ -1,8 +1,9 @@
 import { MAX_OVER_TARGET_SHARE } from "../context";
 import { fixed, int0 } from "./format";
 import { configNotes } from "./config-checks";
-import { CONTEXT_TARGET, LONG_LIVED_HOURS } from "./flags";
-import type { BaselineRow, ConfigInput, RawPerSource, RawReport, Source } from "../model";
+import { LONG_LIVED_HOURS } from "./flags";
+import { contextTargetOf } from "../providers";
+import type { BaselineRow, ConfigInput, ProviderId, RawPerSource, RawReport } from "../model";
 
 /** Level of a value against an "under" target: ok up to the target, warn up to twice it. burn.py:1072 */
 export function severity(ratio: number): "ok" | "warn" | "critical" {
@@ -18,7 +19,7 @@ const kilo = (v: number): string => `${int0(v / 1000)}k`;
 const share = (a: number, b: number): number | null => (b ? (100 * a) / b : null);
 
 /** The lever rows for one source, from its per-source aggregates. burn.py:1077 */
-function providerLevers(src: Source, p: RawPerSource): BaselineRow[] {
+function providerLevers(src: ProviderId, p: RawPerSource): BaselineRow[] {
   const { recent, stats7: stats, totals: tot } = p;
   const wakes = recent.wakes;
   const ping = (w: typeof wakes) => w.teammate + w.task + w.peer;
@@ -26,8 +27,8 @@ function providerLevers(src: Source, p: RawPerSource): BaselineRow[] {
 
   // (name, format, 24 h value, whole-window value, target text, limit, advisory)
   const levers: [string, (v: number) => string, number | null, number, string, number, boolean][] = [
-    [`Spend on turns over ${kilo(CONTEXT_TARGET[src])}`, pct, share(recent.over, recent.total), p.over_target, `under ${MAX_OVER_TARGET_SHARE * 100}%`, MAX_OVER_TARGET_SHARE * 100, false],
-    ["Median context per turn", kilo, median(recent.contexts), median(p.contexts) ?? 0, `at most ${kilo(CONTEXT_TARGET[src])}`, CONTEXT_TARGET[src], false],
+    [`Spend on turns over ${kilo(contextTargetOf(src))}`, pct, share(recent.over, recent.total), p.over_target, `under ${MAX_OVER_TARGET_SHARE * 100}%`, MAX_OVER_TARGET_SHARE * 100, false],
+    ["Median context per turn", kilo, median(recent.contexts), median(p.contexts) ?? 0, `at most ${kilo(contextTargetOf(src))}`, contextTargetOf(src), false],
     ["Turns per human prompt", count, have ? recent.turns / Math.max(wakes.human, 1) : null, p.turns / Math.max(tot.human, 1), "under 50", 50, false],
     ["Caller reads per tool call", pct, have ? share(recent.reads, recent.tool_calls) : null, share(tot.reads, tot.tool_calls) ?? 0, "under 20%", 20, false],
     ["Wakeups per session", count, recent.sessions ? ping(wakes) / recent.sessions : null, ping(tot) / Math.max(p.session_count, 1), "under 20", 20, false],

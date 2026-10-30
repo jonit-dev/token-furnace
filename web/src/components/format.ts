@@ -1,4 +1,4 @@
-import { PROVIDERS } from "../../../src/core/providers";
+import { providerLabel, PROVIDERS } from "../../../src/core/providers";
 
 // Formatting helpers, ported from web/legacy/dashboard.html. Each one accepts missing values.
 
@@ -42,7 +42,11 @@ export function stamp(iso: string | null | undefined): string {
 }
 
 export function sourceLabel(s: string): string {
-  return PROVIDERS[s as keyof typeof PROVIDERS]?.label ?? s;
+  try {
+    return providerLabel(s);
+  } catch {
+    return s;
+  }
 }
 
 export const SHORT: Record<string, string> = {

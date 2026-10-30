@@ -1,13 +1,21 @@
 /** Data contracts shared by every layer. See docs/PRDs/active/npx-restructure/schema.md. */
 
 export type Source = keyof typeof import("./providers").PROVIDERS;
+export type ProviderId = string;
+
+export interface ProviderInfo {
+  id: ProviderId;
+  kind: Source;
+  label: string;
+  dir?: string;
+}
 
 /** What arrived before a turn: a human prompt, a teammate, a task, or a peer agent. */
 export type Wake = "human" | "teammate" | "task" | "peer";
 
 /** One normalized assistant turn. A source yields these and nothing else. */
 export interface Turn {
-  source: Source;
+  source: ProviderId;
   project: string;
   /** Session id. */
   session: string;
@@ -28,6 +36,7 @@ export interface Turn {
 
 /** A transcript file that an agent can scan. */
 export interface SourceFile {
+  source?: ProviderId;
   path: string;
   mtimeMs: number;
   size: number;
@@ -78,7 +87,7 @@ export interface Week {
 /** One recommended setting, judged from the config on disk. burn.py:434 */
 export interface ConfigNote {
   name: string;
-  source: Source;
+  source: ProviderId;
   value: string;
   target: string;
   ok: boolean;
@@ -100,12 +109,18 @@ export interface ConfigInput {
   codexConfig: string | null;
   /** Every MEMORY.md under projects/, with the line count of each. */
   memoryIndexes: { path: string; lines: number }[];
+  claudeInstalls?: Partial<Record<ProviderId, {
+    base: string;
+    home: string;
+    settings: string | null;
+    memoryIndexes: { path: string; lines: number }[];
+  }>>;
   env: Record<string, string | undefined>;
 }
 
 /** One transcript file and what it yielded. */
 export interface SessionInput {
-  source: Source;
+  source: ProviderId;
   path: string;
   mtimeMs: number;
   title: string | null;
@@ -119,20 +134,22 @@ export interface ReportInput {
   /** Millions of weighted tokens, or null. */
   weeklyBudget: number | null;
   /** Agents whose directory exists, in source order. */
-  live: Source[];
+  live: ProviderId[];
+  providers?: ProviderInfo[];
   sessions: SessionInput[];
   /** All available transcript activity, independent of the token-report window. */
   activity?: Iterable<ActivityTurn>;
   config: ConfigInput;
   planWeek: Week | null;
+  planWeeks?: Partial<Record<ProviderId, Week | null>>;
   codexWeek: Week | null;
   opencodeWeek?: Week | null;
   /** Last calibrated plan size in weighted tokens, per source: sizes a week with no local spend yet. */
-  limits?: Partial<Record<Source, number>>;
+  limits?: Partial<Record<ProviderId, number>>;
 }
 
 export interface ActivityTurn {
-  source: Source;
+  source: ProviderId;
   project: string;
   session: string;
   at: number;
@@ -180,7 +197,7 @@ export interface RawStats {
 }
 
 export interface SessionRow {
-  source: Source;
+  source: ProviderId;
   project: string;
   id: string;
   fullId?: string;
@@ -205,7 +222,7 @@ export interface SessionAgent {
 
 export interface ActiveSession {
   agents?: { members: SessionAgent[]; activeCount: number; complete: boolean };
-  source: Source;
+  source: ProviderId;
   project: string;
   id: string;
   fullId?: string;
@@ -229,7 +246,7 @@ export interface ActiveSession {
 export interface HourSlot {
   bench: number;
   ctx: number[];
-  ctxBySource: Partial<Record<Source, number[]>>;
+  ctxBySource: Partial<Record<ProviderId, number[]>>;
   aboveTurns: number;
   reads: number;
   calls: number;
@@ -283,7 +300,7 @@ export interface BaselineRow {
   level: Level;
   ratio: number | null;
   advisory: boolean;
-  source: Source;
+  source: ProviderId;
 }
 
 /** The report dict burn.py builds, before report_view renames its keys. */
@@ -292,7 +309,7 @@ export interface RawReport {
   total: number;
   turns: number;
   session_count: number;
-  sources: [Source, number][];
+  sources: [ProviderId, number][];
   /** [label, low edge in k, share %, turns, share within bucket above provider target] */
   buckets: [string, number, number, number, number][];
   over_target: number;
@@ -308,20 +325,21 @@ export interface RawReport {
   unpriced: [number, [string, number][]] | null;
   active: ActiveSession[];
   /** Running headless agents the transcripts cannot show, per source. */
-  unseenAgents?: Partial<Record<Source, number>>;
+  unseenAgents?: Partial<Record<ProviderId, number>>;
   agentActivity?: AgentActivity;
   /** [hour, [cool spend, hot spend]] */
   timeline: [Date, [number, number]][];
   project_count?: number;
   tool_calls?: number;
-  timelines?: Partial<Record<Source, [Date, [number, number]][]>>;
+  timelines?: Partial<Record<ProviderId, [Date, [number, number]][]>>;
   hourly: [Date, HourSlot][];
   bench_total: number;
   budget: number | null;
   stats7: RawStats;
-  per_source: Partial<Record<Source, RawPerSource>>;
+  per_source: Partial<Record<ProviderId, RawPerSource>>;
   baseline: BaselineRow[];
-  burns: Partial<Record<Source, RawBurn>>;
+  burns: Partial<Record<ProviderId, RawBurn>>;
+  providers?: ProviderInfo[];
 }
 
 /** The JSON the CLI, the server and the dashboard read. burn.py:1415 */
@@ -334,25 +352,26 @@ export interface Report {
   sessions: number;
   turns: number;
   overTarget: number;
-  burns: Partial<Record<Source, Burn>>;
+  burns: Partial<Record<ProviderId, Burn>>;
   /** burns.claude, else the first burn. */
   burn: Burn | null;
   /** "Act now" lines for live sessions. */
   actions: string[];
   issues: Issue[];
   active: ActiveSession[];
-  unseenAgents?: Partial<Record<Source, number>>;
+  unseenAgents?: Partial<Record<ProviderId, number>>;
   agentActivity?: AgentActivity;
   /** [hour end, actual, benchmark] */
   burndown: [string, number, number][];
-  contextTargets: Record<Source, number>;
+  contextTargets: Record<ProviderId, number>;
   budget: number | null;
   kpis: { name: string; unit: "k" | "%"; target: number; values: number[] }[];
   /** [hour, cool, hot] */
   timeline: [string, number, number][];
   projectCount?: number;
   toolCalls?: number;
-  timelines?: Partial<Record<Source, [string, number, number][]>>;
+  timelines?: Partial<Record<ProviderId, [string, number, number][]>>;
+  providers: ProviderInfo[];
   /** 24 */
   checkHours: number;
   baseline: BaselineRow[];
@@ -373,7 +392,7 @@ export interface RawIssue {
   action: string;
   /** A flag prefix, or the config title. */
   kind: string;
-  source: Source | "all" | null;
+  source: ProviderId | "all" | null;
   share: number | null;
   /** The sessions and flags that hit it. */
   hits: [SessionRow, string][];
@@ -385,7 +404,7 @@ export interface Issue {
   fix: string;
   priority: Priority;
   level: Level;
-  source: Source | "all" | null;
+  source: ProviderId | "all" | null;
   share: number | null;
   sessions: number;
   /** The copy-to-Claude prompt. */

@@ -10,8 +10,8 @@ import {
   SUBAGENT_ENV,
   TOOL_CONCURRENCY,
 } from "./flags";
-import type { ActiveSession, Priority, RawIssue, RawReport, SessionRow, Source } from "../model";
-import { PROVIDERS } from "../providers";
+import type { ActiveSession, ProviderId, Priority, RawIssue, RawReport, SessionRow } from "../model";
+import { kindOf, providerOf, providerLabel } from "../providers";
 
 /** Per leak flag prefix: short fix, title, why it costs tokens, and the prompt for an agent. burn.py:1201 */
 export const ISSUES: Record<string, [fix: string, title: string, why: string, action: string]> = {
@@ -99,7 +99,9 @@ export const ISSUE_EXTRA: Record<string, string[]> = {
 };
 
 /** Which agent a config-check line belongs to, for the Checks source column. burn.py:1311 */
-export function configSource(line: string): Source | "all" {
+export function configSource(line: string): ProviderId | "all" {
+  const install = /^(claude:[a-zA-Z0-9_-]+) /.exec(line);
+  if (install) return install[1];
   if (
     line.includes(CODEX_SUBAGENT_KEY) ||
     line.includes("max_depth") ||
@@ -131,8 +133,9 @@ export function topIssues(report: RawReport): RawIssue[] {
     let [fix, title, why, action] = ISSUES[kind];
     const source = hits[0][0].source;
     if (kind === "late compaction") {
-      fix = source === "opencode" ? PROVIDERS[source].compaction : `Set ${PROVIDERS[source].compaction}, then /compact or restart old sessions.`;
-      action = source === "opencode" ? PROVIDERS[source].compaction : `Set ${PROVIDERS[source].compaction}. Then ask me to /compact or restart each listed session that is still open.`;
+      const provider = { ...providerOf(source), compaction: compaction(source, report.providers?.find((p) => p.id === source)?.dir) };
+      fix = kindOf(source) === "opencode" ? provider.compaction : `Set ${provider.compaction}, then /compact or restart old sessions.`;
+      action = kindOf(source) === "opencode" ? provider.compaction : `Set ${provider.compaction}. Then ask me to /compact or restart each listed session that is still open.`;
     }
     issues.push({
       title,
@@ -213,8 +216,8 @@ export function issuePriority(issue: RawIssue): Priority {
 }
 
 /** The copy-to-Claude prompt for one issue. burn.py:1390 */
-export function issuePrompt(issue: RawIssue): string {
-  const agent = issue.source && issue.source !== "all" ? PROVIDERS[issue.source].label : "the affected agents";
+export function issuePrompt(issue: RawIssue, dir?: string): string {
+  const agent = issue.source && issue.source !== "all" ? providerLabel(issue.source) : "the affected agents";
   const lines = [`Token leak to fix: ${issue.title}.`, `Applies to: ${agent}.`];
   if (issue.share !== null) {
     lines.push(
@@ -232,7 +235,7 @@ export function issuePrompt(issue: RawIssue): string {
     }
   }
   const extra = issue.kind === "late compaction" && issue.source && issue.source !== "all"
-    ? [`${PROVIDERS[issue.source].label}: ${PROVIDERS[issue.source].compaction}.`, "Compact or hand off between meaningful phases, not every N tokens."]
+    ? [`${providerLabel(issue.source)}: ${compaction(issue.source, dir)}.`, "Compact or hand off between meaningful phases, not every N tokens."]
     : ISSUE_EXTRA[issue.kind];
   if (extra) lines.push("", "Additional info:", ...extra.map((e) => `- ${e}`));
   lines.push("", `What to do: ${issue.action}`, "", "Report what you changed and how to check that it worked.");
@@ -246,7 +249,7 @@ export function issuePrompt(issue: RawIssue): string {
 export function sessionFixPrompt(s: ActiveSession, flag: string): string {
   const kind = flag.split(":")[0];
   const [fix, title, why] = ISSUES[kind] ?? [flag, kind, "", flag];
-  const provider = PROVIDERS[s.source];
+  const provider = { ...providerOf(s.source), label: providerLabel(s.source), compaction: compaction(s.source, s.path?.split("/projects/")[0]) };
   const id = s.fullId || s.id;
   const lines = [
     `Token leak to fix in one ${provider.label} session: ${title}.`,
@@ -280,3 +283,8 @@ export function sessionFixPrompt(s: ActiveSession, flag: string): string {
 }
 
 export { LEVELS };
+
+function compaction(source: ProviderId, dir?: string): string {
+  const text = providerOf(source).compaction;
+  return source.startsWith("claude:") && dir ? text.replace("~/.claude", dir) : text;
+}

@@ -20,6 +20,7 @@ import { CONFIG_REPAIRS, type ConfigRepairId } from "../core/config-repairs";
 import { CONTEXT_TARGET } from "../core/context";
 import { SUBAGENT_CAP, SUBAGENT_DEPTH, TOOL_CONCURRENCY, SUBAGENT_ENV, CODEX_SUBAGENT_KEY } from "../core/analyze/flags";
 import type { Env } from "../sources/agent-source";
+import { discoverClaudeInstalls } from "../sources/claude-installs";
 
 export interface SetupOptions {
   apply?: boolean;
@@ -132,7 +133,8 @@ export function runSetup(
   const verifyOnly = Boolean(opts.verify);
 
   const hub = join(home, ".agents", "skills");
-  const claudeDir = env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+  const claudeInstalls = discoverClaudeInstalls(env);
+  const claudeDirs = claudeInstalls.map((install) => install.dir);
   const codexDir = env.CODEX_HOME || join(home, ".codex");
   const backupRoot = join(home, ".agents", "token-furnace-backups");
 
@@ -156,13 +158,16 @@ export function runSetup(
         ? repoSkill(s)
         : join(skillsParent, s);
 
-  const tracked: Array<{ label: string; path: string }> = [
-    { label: "claude-settings.json", path: join(claudeDir, "settings.json") },
-    { label: "claude-mcp.json", path: join(home, ".claude.json") },
-    { label: "claude-CLAUDE.md", path: join(claudeDir, "CLAUDE.md") },
+  const backupLabel = (id: string, name: string): string => id === "claude" ? name : `${id.replace(/[^a-zA-Z0-9_-]+/g, "-")}-${name}`;
+  const tracked: Array<{ label: string; path: string }> = claudeInstalls.flatMap((install) => [
+    { label: backupLabel(install.id, "claude-settings.json"), path: join(install.dir, "settings.json") },
+    { label: backupLabel(install.id, "claude-mcp.json"), path: install.isDefault ? join(home, ".claude.json") : join(install.dir, ".claude.json") },
+    { label: backupLabel(install.id, "claude-CLAUDE.md"), path: join(install.dir, "CLAUDE.md") },
+  ]);
+  tracked.push(
     { label: "codex-config.toml", path: join(codexDir, "config.toml") },
     { label: "codex-AGENTS.md", path: join(codexDir, "AGENTS.md") },
-  ];
+  );
 
   const say = (s: string) => out.write(`  ${s}\n`);
   const ok = (s: string) => out.write(`  \x1b[32mok\x1b[0m    ${s}\n`);
@@ -192,7 +197,9 @@ export function runSetup(
       return 1;
     }
     out.write(`restoring ${latest}\n`);
-    for (const item of tracked) {
+    const saved = join(latest, "files.json");
+    const restoreFiles: typeof tracked = existsSync(saved) ? JSON.parse(readFileSync(saved, "utf8")) : tracked;
+    for (const item of restoreFiles) {
       const backupFile = join(latest, item.label);
       if (existsSync(backupFile)) {
         mkdirSync(dirname(item.path), { recursive: true });
@@ -214,8 +221,9 @@ export function runSetup(
     head("Verify");
     let fails = 0;
 
-    const claudeSettings = join(claudeDir, "settings.json");
-    if (existsSync(claudeSettings)) {
+    for (const claudeDir of claudeDirs) {
+      const claudeSettings = join(claudeDir, "settings.json");
+      if (existsSync(claudeSettings)) {
       let valid = false;
       let parsed: any = null;
       try {
@@ -237,9 +245,10 @@ export function runSetup(
         bad("settings.json is not valid JSON");
         fails++;
       }
-    } else {
-      bad(`${claudeSettings} missing`);
-      fails++;
+      } else {
+        bad(`${claudeSettings} missing`);
+        fails++;
+      }
     }
 
     const codexConfig = join(codexDir, "config.toml");
@@ -268,67 +277,74 @@ export function runSetup(
       fails++;
     }
 
-    for (const s of SKILLS) {
-      // token-furnace and save-tokens-creator ship in the package; prd-* are optional,
-      // only checked when the installer had them available.
-      if (s !== "token-furnace" && !existsSync(join(skillsParent, s)) && !existsSync(join(repoSkill(s), "SKILL.md"))) continue;
-      for (const d of [join(claudeDir, "skills", s), join(codexDir, "skills", s)]) {
-        const skillFile = join(d, "SKILL.md");
-        const disp = collapseHome(d, home);
-        if (existsSync(skillFile)) {
-          ok(`${disp}/SKILL.md readable`);
-        } else {
-          let isLink = false;
-          try {
-            isLink = lstatSync(d).isSymbolicLink();
-          } catch {}
-          if (isLink) bad(`${disp} is a dangling link`);
-          else bad(`${disp} missing`);
-          fails++;
+    for (const claudeDir of claudeDirs) {
+      for (const s of SKILLS) {
+        // token-furnace and save-tokens-creator ship in the package; prd-* are optional,
+        // only checked when the installer had them available.
+        if (s !== "token-furnace" && !existsSync(join(skillsParent, s)) && !existsSync(join(repoSkill(s), "SKILL.md"))) continue;
+        for (const d of [join(claudeDir, "skills", s), join(codexDir, "skills", s)]) {
+          const skillFile = join(d, "SKILL.md");
+          const disp = collapseHome(d, home);
+          if (existsSync(skillFile)) {
+            ok(`${disp}/SKILL.md readable`);
+          } else {
+            let isLink = false;
+            try {
+              isLink = lstatSync(d).isSymbolicLink();
+            } catch {}
+            if (isLink) bad(`${disp} is a dangling link`);
+            else bad(`${disp} missing`);
+            fails++;
+          }
         }
       }
     }
 
     // Hook check
-    let hookWired = false;
-    if (existsSync(claudeSettings)) {
-      try {
-        const cfg = JSON.parse(readFileSync(claudeSettings, "utf8"));
-        const postToolUse = cfg?.hooks?.PostToolUse;
-        if (Array.isArray(postToolUse)) {
-          for (const item of postToolUse) {
-            if (Array.isArray(item?.hooks)) {
-              for (const h of item.hooks) {
-                if (
-                  typeof h?.command === "string" &&
-                  (h.command.includes("hook churn") || h.command.includes("escalate-on-churn.py"))
-                ) {
-                  hookWired = true;
+    for (const claudeDir of claudeDirs) {
+      const claudeSettings = join(claudeDir, "settings.json");
+      let hookWired = false;
+      if (existsSync(claudeSettings)) {
+        try {
+          const cfg = JSON.parse(readFileSync(claudeSettings, "utf8"));
+          const postToolUse = cfg?.hooks?.PostToolUse;
+          if (Array.isArray(postToolUse)) {
+            for (const item of postToolUse) {
+              if (Array.isArray(item?.hooks)) {
+                for (const h of item.hooks) {
+                  if (
+                    typeof h?.command === "string" &&
+                    (h.command.includes("hook churn") || h.command.includes("escalate-on-churn.py"))
+                  ) {
+                    hookWired = true;
+                  }
                 }
               }
             }
           }
-        }
-      } catch {}
-    }
-    if (hookWired) {
-      ok("PostToolUse escalate-on-churn wired");
-    } else {
-      bad("PostToolUse escalate-on-churn not wired");
-      fails++;
+        } catch {}
+      }
+      if (hookWired) {
+        ok(`${collapseHome(claudeDir, home)} PostToolUse escalate-on-churn wired`);
+      } else {
+        bad(`${collapseHome(claudeDir, home)} PostToolUse escalate-on-churn not wired`);
+        fails++;
+      }
     }
 
-    for (const f of [join(claudeDir, "CLAUDE.md"), join(codexDir, "AGENTS.md")]) {
-      const disp = collapseHome(f, home);
-      let carries = false;
-      if (existsSync(f)) {
-        const content = readFileSync(f, "utf8");
-        if (content.includes(LINE)) carries = true;
-      }
-      if (carries) ok(`${disp} carries the line`);
-      else {
-        bad(`${disp} is missing the token-furnace line`);
-        fails++;
+    for (const claudeDir of claudeDirs) {
+      for (const f of [join(claudeDir, "CLAUDE.md"), join(codexDir, "AGENTS.md")]) {
+        const disp = collapseHome(f, home);
+        let carries = false;
+        if (existsSync(f)) {
+          const content = readFileSync(f, "utf8");
+          if (content.includes(LINE)) carries = true;
+        }
+        if (carries) ok(`${disp} carries the line`);
+        else {
+          bad(`${disp} is missing the token-furnace line`);
+          fails++;
+        }
       }
     }
 
@@ -376,6 +392,7 @@ export function runSetup(
   function ensureBackup(): void {
     if (backupDir) return;
     backupDir = createBackupDir(backupRoot);
+    writeFileSync(join(backupDir, "files.json"), JSON.stringify(tracked), { mode: 0o600 });
     const restoreScriptLines: string[] = [
       "#!/usr/bin/env bash",
       "set -euo pipefail",
@@ -415,12 +432,15 @@ export function runSetup(
     writeFileSync(path, text);
   }
 
+  head("Claude Code installs");
+  for (const install of claudeInstalls) say(`${install.label}: ${install.dir}`);
+
   // --- Backup ---
   head("Backup");
   if (apply) {
     say("created before the first change, if a change is needed");
   } else {
-    plan(`back up 5 files to ${backupRoot}/<timestamp>/ with a restore.sh`);
+    plan(`back up ${tracked.length} files to ${backupRoot}/<timestamp>/ with a restore.sh`);
   }
 
   // --- 1. Skills ---
@@ -469,7 +489,7 @@ export function runSetup(
     }
     const hubPath = join(hub, s);
     linkSkill(srcPath, hubPath);
-    linkSkill(hubPath, join(claudeDir, "skills", s));
+    for (const claudeDir of claudeDirs) linkSkill(hubPath, join(claudeDir, "skills", s));
     linkSkill(hubPath, join(codexDir, "skills", s));
   }
 
@@ -518,12 +538,13 @@ export function runSetup(
       plan(`append the marked line to ${disp}`);
     }
   };
-  inject(join(claudeDir, "CLAUDE.md"));
+  for (const claudeDir of claudeDirs) inject(join(claudeDir, "CLAUDE.md"));
   inject(join(codexDir, "AGENTS.md"));
 
   // --- 3. Token-efficient defaults ---
   head("3. Token-efficient defaults");
 
+  const configureClaude = (claudeDir: string) => {
   const claudeSettingsPath = join(claudeDir, "settings.json");
   let claudeCfg: any = {};
   let claudeJsonMalformed = false;
@@ -617,6 +638,22 @@ export function runSetup(
     }
   };
 
+  setClaudeEnv("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "3");
+  setClaudeEnv("ENABLE_TOOL_SEARCH", "true");
+  setClaudeEnv("MAX_MCP_OUTPUT_TOKENS", "12000");
+  setClaudeHook();
+  if (aggressive) {
+    say("--aggressive: spawn depth has version-specific reports of behaving one level off.");
+    say("Verify after any Claude Code upgrade that subagents still spawn.");
+    setClaudeEnv("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", "1");
+  } else {
+    say("not set (pass --aggressive to include, after reading SKILL.md):");
+    say("  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1   may block all spawning on some versions");
+  }
+  };
+
+  for (const claudeDir of claudeDirs) configureClaude(claudeDir);
+
   const codexConfigPath = join(codexDir, "config.toml");
   let codexToml = "";
   let codexTomlInvalid = false;
@@ -662,25 +699,10 @@ export function runSetup(
     }
   };
 
-  setClaudeEnv("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "3");
-  setClaudeEnv("ENABLE_TOOL_SEARCH", "true");
-  setClaudeEnv("MAX_MCP_OUTPUT_TOKENS", "12000");
-  setClaudeHook();
-
   setCodexIfUnset("", "model_verbosity", '"low"', "low");
   setCodexIfUnset("", "tool_output_token_limit", "10000", "10000");
   setCodexIfUnset("agents", "max_concurrent_threads_per_session", "3", "3");
   setCodexIfUnset("agents", "default_subagent_reasoning_effort", '"medium"', "medium");
-
-  head("   Flagged as risky");
-  if (aggressive) {
-    say("--aggressive: spawn depth has version-specific reports of behaving one level off.");
-    say("Verify after any Claude Code upgrade that subagents still spawn.");
-    setClaudeEnv("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", "1");
-  } else {
-    say("not set (pass --aggressive to include, after reading SKILL.md):");
-    say("  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1   may block all spawning on some versions");
-  }
 
   head("Never set by this script");
   say("CLAUDE_CODE_EFFORT_LEVEL         your reasoning baseline is yours, not a script's");
@@ -727,7 +749,7 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
     if (!repairs.length) { out.write("No repairs selected. No files changed.\n"); return 0; }
     const selected = (id: ConfigRepairId) => repairs.includes(id);
     const home = env.HOME || homedir();
-    const claudePath = join(env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "settings.json");
+    const claudePaths = discoverClaudeInstalls(env).map((install) => join(install.dir, "settings.json"));
     const codexPath = join(env.CODEX_HOME || join(home, ".codex"), "config.toml");
     const changes: { path: string; before: string | null; after: string }[] = [];
     const withinCap = (value: unknown, cap: number) => {
@@ -735,31 +757,33 @@ export function runFixConfig(env: Env, out: { write(text: string): unknown }, op
       return Number.isInteger(n) && n >= 0 && n <= cap;
     };
     if (repairs.some((id) => id.startsWith("claude-"))) {
-      const beforeClaude = existsSync(claudePath) ? readFileSync(claudePath, "utf8") : null;
-      const claude = JSON.parse(beforeClaude ?? "{}");
-      if (!isPlainObject(claude) || (claude.env !== undefined && !isPlainObject(claude.env))) {
-        throw new Error(`${claudePath}: expected an object with an optional env object`);
-      }
-      const originalClaude = JSON.stringify(claude);
-      const hadEnv = claude.env !== undefined;
-      const claudeEnv = (claude.env ??= {}) as Record<string, unknown>;
-      if (selected("claude-context")) claude.autoCompactWindow = CONTEXT_TARGET.claude;
-      if (selected("claude-context") && claudeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) {
-        claudeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CONTEXT_TARGET.claude);
-      }
-      for (const [id, key, cap] of [
-        ["claude-workers", SUBAGENT_ENV, SUBAGENT_CAP],
-        ["claude-tools", "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", TOOL_CONCURRENCY],
-        ["claude-depth", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", SUBAGENT_DEPTH],
-      ] as const) {
-        if (selected(id) && !withinCap(claudeEnv[key], cap)) claudeEnv[key] = String(cap);
-      }
-      if (selected("claude-model") && (typeof claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL !== "string" || !claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL.trim())) {
-        claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = "sonnet";
-      }
-      if (!hadEnv && !Object.keys(claudeEnv).length) delete claude.env;
-      if (JSON.stringify(claude) !== originalClaude) {
-        changes.push({ path: claudePath, before: beforeClaude, after: JSON.stringify(claude, null, 2) + "\n" });
+      for (const claudePath of claudePaths) {
+        const beforeClaude = existsSync(claudePath) ? readFileSync(claudePath, "utf8") : null;
+        const claude = JSON.parse(beforeClaude ?? "{}");
+        if (!isPlainObject(claude) || (claude.env !== undefined && !isPlainObject(claude.env))) {
+          throw new Error(`${claudePath}: expected an object with an optional env object`);
+        }
+        const originalClaude = JSON.stringify(claude);
+        const hadEnv = claude.env !== undefined;
+        const claudeEnv = (claude.env ??= {}) as Record<string, unknown>;
+        if (selected("claude-context")) claude.autoCompactWindow = CONTEXT_TARGET.claude;
+        if (selected("claude-context") && claudeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) {
+          claudeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CONTEXT_TARGET.claude);
+        }
+        for (const [id, key, cap] of [
+          ["claude-workers", SUBAGENT_ENV, SUBAGENT_CAP],
+          ["claude-tools", "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", TOOL_CONCURRENCY],
+          ["claude-depth", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", SUBAGENT_DEPTH],
+        ] as const) {
+          if (selected(id) && !withinCap(claudeEnv[key], cap)) claudeEnv[key] = String(cap);
+        }
+        if (selected("claude-model") && (typeof claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL !== "string" || !claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL.trim())) {
+          claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = "sonnet";
+        }
+        if (!hadEnv && !Object.keys(claudeEnv).length) delete claude.env;
+        if (JSON.stringify(claude) !== originalClaude) {
+          changes.push({ path: claudePath, before: beforeClaude, after: JSON.stringify(claude, null, 2) + "\n" });
+        }
       }
     }
 

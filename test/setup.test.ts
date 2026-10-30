@@ -71,12 +71,58 @@ describe("token-furnace setup", () => {
     expect(readFileSync(settings, "utf8")).toBe('{"keep":true}');
     expect(readFileSync(config, "utf8")).toBe('keep = true\n');
     if (custom) {
-      expect(existsSync(join(testHome, ".claude"))).toBe(false);
+      // The absent default install is also configured by setup.
+      expect(existsSync(join(testHome, ".claude", "settings.json"))).toBe(false);
       expect(existsSync(join(testHome, ".codex"))).toBe(false);
     }
   });
 
+  it("applies and rolls back every discovered Claude install independently", async () => {
+    const installs = [
+      { dir: join(testHome, ".claude"), initial: JSON.stringify({ keep: "default" }) + "\n" },
+      { dir: join(testHome, ".cc-work"), initial: JSON.stringify({ keep: "work" }) + "\n" },
+    ];
+    for (const install of installs) {
+      mkdirSync(join(install.dir, "projects", "demo"), { recursive: true });
+      writeFileSync(join(install.dir, "projects", "demo", "session.jsonl"), "{}\n");
+      writeFileSync(join(install.dir, "settings.json"), install.initial);
+    }
+    const mcp = [join(testHome, ".claude.json"), join(installs[1].dir, ".claude.json")];
+    mcp.forEach((path, i) => writeFileSync(path, JSON.stringify({ account: i })));
+    const app = appFor();
+
+    expect(await main(["setup", "--apply"], app)).toBe(0);
+    for (const install of installs) {
+      const settings = JSON.parse(readFileSync(join(install.dir, "settings.json"), "utf8"));
+      expect(settings.keep).toBe(install.initial.includes("default") ? "default" : "work");
+      expect(settings.env.ENABLE_TOOL_SEARCH).toBe("true");
+      expect(readFileSync(join(install.dir, "CLAUDE.md"), "utf8")).toContain("token-furnace:begin");
+      expect(existsSync(join(install.dir, "skills", "token-furnace", "SKILL.md"))).toBe(true);
+    }
+
+    const backupRoot = join(testHome, ".agents", "token-furnace-backups");
+    const latest = readdirSync(backupRoot).sort().at(-1)!;
+    expect(existsSync(join(backupRoot, latest, "claude-settings.json"))).toBe(true);
+    expect(existsSync(join(backupRoot, latest, "claude-cc-work-claude-settings.json"))).toBe(true);
+
+    expect(await main(["fix-config"], app)).toBe(0);
+    for (const install of installs) {
+      expect(JSON.parse(readFileSync(join(install.dir, "settings.json"), "utf8")).autoCompactWindow).toBe(400000);
+      expect(existsSync(join(install.dir, "settings.json.token-furnace-backup"))).toBe(true);
+    }
+    mcp.forEach((path) => writeFileSync(path, "changed"));
+    // The backup remembers the install even if its discovery markers later disappear.
+    rmSync(join(installs[1].dir, "projects"), { recursive: true });
+    expect(await main(["setup", "--rollback"], app)).toBe(0);
+    mcp.forEach((path, i) => expect(readFileSync(path, "utf8")).toBe(JSON.stringify({ account: i })));
+    for (const install of installs) {
+      expect(readFileSync(join(install.dir, "settings.json"), "utf8")).toBe(install.initial);
+    }
+  });
+
   it("repairs configuration without HOME when explicit agent directories are supplied", async () => {
+    vi.stubEnv("HOME", testHome);
+    vi.stubEnv("USERPROFILE", testHome);
     const app = appFor({ HOME: undefined, CLAUDE_CONFIG_DIR: join(testHome, "claude"), CODEX_HOME: join(testHome, "codex") });
     expect(await main(["fix-config"], app)).toBe(0);
     expect(JSON.parse(readFileSync(join(testHome, "claude", "settings.json"), "utf8")).autoCompactWindow).toBe(400000);

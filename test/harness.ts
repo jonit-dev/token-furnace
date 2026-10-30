@@ -3,7 +3,7 @@
  * The golden files in test/golden/ are burn.py's own output on these fixtures, kept as the oracle.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, symlinkSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { buildReport } from "../src/core/analyze/report";
 import { reportView } from "../src/core/analyze/view";
@@ -35,8 +35,10 @@ export function fixedNow(): Date {
 }
 
 export function harnessEnv(root: string, now: Date): NodeJS.ProcessEnv {
+  if (!existsSync(join(root, ".claude"))) symlinkSync(root, join(root, ".claude"), "dir");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    HOME: root,
     CLAUDE_CONFIG_DIR: root,
     CODEX_HOME: join(root, "codex"),
     OPENCODE_DATA_DIR: join(root, "opencode"),
@@ -119,12 +121,17 @@ export function reportInput(
   source: string,
 ): ReportInput {
   const { live, sessions } = collectSessions(env, source);
+  const claude = new ClaudeSource(env);
   const codex = new CodexSource(env);
   return {
     now,
     days,
     weeklyBudget: budget,
     live,
+    providers: live.map((id) => {
+      const agent = id === "claude" ? claude : codex;
+      return { id, kind: id, label: agent.label, dir: agent.base() };
+    }),
     sessions,
     config: readConfig(env),
     planWeek: planWeek(env.CLAUDE_CONFIG_DIR ?? "", now),

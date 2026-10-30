@@ -121,7 +121,7 @@ repairs cannot rewrite those historical measurements.
 
 Run `token-furnace fix-config` to set Claude Code's `autoCompactWindow` to `400000` and
 Codex's `model_auto_compact_token_limit` to `300000`. Checks warn when these settings differ.
-The command respects `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, preserves unrelated settings,
+The command repairs every discovered Claude Code install and respects `CODEX_HOME`. It preserves unrelated settings,
 and saves each existing changed file beside the original as `.token-furnace-backup`
 (with a numbered suffix when needed). No backup is needed for a newly created file.
 Invalid or unsupported configuration exits 1 before editing either file. Repeated runs make
@@ -149,6 +149,20 @@ injects an escalation prompt at the 4th, 7th, and 10th edit.
 - Plan usage can contact Anthropic with a local Claude Code login, or the OpenCode Go usage endpoint with a local Go key. Keys go only to their own provider; `--no-plan-usage` disables network calls.
 - The server binds to `127.0.0.1` only. It rejects a `Host` header that is not loopback.
 
+## Multiple Claude Code installs
+
+Each Claude Code install appears as a separate provider in the CLI and dashboard, with its own usage reading and limit.
+Discovery checks `~/.claude`, `CLAUDE_CONFIG_DIR`, and first-level directories under `$HOME` and `${XDG_CONFIG_HOME:-~/.config}`.
+A scanned directory needs project transcripts plus `.claude.json`, `settings.json`, or `history.jsonl`.
+Literal `CLAUDE_CONFIG_DIR` assignments in shell startup files also find installs elsewhere, including assignments in aliases.
+Paths can use `~`, `$HOME`, or `${HOME}`. Other variables and shell commands are skipped; startup files are never executed.
+
+Run `token-furnace --list-sources` to see each install's ID, label, directory, and transcript count.
+The default ID remains `claude`; a custom directory such as `~/.cc-work` becomes `claude:cc-work`.
+Use that ID with `--source claude:cc-work`. Colliding names receive numeric suffixes that remain reserved between runs.
+Setup and configuration repairs apply to every discovered install; setup rollback restores the paths saved in its backup.
+Headless `claude -p` processes count toward the default install.
+
 ## Cache
 
 The cache lives at:
@@ -156,13 +170,17 @@ The cache lives at:
 - `$XDG_CACHE_HOME/token-furnace/` when `XDG_CACHE_HOME` is set.
 - `$HOME/.cache/token-furnace/` otherwise.
 
-It holds `cache.sqlite` (parsed sessions) and `usage.json` (the last plan reading). To clear it:
+It holds `cache.sqlite` (parsed sessions), `limits.json` (calibrated limits), and the saved plan readings.
+The default Claude install uses `usage.json`; other installs use `usage-<slug>.json`.
+The `claude-installs/` directory reserves install IDs so a new install cannot take another install's saved limits.
+To clear all cached data and install IDs:
 
 ```
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/token-furnace"
 ```
 
-Use `--no-cache` to skip the cache for one run. The cache is disposable; a schema change rebuilds it.
+Use `--no-cache` to skip transcript and plan-reading cache writes for one run. Install ID reservations remain in use.
+The cache is disposable; a schema change rebuilds the transcript database.
 
 ## Progress and workers
 

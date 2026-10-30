@@ -1,15 +1,14 @@
 /** The live server: the Report over HTTP, the raw page for hot reload, and the Host check. */
 
 import { request } from "node:http";
-import { connect } from "node:net";
-import { networkInterfaces } from "node:os";
+import { Server as NetServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { compose } from "../src/compose";
 import { startServer, type LiveServer } from "../src/server";
-import { buildFull, saveUsageReading } from "./fixtures/build";
+import { buildClaudeInstall, buildFull, saveUsageReading } from "./fixtures/build";
 import { fixedNow, harnessEnv, tsReport } from "./harness";
 
 const now = fixedNow();
@@ -21,12 +20,13 @@ const env = { ...harnessEnv(root, now), TOKEN_FURNACE_NOW: now.toISOString(), TO
 const app = compose(env);
 
 let live: LiveServer;
+const listen = vi.spyOn(NetServer.prototype, "listen");
 
 beforeAll(async () => {
   live = await startServer(app, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
 });
 
-afterAll(() => live.close());
+afterAll(async () => { await live.close(); listen.mockRestore(); });
 
 function get(path: string, host = `127.0.0.1:${live.port}`): Promise<{ status: number; body: string }> {
   return new Promise((done, fail) => {
@@ -45,20 +45,8 @@ function get(path: string, host = `127.0.0.1:${live.port}`): Promise<{ status: n
 }
 
 describe("serve", () => {
-  it("binds 127.0.0.1 only: the LAN address on that port is refused", async () => {
-    const lan = Object.values(networkInterfaces())
-      .flat()
-      .find((nic) => nic && !nic.internal && nic.family === "IPv4");
-    if (!lan) return; // no network on this machine to try
-    const code = await new Promise<string | null>((done) => {
-      const socket = connect({ host: lan.address, port: live.port });
-      socket.on("connect", () => {
-        socket.destroy();
-        done(null);
-      });
-      socket.on("error", (error: NodeJS.ErrnoException) => done(error.code ?? "error"));
-    });
-    expect(code).toBe("ECONNREFUSED");
+  it("binds the native server to 127.0.0.1 only", () => {
+    expect(listen).toHaveBeenCalledWith(0, "127.0.0.1", expect.any(Function));
   });
 
   it("returns the Report on /api/report", async () => {
@@ -74,6 +62,42 @@ describe("serve", () => {
   it("takes days and source from the query", async () => {
     const response = await get("/api/report?days=2&source=claude");
     expect(JSON.parse(response.body)).toEqual(tsReport(env, now, 2, null, "claude"));
+  });
+
+  it("filters a discovered Claude install and rejects an unknown source", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tf-server-installs-"));
+    buildClaudeInstall(home, ".claude", { now });
+    buildClaudeInstall(home, ".cc-work", { now, session: "work" });
+    const custom = compose({ HOME: home, XDG_CACHE_HOME: join(home, "cache"), TOKEN_FURNACE_NOW: now.toISOString() }, { noCache: true });
+    const server = await startServer(custom, { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    try {
+      for (let i = 0; i < 100 && !custom.reports.hasScanned; i++) await new Promise((next) => setImmediate(next));
+      const filtered = await new Promise<{ status: number; body: string }>((done, fail) => {
+        const req = request({ host: "127.0.0.1", port: server.port, path: "/api/report?source=claude:cc-work", headers: { Host: `127.0.0.1:${server.port}` } }, (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => done({ status: res.statusCode ?? 0, body }));
+        });
+        req.on("error", fail);
+        req.end();
+      });
+      expect(filtered.status).toBe(200);
+      expect(JSON.parse(filtered.body).topSessions.every((session: { source: string }) => session.source === "claude:cc-work")).toBe(true);
+
+      const unknown = await new Promise<{ status: number }>((done, fail) => {
+        const req = request({ host: "127.0.0.1", port: server.port, path: "/api/report?source=claude:nope", headers: { Host: `127.0.0.1:${server.port}` } }, (res) => {
+          res.resume();
+          res.on("end", () => done({ status: res.statusCode ?? 0 }));
+        });
+        req.on("error", fail);
+        req.end();
+      });
+      expect(unknown.status).toBe(400);
+    } finally {
+      await server.close();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("rejects a Host that is not this loopback server", async () => {

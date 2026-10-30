@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +22,10 @@ function sevenDay(): { resets_at: string; utilization: number } {
 }
 
 function makeEnv(claudeDir: string, cacheDir: string): NodeJS.ProcessEnv {
+  const home = tempRoot("tf-usage-home-");
+  symlinkSync(claudeDir, join(home, ".claude"), "dir");
   return {
+    HOME: home,
     CLAUDE_CONFIG_DIR: claudeDir,
     XDG_CACHE_HOME: cacheDir,
     TOKEN_FURNACE_NOW: new Date(CLOCK).toISOString(),
@@ -125,4 +129,83 @@ describe("planWeek cache opt-out", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(readFileSync(file, "utf8")).toBe(before);
   });
+});
+
+describe("per-install Claude credentials and usage cache", () => {
+  it("uses the hashed Keychain service and an install-specific usage file", async () => {
+    const claudeDir = tempRoot("tf-usage-cc-work-");
+    const cacheDir = tempRoot("tf-usage-cache-");
+    const security = vi.fn(() => JSON.stringify({ claudeAiOauth: { accessToken: TOKEN } }));
+    const { planWeek } = await import("../src/services/usage-client");
+    const install = { id: "claude:work", label: "Claude Code (work)", dir: claudeDir, isDefault: false, found: ["scan" as const] };
+
+    const week = await planWeek(
+      { ...makeEnv(claudeDir, cacheDir), CLAUDE_CONFIG_DIR: undefined },
+      new Date(CLOCK),
+      true,
+      install,
+      security,
+    );
+
+    expect(week?.used).toBe(37);
+    expect(security).toHaveBeenCalledWith(
+      "security",
+      ["find-generic-password", "-s", `Claude Code-credentials-${createHash("sha256").update(claudeDir).digest("hex").slice(0, 8)}`, "-w"],
+      expect.objectContaining({ encoding: "utf8" }),
+    );
+    expect(existsSync(join(cacheDir, "token-furnace", "usage-work.json"))).toBe(true);
+    expect(existsSync(join(cacheDir, "token-furnace", "usage.json"))).toBe(false);
+  });
+
+  it("prefers the install credentials file and never falls back to another install", async () => {
+    const home = tempRoot("tf-usage-home-");
+    const cacheDir = tempRoot("tf-usage-cache-");
+    const a = tempRoot("tf-usage-a-");
+    const b = tempRoot("tf-usage-b-");
+    writeCreds(a);
+    const security = vi.fn((_: string, args: string[]) => {
+      if (args.includes("Claude Code-credentials-b")) return TOKEN;
+      throw new Error("missing keychain item");
+    });
+    const { planWeek } = await import("../src/services/usage-client");
+    const installA = { id: "claude:a", label: "Claude Code (a)", dir: a, isDefault: false, found: ["scan" as const] };
+    const installB = { id: "claude:b", label: "Claude Code (b)", dir: b, isDefault: false, found: ["scan" as const] };
+
+    expect((await planWeek({ ...makeEnv(a, cacheDir), HOME: home }, new Date(CLOCK), true, installA, security))?.used).toBe(37);
+    expect(security).not.toHaveBeenCalled();
+    expect(await planWeek({ ...makeEnv(b, cacheDir), HOME: home }, new Date(CLOCK), true, installB, security)).toBeNull();
+    expect(existsSync(join(cacheDir, "token-furnace", "usage-a.json"))).toBe(true);
+    expect(existsSync(join(cacheDir, "token-furnace", "usage-b.json"))).toBe(false);
+  });
+});
+
+
+it("keeps a no-cache 100% reading in memory for A without serving it to B", async () => {
+  const home = tempRoot("tf-usage-isolation-");
+  const a = tempRoot("tf-usage-a-");
+  const b = tempRoot("tf-usage-b-");
+  const env = { HOME: home, XDG_CACHE_HOME: join(home, ".cache"), TOKEN_FURNACE_NO_CACHE: "1" };
+  writeCreds(a);
+  const { planWeek } = await import("../src/services/usage-client");
+  fetchMock.mockResolvedValue(new Response(JSON.stringify({ seven_day: { ...sevenDay(), utilization: 100 } })));
+  const security = vi.fn(() => { throw new Error("missing Keychain item"); });
+  const installA = { id: "claude:a", label: "Claude Code (a)", dir: a, isDefault: false, found: [] };
+  const installB = { id: "claude:b", label: "Claude Code (b)", dir: b, isDefault: false, found: [] };
+  expect((await planWeek(env, new Date(CLOCK), true, installA, security))?.used).toBe(100);
+  expect((await planWeek(env, new Date(CLOCK + 1000), true, installA, security))?.used).toBe(100);
+  expect(await planWeek(env, new Date(CLOCK + 1000), true, installB, security)).toBeNull();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(security).toHaveBeenCalledTimes(1);
+  expect(existsSync(join(home, ".cache"))).toBe(false);
+});
+
+it("queries the default Keychain service for the default install only", async () => {
+  const home = tempRoot("tf-usage-default-");
+  const dir = join(home, ".claude");
+  mkdirSync(dir);
+  const { accessToken } = await import("../src/services/usage-client");
+  const security = vi.fn(() => JSON.stringify({ claudeAiOauth: { accessToken: TOKEN } }));
+  expect(accessToken({ id: "claude", label: "Claude Code", dir, isDefault: true, found: [] }, security)).toBe(TOKEN);
+  expect(security.mock.calls[0]).toBeDefined();
+  expect(security).toHaveBeenCalledWith("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], expect.anything());
 });

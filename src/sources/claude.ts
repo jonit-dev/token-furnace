@@ -1,7 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { ParsedFile, SourceFile, Turn, Wake } from "../core/model";
+import type { ParsedFile, ProviderId, SourceFile, Turn, Wake } from "../core/model";
 import {
   classifyPrompt,
   deriveHandoffTitle,
@@ -13,21 +12,32 @@ import {
   type AgentSource,
   type Env,
 } from "./agent-source";
+import { defaultClaudeInstall, type ClaudeInstall } from "./claude-installs";
 import { lines } from "./lines";
 
 /** Claude Code transcripts under $CLAUDE_CONFIG_DIR/projects (default ~/.claude). burn.py:122-211 */
 export class ClaudeSource implements AgentSource {
-  readonly name = "claude" as const;
+  readonly kind = "claude" as const;
+  readonly name: ProviderId;
+  readonly label: string;
+  readonly install: ClaudeInstall;
 
-  constructor(private readonly env: Env) {}
+  constructor(installOrEnv: ClaudeInstall | Env) {
+    const install = typeof (installOrEnv as Partial<ClaudeInstall>).id === "string"
+      ? installOrEnv as ClaudeInstall
+      : defaultClaudeInstall(installOrEnv as Env);
+    this.install = install;
+    this.name = install.id;
+    this.label = install.label;
+  }
 
   /** CLAUDE_CONFIG_DIR, or ~/.claude. burn.py:122 */
   base(): string {
-    return this.env.CLAUDE_CONFIG_DIR || join(this.env.HOME || homedir(), ".claude");
+    return this.install.dir;
   }
 
   home(): string {
-    return join(this.env.HOME || homedir(), ".claude");
+    return this.install.dir;
   }
 
   readFile(name: string): string | null {
@@ -119,7 +129,7 @@ export class ClaudeSource implements AgentSource {
         continue;
       }
       if (record.type !== "assistant") continue;
-      const turn = assistantTurn(record, project, session, wakes);
+      const turn = assistantTurn(record, project, session, wakes, this.name);
       if (turn) {
         turns.push(turn);
         wakes = [];
@@ -147,6 +157,7 @@ function assistantTurn(
   project: string,
   session: string,
   wakes: Wake[],
+  source: ProviderId,
 ): Turn | null {
   const when = parseTime(record.timestamp);
   if (when === null) return null;
@@ -157,7 +168,7 @@ function assistantTurn(
     (block: any) => block && typeof block === "object" && block.type === "tool_use",
   );
   return {
-    source: "claude",
+    source,
     project,
     session,
     model: String(message.model ?? ""),

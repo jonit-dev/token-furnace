@@ -1,10 +1,10 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { Source } from "../../src/core/model";
+import type { ProviderId } from "../../src/core/model";
 
 export type Tab = "dashboard" | "checkup" | "sessions" | "tips" | "resets" | "notifications";
 
-export const sessionKey = (s: { source: Source; fullId?: string; id: string }) => `${s.source}:${s.fullId || s.id}`;
+export const sessionKey = (s: { source: ProviderId; fullId?: string; id: string }) => `${s.source}:${s.fullId || s.id}`;
 
 interface UiState {
   /** Active tab id. */
@@ -20,15 +20,15 @@ interface UiState {
   showToast: (message: string, tone?: "success" | "error") => void;
   dismissToast: () => void;
   /** Burn source shown on the dashboard. */
-  source: Source;
-  hourlySource: Source | "all";
-  pins: Partial<Record<"source" | "hourlySource", Source | "all">>;
-  setHourlySource: (source: Source | "all") => void;
-  togglePin: (chart: "source" | "hourlySource", value: Source | "all") => void;
+  source: ProviderId;
+  hourlySource: ProviderId | "all";
+  pins: Partial<Record<"source" | "hourlySource", ProviderId | "all">>;
+  setHourlySource: (source: ProviderId | "all") => void;
+  togglePin: (chart: "source" | "hourlySource", value: ProviderId | "all") => void;
   /** False after a failed refresh. */
   online: boolean;
   setTab: (tab: Tab) => void;
-  setSource: (source: Source) => void;
+  setSource: (source: ProviderId) => void;
   setOnline: (online: boolean) => void;
 }
 
@@ -86,7 +86,7 @@ export const useUi = create<UiState>()(persist((set) => ({
   merge: (saved, current) => {
     const state = saved as { pins?: UiState["pins"]; doneTips?: unknown; sessionNames?: unknown } | undefined;
     const pins = state?.pins;
-    const valid = (value: unknown): value is Source => value === "claude" || value === "codex" || value === "opencode";
+    const valid = (value: unknown): value is ProviderId => typeof value === "string" && value.length > 0 && value !== "all";
     const source = valid(pins?.source) ? pins.source : undefined;
     const hourlySource = valid(pins?.hourlySource) || pins?.hourlySource === "all" ? pins.hourlySource : undefined;
     const doneTips = Array.isArray(state?.doneTips)

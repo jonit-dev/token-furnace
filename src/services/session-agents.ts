@@ -2,6 +2,7 @@ import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ActiveSession, SessionAgent, SessionInput } from "../core/model";
 import { ACTIVE_MINUTES } from "../core/analyze/flags";
+import { kindOf } from "../core/providers";
 import { jsonParse, type AgentSource } from "../sources/agent-source";
 import { lines } from "../sources/lines";
 
@@ -14,7 +15,7 @@ export class SessionAgents {
   private children = new Map<string, { stamp: string; usage: Usage; partial: boolean }>();
 
   enrich(active: ActiveSession[], sessions: SessionInput[], sources: AgentSource[], now: Date): void {
-    const codex = sessions.filter(s => s.source === "codex" && s.turns.length && active.some(row => row.source === "codex")).map(s => ({ session: s, identity: this.identity(s) }));
+    const codex = sessions.filter(s => kindOf(s.source) === "codex" && s.turns.length && active.some(row => kindOf(row.source) === "codex")).map(s => ({ session: s, identity: this.identity(s) }));
     for (const row of active) {
       const session = sessions.find(s => s.source === row.source && s.path === row.path);
       if (!session) continue;
@@ -22,7 +23,7 @@ export class SessionAgents {
       const root = this.member(identity, this.usage(session), now);
       const members = [root];
       let complete = identity.known;
-      if (row.source === "codex") {
+      if (kindOf(row.source) === "codex") {
         const seen = new Set([root.id]);
         for (let i = 0; i < members.length; i++) {
           for (const child of codex) {
@@ -32,7 +33,7 @@ export class SessionAgents {
           }
         }
         complete &&= codex.every(c => c.identity.known);
-      } else if (row.source === "claude") {
+      } else if (kindOf(row.source) === "claude") {
         const source = sources.find(s => s.name === row.source);
         const directory = join(session.path.slice(0, -6), "subagents");
         let files: string[] = [];
@@ -76,11 +77,11 @@ export class SessionAgents {
   }
 
   private identity(session: SessionInput): Identity {
-    if (session.source === "claude") return { id: session.turns[0]?.session ?? session.path, parentId: null, known: true };
+    if (kindOf(session.source) === "claude") return { id: session.turns[0]?.session ?? session.path, parentId: null, known: true };
     const cached = this.headers.get(session.path);
     if (cached) return cached;
     const unknown: Identity = { id: session.turns[0]?.session ?? session.path, parentId: null, known: false };
-    if (session.source !== "codex") return unknown;
+    if (kindOf(session.source) !== "codex") return unknown;
     try {
       const fd = openSync(session.path, "r");
       let text: string;

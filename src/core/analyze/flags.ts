@@ -1,6 +1,6 @@
-import { CONTEXT_TARGET } from "../context";
 export { CONTEXT_TARGET } from "../context";
-import type { Source } from "../model";
+import type { ProviderId } from "../model";
+import { contextTargetOf, kindOf } from "../providers";
 import { fixed } from "./format";
 import type { WakeCounts } from "../model";
 import { int0 } from "./format";
@@ -37,12 +37,14 @@ export function sessionFlags(
   hours: number,
   reads: number,
   wakes: WakeCounts,
-  source: Source,
+  source: ProviderId,
 ): string[] {
   const flags: string[] = [];
-  if (peak > CONTEXT_TARGET[source]) {
+  const target = contextTargetOf(source);
+  const kind = kindOf(source) ?? source;
+  if (peak > target) {
     flags.push(
-      `late compaction: peak ${int0(peak / 1000)}k. Use a ${CONTEXT_TARGET[source]} ${source} compaction window.`,
+      `late compaction: peak ${int0(peak / 1000)}k. Use a ${target} ${kind} compaction window.`,
     );
   }
   if (reads >= CALLER_READS) {

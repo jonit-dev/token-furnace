@@ -26,6 +26,19 @@ feed it instead, and its saved reading is used by every run: write `{"fetched": 
 "resets_at": <epoch>}}` from its `rate_limits.seven_day` input to
 `${XDG_CACHE_HOME:-~/.cache}/token-furnace/usage.json`. A reading under 5 minutes old wins.
 
+Each discovered Claude Code install has a separate provider ID, plan reading, and calibrated limit.
+Discovery checks `~/.claude`, `CLAUDE_CONFIG_DIR`, first-level directories under `$HOME` and
+`${XDG_CONFIG_HOME:-~/.config}`, and literal assignments in shell startup files and aliases.
+Scanned directories need project transcripts and a Claude config marker. Startup files are read without execution;
+only `~`, `$HOME`, and `${HOME}` are expanded. Run `--list-sources` for IDs and paths, then select one with
+`--source claude:<slug>`. Setup and fix-config apply to all discovered installs.
+
+The default install keeps `usage.json`. For another install, write its status-line reading to `usage-<slug>.json`
+in the same cache directory, adding `"source": "<absolute config directory>"` to identify the install.
+Use the directory printed by `--list-sources`. A missing login yields an unavailable reading for that install;
+credentials and readings are never borrowed from another install. `--no-cache` skips transcript and usage writes;
+install ID reservations remain in the cache to preserve numeric suffixes.
+
 It prints a verdict, each leak ranked by share of spend with its fix and the worst sessions,
 and the baseline levers that miss their target. It exits 1 when it finds a leak.
 `--html report.html` also writes a self-contained page: a spend-over-time chart, the

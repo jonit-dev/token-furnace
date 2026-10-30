@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { OpenCodeSource } from "../sources/opencode";
-import type { Week } from "../core/model";
+import { defaultClaudeInstall, type ClaudeInstall } from "../sources/claude-installs";
+import type { ProviderId, Week } from "../core/model";
 import type { Env } from "../sources/agent-source";
 
 /** A saved reading is reused for 5 minutes, and one call is tried per minute. burn.py:862 */
@@ -11,12 +13,13 @@ const REUSE_SECONDS = 300;
 const RETRY_SECONDS = 60;
 
 /** Last network call in this process: one a minute, so a server does not burn the rate limit. */
-let lastTry = 0;
+const claudeReadings = new Map<string, { lastTry: number; fetched: number; data: Record<string, any> | null }>();
 
 /** The saved reading, in the file burn.py writes and a status line can feed. */
-export function usageCachePath(env: Env): string {
+export function usageCachePath(env: Env, install?: ClaudeInstall): string {
   const base = env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache");
-  return join(base, "token-furnace", "usage.json");
+  const slug = install?.id.split(":", 2)[1];
+  return join(base, "token-furnace", slug ? `usage-${slug}.json` : "usage.json");
 }
 
 /**
@@ -26,26 +29,47 @@ export function usageCachePath(env: Env): string {
  * at most once a minute. The token goes there and nowhere else. A failed call keeps the saved
  * reading. No login on the machine means no call.
  */
-export async function planWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
+export type SecurityRunner = (file: string, args: string[], options: { encoding: "utf8"; timeout: number }) => string;
+
+export async function planWeek(
+  env: Env,
+  now: Date,
+  network: boolean,
+  install: ClaudeInstall = defaultClaudeInstall(env),
+  security: SecurityRunner = (file, args, options) => execFileSync(file, args, options) as string,
+): Promise<Week | null> {
   const at = now.getTime() / 1000;
-  const path = usageCachePath(env);
+  const path = usageCachePath(env, install);
   const saved = readJson(path);
-  let data = saved?.seven_day ?? null;
-  const stale = !data || at - (saved?.fetched ?? 0) >= REUSE_SECONDS;
-  if (network && stale && at - lastTry >= RETRY_SECONDS) {
-    const token = accessToken(env);
+  const key = `${path}:${install.dir}`;
+  const reading = claudeReadings.get(key) ?? { lastTry: 0, fetched: saved?.fetched ?? 0, data: install.id === "claude" || saved?.source === install.dir ? saved?.seven_day ?? null : null };
+  const stale = !reading.data || at - reading.fetched >= REUSE_SECONDS;
+  if (network && stale && at - reading.lastTry >= RETRY_SECONDS) {
+    reading.lastTry = at;
+    claudeReadings.set(key, reading);
+    const token = accessToken(install, security);
     if (token) {
-      lastTry = at;
       const fresh = await fetchWeek(token);
       if (fresh) {
-        data = fresh;
+        reading.data = fresh;
+        reading.fetched = at;
         if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0")) {
-          writeJson(path, { fetched: at, seven_day: data });
+          writeJson(path, { ...(install.id === "claude" ? {} : { source: install.dir }), fetched: at, seven_day: fresh });
         }
       }
     }
   }
-  return toWeek(data, now);
+  return toWeek(reading.data, now);
+}
+
+export async function claudePlanWeeks(
+  env: Env,
+  installs: readonly ClaudeInstall[],
+  now: Date,
+  network: boolean,
+): Promise<Partial<Record<ProviderId, Week | null>>> {
+  const values = await Promise.all(installs.map(async (install) => [install.id, await planWeek(env, now, network, install)] as const));
+  return Object.fromEntries(values);
 }
 
 async function fetchWeek(token: string): Promise<Record<string, any> | null> {
@@ -63,16 +87,18 @@ async function fetchWeek(token: string): Promise<Record<string, any> | null> {
 }
 
 /** The Claude Code login token: the credentials file, else the macOS Keychain. burn.py:881 */
-function accessToken(env: Env): string | null {
+export function accessToken(install: ClaudeInstall, security: SecurityRunner): string | null {
   let creds: string | null = null;
-  const home = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
   try {
-    creds = readFileSync(join(home, ".credentials.json"), "utf8");
+    creds = readFileSync(join(install.dir, ".credentials.json"), "utf8");
   } catch {
     try {
-      creds = execFileSync(
+      const service = install.isDefault
+        ? "Claude Code-credentials"
+        : `Claude Code-credentials-${createHash("sha256").update(install.dir).digest("hex").slice(0, 8)}`;
+      creds = security(
         "security",
-        ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+        ["find-generic-password", "-s", service, "-w"],
         { encoding: "utf8", timeout: 5_000 },
       );
     } catch {
@@ -80,7 +106,8 @@ function accessToken(env: Env): string | null {
     }
   }
   try {
-    return (JSON.parse(creds).claudeAiOauth.accessToken as string) ?? null;
+    const token: unknown = JSON.parse(creds).claudeAiOauth?.accessToken;
+    return typeof token === "string" && token.length > 0 ? token : null;
   } catch {
     return null;
   }

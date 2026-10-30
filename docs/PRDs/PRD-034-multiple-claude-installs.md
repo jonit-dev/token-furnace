@@ -1,6 +1,6 @@
 # PRD-034 — Multiple Claude Code installs on one machine
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — local verification complete; awaiting PR review.
 **Priority:** P1 — Every Claude Code install on the machine is found automatically and reported as its own provider, with its own plan reading, limits and cache rows.
 **Complexity:** 6 (MEDIUM); breadth 16+ files (3), credential selection across accounts (2), external keychain/OAuth integration (1). Each phase is independently verifiable and reversible; the cache is regenerable.
 **Owner:** Unassigned
@@ -46,11 +46,13 @@ Facts Claude Code itself establishes (verified on macOS 2026-10-30):
 
 **Key decisions**
 - Content-based detection plus shell rc parsing instead of a configured list: zero setup, and any naming scheme works. An explicit override (`TOKEN_FURNACE_CLAUDE_DIRS`) is deferred to Open Questions.
-- The default install keeps id `claude`, so no cache wipe or `limits.json` migration is needed: `files.source` already stores a string.
+- The default install keeps id `claude`, so no cache wipe or `limits.json` migration is needed: `files.source` already stores a string. A custom env install never takes the default identity.
+- Numeric collision suffixes are reserved atomically with symlinks under the existing cache’s `claude-installs/` directory. Reservations survive discovery changes and remain in use with `--no-cache`; an unreadable reservation fails rather than reassigning another install’s limits.
 - No new dependencies: `node:crypto` for the hash, `node:fs` for discovery, the existing `security` call for the Keychain.
 
 **Data changes**
 - `files.source` stores the instance id (`claude`, `claude:work`, ...). `SCHEMA_VERSION` is unchanged; parser version lookup goes through `kindOf`.
+- Custom saved usage readings include their source directory; a mismatched directory is unavailable.
 - `limits.json`: additive keys per instance id. `usage.json` remains the default install's file; other installs use `usage-<slug>.json` in the same dir. This keeps the status-line contract in `SKILL.md` backwards compatible.
 
 **Contracts**
@@ -91,7 +93,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 ## Execution Phases
 
 #### Phase 1: Baseline characterization
-**Status:** NOT STARTED
+**Status:** DONE
 **Dependencies:** None
 
 **Files:**
@@ -99,8 +101,8 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - `test/fixtures/build.ts` — helper to build a Claude config dir at an arbitrary path
 
 **Implementation:**
-- [ ] Add `buildClaudeInstall(root, relDir, opts)` writing `projects/*/*.jsonl`, `.claude.json`, `settings.json`.
-- [ ] Snapshot the current report `burns`, cache rows, `limits.json` and `/api/report` for a single default install.
+- [x] Add `buildClaudeInstall(root, relDir, opts)` writing `projects/*/*.jsonl`, `.claude.json`, `settings.json`.
+- [x] Snapshot the current report `burns`, cache rows, `limits.json` and `/api/report` for a single default install.
 
 **Tests required:**
 - `test/claude-installs.test.ts` — single-install snapshot; a run with `CLAUDE_CONFIG_DIR` set still reads that dir.
@@ -110,7 +112,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - Expected: all tests pass on unmodified `src/`.
 
 #### Phase 2: Discovery and instance identity — `--list-sources` shows every install
-**Status:** NOT STARTED
+**Status:** DONE
 **Dependencies:** Phase 1
 
 **Files:**
@@ -121,9 +123,9 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - `src/cli.ts` — `--source` accepts ids; `--list-sources` prints id, label, dir and transcript count
 
 **Implementation:**
-- [ ] Implement the four discovery signals, the marker check, realpath dedupe, slug/label rules and ordering.
-- [ ] Replace runtime `Source` keys with `ProviderId` where they key instances; route `PROVIDERS[...]` lookups through `kindOf`. Fix the literal triples (`report-service.ts:203,218,264`, `notifications.ts:445`) to iterate `sources`.
-- [ ] `session-agents.ts:36` and `server.ts:110` resolve sources by id.
+- [x] Implement the four discovery signals, the marker check, realpath dedupe, slug/label rules and ordering.
+- [x] Replace runtime `Source` keys with `ProviderId` where they key instances; route `PROVIDERS[...]` lookups through `kindOf`. Fix the literal triples (`report-service.ts:203,218,264`, `notifications.ts:445`) to iterate `sources`.
+- [x] `session-agents.ts:36` and `server.ts:110` resolve sources by id.
 
 **Tests required:**
 - `test/claude-installs.test.ts` — finds default + `.cc-work` (scan) + an outside-`$HOME` dir (shell rc, with `$HOME` and `~` forms); ignores a dir without markers, an unresolvable `$OTHER/x` value and a symlink to `~/.claude`; `CLAUDE_CONFIG_DIR == ~/.claude` yields one install; slug collisions get suffixes.
@@ -136,7 +138,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 **Manual verification:** `npm run build && env -u CLAUDE_CONFIG_DIR node dist/cli.js --list-sources` on a machine with two installs lists both.
 
 #### Phase 3: Cache scoped per install — runs never evict each other
-**Status:** NOT STARTED
+**Status:** DONE
 **Dependencies:** Phase 2
 
 **Files:**
@@ -144,7 +146,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - `src/services/report-service.ts` — pass the scanned id set
 
 **Implementation:**
-- [ ] Scope eviction to the scanned ids; `save()` stops silently dropping unknown ids (log once via the existing error path).
+- [x] Scope eviction to the scanned ids; `save()` stops silently dropping unknown ids (log once via the existing error path).
 
 **Tests required:**
 - `test/claude-installs.test.ts` — run with install A only, then A+B, then A only again: B's rows survive and are not re-parsed (mtime unchanged); two app instances sharing one cache file each return only their own sessions.
@@ -154,7 +156,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - Expected: pass.
 
 #### Phase 4: Per-install plan reading and limits
-**Status:** NOT STARTED
+**Status:** DONE
 **Dependencies:** Phase 2
 
 **Files:**
@@ -164,8 +166,8 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - `SKILL.md`, `README.md` — `usage-<slug>.json` for non-default installs; multi-install detection described
 
 **Implementation:**
-- [ ] Inject the `security` runner so tests can assert which service name was queried.
-- [ ] A missing token or Keychain item gives `plan: unavailable` for that install only.
+- [x] Inject the `security` runner so tests can assert which service name was queried.
+- [x] A missing token or Keychain item gives `plan: unavailable` for that install only.
 
 **Tests required:**
 - `test/usage-client.test.ts` — the default install queries `Claude Code-credentials`; `/tmp/x/.cc-work` queries `Claude Code-credentials-<first 8 of sha256>`; `.credentials.json` wins when present; no cross-install fallback; a fresh reading for A is not served to B.
@@ -176,7 +178,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - Expected: pass.
 
 #### Phase 5: API and dashboard show each install as a provider
-**Status:** NOT STARTED
+**Status:** DONE
 **Dependencies:** Phase 2
 
 **Files:**
@@ -186,8 +188,8 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - `web/src/components/fix-config.tsx` — agent list from the report, not `["claude","codex"]`
 
 **Implementation:**
-- [ ] Empty state: an install with no sessions in range still appears in dropdowns with "No sessions in range".
-- [ ] Error state: an install with an unavailable plan reading shows the existing "usage unavailable" treatment, not 0%.
+- [x] Empty state: an install with no sessions in range still appears in dropdowns with "No sessions in range".
+- [x] Error state: an install with an unavailable plan reading shows the existing "usage unavailable" treatment, not 0%.
 
 **Tests required:**
 - `web/src/app.test.tsx` — two Claude providers render in the dropdowns and the weekly chart with distinct labels; pin survives reload.
@@ -198,7 +200,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - Expected: pass.
 
 #### Phase 6: Setup, fix-config and advice per install
-**Status:** NOT STARTED
+**Status:** DONE
 **Dependencies:** Phase 2
 
 **Files:**
@@ -208,7 +210,7 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - `src/services/processes.ts` — unchanged attribution (see Open Questions); headless counts stay on the default install
 
 **Implementation:**
-- [ ] `setup` prints each install it will change and applies to all of them; `--rollback` restores per install.
+- [x] `setup` prints each install it will change and applies to all of them; `--rollback` restores per install.
 
 **Tests required:**
 - `test/setup.test.ts` — two installs both receive hooks/skill; rollback restores both, including each `.claude.json`.
@@ -219,17 +221,27 @@ providers: { id: string; kind: Source; label: string; dir?: string }[];
 - Expected: typecheck and all tests pass; smoke passes.
 
 ## Acceptance Criteria
-- [ ] AC-1 [local]: a plain run with no env discovers every Claude Code install via the four signals, independent of dir name — proof: `npx vitest run test/claude-installs.test.ts`.
-- [ ] AC-2 [local]: with only `~/.claude`, report, cache, `limits.json`, `usage.json` and API output match the Phase 1 baseline apart from the additive `providers` field — proof: Phase 1 snapshot test.
-- [ ] AC-3 [local]: alternating and concurrent runs never evict or show another install's sessions — proof: Phase 3 tests.
-- [ ] AC-4 [local]: each install's plan reading uses its own credentials, and an unresolvable install shows "unavailable" rather than another account's data — proof: `npx vitest run test/usage-client.test.ts`.
-- [ ] AC-5 [local]: the dashboard shows each install as its own provider, with loading, empty and unavailable states — proof: `npx vitest run web/src/app.test.tsx`.
-- [ ] AC-6 [local]: setup, fix-config, rollback and advice text target the right install's files — proof: `npx vitest run test/setup.test.ts`.
-- [ ] AC-7 [local]: scan time with two installs stays within the PRD-009 under-10-second budget — proof: `node scripts/bench-scan.mjs run --mode warm --runs 1 --timeout 240` (PRD-009 snapshot flow).
-- [ ] AC-8 [local]: `npm run check` and `npm run smoke` pass; README and SKILL.md describe multi-install detection and `usage-<slug>.json`.
+- [x] AC-1 [local]: a plain run with no env discovers every Claude Code install via the four signals, independent of dir name — proof: `npx vitest run test/claude-installs.test.ts`.
+- [x] AC-2 [local]: with only `~/.claude`, report, cache, `limits.json`, `usage.json` and API output match the Phase 1 baseline apart from the additive `providers` field — proof: Phase 1 snapshot test.
+- [x] AC-3 [local]: alternating and concurrent runs never evict or show another install's sessions — proof: Phase 3 tests.
+- [x] AC-4 [local]: each install's plan reading uses its own credentials, and an unresolvable install shows "unavailable" rather than another account's data — proof: `npx vitest run test/usage-client.test.ts`.
+- [x] AC-5 [local]: the dashboard shows each install as its own provider, with loading, empty and unavailable states — proof: `npx vitest run web/src/app.test.tsx`.
+- [x] AC-6 [local]: setup, fix-config, rollback and advice text target the right install's files — proof: `npx vitest run test/setup.test.ts`.
+- [x] AC-7 [local]: scan time with two installs stays within the PRD-009 under-10-second budget — proof: `node scripts/bench-scan.mjs run --mode warm --runs 1 --timeout 240` (PRD-009 snapshot flow).
+- [x] AC-8 [local]: `npm run check` and `npm run smoke` pass; README and SKILL.md describe multi-install detection and `usage-<slug>.json`.
 
 ## Open Questions
 - **Explicit override for undiscoverable installs** (e.g. a dir set only inside a wrapper script outside the shell rc files). Options: a `TOKEN_FURNACE_CLAUDE_DIRS` env list, or nothing. Default if unanswered: nothing until someone hits it.
 - **Headless `claude -p` attribution.** Reading each process's `CLAUDE_CONFIG_DIR` needs `ps -E` / `/proc/<pid>/environ`, which exposes every env var, tokens included. Default: keep counting them under the default install and say so in the tooltip.
 - **Keychain items with no matching dir** (a login whose config dir was not found). Listing them needs `security dump-keychain`. Default: not detected.
 - **Linux/Windows token store** for custom installs: assumed to be `<dir>/.credentials.json` (already read first). Unverified on those platforms.
+
+## Local verification — 2026-10-30
+
+- The single-install characterization snapshot was recorded before production changes and remains unchanged. The final suite verifies it.
+- `npm run build`: passed. With `CLAUDE_CONFIG_DIR` unset, `--list-sources` found both real Claude installs (290 and 168 transcripts) and Codex (1,198 transcripts).
+- `npm run check`: type checking passed; 32 test files passed, 357 tests passed, one existing test skipped. Coverage includes concurrent suffix reservation, A/A+B/A cache reuse, exact HOME expansion and quoted aliases, injected Keychain service selection, independent limits, 100% readings, dashboard loading/empty/unavailable states, and setup/fix/rollback after discovery changes.
+- `npm run smoke`: all package, installed CLI, HTML, and server checks passed.
+- PRD-009 snapshot flow: froze 1,656 actual transcripts totaling 6,090,509,442 bytes from two Claude installs and Codex. The manifest contains 1,658 files including two empty config markers. Credentials and secret configuration were excluded.
+- `node scripts/bench-scan.mjs run --base <private snapshot directory> --mode warm --runs 1 --timeout 240`: 0.795 seconds, exit 0, valid report, matching frozen report oracle. This verifies the warm scan budget on this machine; it does not measure cold scans or other hardware.
+- No live Keychain access or usage API request was needed for verification. Credential tests use temporary homes and an injected runner. Windows and Linux custom token stores remain unverified.

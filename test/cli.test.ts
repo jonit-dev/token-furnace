@@ -230,8 +230,8 @@ describe("--list-sources", () => {
   it("names each agent, its path and its transcript count", async () => {
     const run1 = await run(["--list-sources"], leaksRoot);
     expect(run1.code).toBe(0);
-    expect(run1.out).toMatch(/^ {2}claude\s+\S*projects\s+3 transcripts$/m);
-    expect(run1.out).toMatch(/^ {2}codex\s+\S*codex[\\/]sessions\s+1 transcripts$/m);
+    expect(run1.out).toMatch(/^ {2}claude\s+Claude Code\s+\S*projects\s+3 transcripts$/m);
+    expect(run1.out).toMatch(/^ {2}codex\s+Codex\s+\S*codex[\\/]sessions\s+1 transcripts$/m);
     const missing = await run(["--list-sources"], emptyRoot);
     expect(missing.out).toContain("not installed");
   });

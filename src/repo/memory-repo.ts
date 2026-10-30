@@ -1,4 +1,4 @@
-import type { SessionInput, SourceFile } from "../core/model";
+import type { ProviderId, SessionInput, SourceFile } from "../core/model";
 import type { SessionRepository } from "./session-repo";
 import { activityTurns } from "../core/analyze/agent-activity";
 
@@ -9,16 +9,19 @@ import { activityTurns } from "../core/analyze/agent-activity";
 export class MemorySessionRepository implements SessionRepository {
   private readonly sessions = new Map<string, { session: SessionInput; size: number }>();
 
-  changed(files: SourceFile[]): SourceFile[] {
+  changed(files: SourceFile[], sources?: ProviderId[]): SourceFile[] {
     const seen = new Set<string>();
     const out: SourceFile[] = [];
     for (const file of files) {
       seen.add(file.path);
       const held = this.sessions.get(file.path);
-      if (held && held.session.mtimeMs === file.mtimeMs && held.size === file.size) continue;
+      if (held && (!file.source || held.session.source === file.source) && held.session.mtimeMs === file.mtimeMs && held.size === file.size) continue;
       out.push(file);
     }
-    for (const path of [...this.sessions.keys()]) if (!seen.has(path)) this.sessions.delete(path);
+    const scoped = sources && new Set(sources);
+    for (const [path, held] of this.sessions) {
+      if (!seen.has(path) && (!scoped || scoped.has(held.session.source))) this.sessions.delete(path);
+    }
     return out;
   }
 

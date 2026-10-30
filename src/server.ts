@@ -12,10 +12,10 @@ import { reportView } from "./core/analyze/view";
 import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
-import type { Source, Week } from "./core/model";
+import type { ProviderId, RawReport, Week } from "./core/model";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { pendingRepairs, runFixConfig } from "./setup/agents";
-import { openCodeWeek, planWeek } from "./services/usage-client";
+import { claudePlanWeeks, openCodeWeek, planWeek } from "./services/usage-client";
 import { resetsSnapshot } from "./services/resets-client";
 import {
   deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
@@ -24,7 +24,7 @@ import {
 
 export interface ServeOptions {
   days: number;
-  source: Source | "all";
+  source: ProviderId | "all";
   /** Millions of weighted tokens, or null. */
   weeklyBudget: number | null;
   planUsage: boolean;
@@ -103,20 +103,20 @@ export async function notifyTick(app: App, planUsage = true, weeklyBudget: numbe
   const settings = loadSettings(app.env);
   if (!settings.enabled) return { alerts: [], delivered: [] };
   const snapshot = await resetsSnapshot(now);
-  const [plan, open] = await Promise.all([
-    planWeek(app.env, now, planUsage),
+  const [planWeeks, open] = await Promise.all([
+    claudePlanWeeks(app.env, app.sources.flatMap((source) => source.install ? [source.install] : []), now, planUsage),
     openCodeWeek(app.env, now, planUsage),
   ]);
   const codex = app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
   const usage: Record<string, number | null> = {
-    claude: plan?.used ?? null,
+    ...Object.fromEntries(Object.entries(planWeeks).map(([source, week]) => [source, week?.used ?? null])),
     codex: codex?.used ?? null,
     opencode: open?.used ?? null,
   };
   let report = null;
   if (settings.conditions.sessionSpike) {
     await app.reports.refresh();
-    report = app.reports.getReport(7, "all", { now, weeklyBudget, planWeek: plan, opencodeWeek: open });
+    report = app.reports.getReport(7, "all", { now, weeklyBudget, planWeeks, opencodeWeek: open });
   }
   return runAlerts(app.env, { now, feed: snapshot.feed, fresh: !snapshot.stale, usage, settings, report });
 }
@@ -152,18 +152,32 @@ function sameOrigin(req: Request): boolean {
 function reportController(app: App, options: ServeOptions, page: string) {
   // The last quota reading this server saw. It lives in memory, so a no-cache server still shows
   // real utilization without a disk write, and it expires when its week resets.
-  let quota: Week | null = null;
+  const quota = new Map<ProviderId, Week>();
   let fetching: Promise<void> | null = null;
 
   /** The reading for this request: the snapshot while its week runs, else the saved file. No network. */
-  const plan = (now: Date): Promise<Week | null> =>
-    quota && quota.resets > now ? Promise.resolve(quota) : planWeek(app.env, now, false);
+  const plans = async (now: Date): Promise<Partial<Record<ProviderId, Week | null>>> => {
+    const installs = app.sources.flatMap((source) => source.install ? [source.install] : []);
+    const values = await Promise.all(installs.map(async (install) => {
+      const saved = quota.get(install.id);
+      const week = saved && saved.resets > now ? saved : await planWeek(app.env, now, false, install);
+      return [install.id, week] as const;
+    }));
+    return Object.fromEntries(values);
+  };
 
   /** Refresh after the response. One call at a time; the client's own gate stops a second call. */
   const refresh = (): void => {
-    fetching ??= Promise.all([planWeek(app.env, app.now(), true), openCodeWeek(app.env, app.now(), true)])
-      .then(([week]) => {
-        if (week && week.resets > app.now()) quota = week;
+    const now = app.now();
+    const installs = app.sources.flatMap((source) => source.install ? [source.install] : []);
+    fetching ??= Promise.all([
+      claudePlanWeeks(app.env, installs, now, true),
+      openCodeWeek(app.env, now, true),
+    ])
+      .then(([weeks]) => {
+        for (const [id, week] of Object.entries(weeks)) {
+          if (week && week.resets > app.now()) quota.set(id, week);
+        }
       })
       .catch(() => {}) // a failed call keeps the reading
       .finally(() => {
@@ -172,20 +186,21 @@ function reportController(app: App, options: ServeOptions, page: string) {
   };
 
   /** One report per request, from the transcripts as they are now. The network refresh runs after. */
-  async function build(query: Record<string, unknown>) {
+  async function build(query: Record<string, unknown>): Promise<{ report: RawReport | null; invalid: boolean }> {
     const now = app.now();
     const days = positiveInt(query.days, options.days);
-    const source = query.source === "claude" || query.source === "codex" || query.source === "opencode" ? query.source : options.source;
+    const source = typeof query.source === "string" ? query.source : options.source;
+    if (source !== "all" && !app.sources.some((agent) => agent.name === source)) return { report: null, invalid: true };
     rescan(app); // the answer is the report we have now; the next poll sees the new scan
     const report = app.reports.getRaw(days, source, {
       weeklyBudget: options.weeklyBudget,
-      planWeek: await plan(now),
+      planWeeks: await plans(now),
       opencodeWeek: await openCodeWeek(app.env, now, false),
       headless: options.processes ? await headlessAgents() : undefined,
       now,
     });
     if (options.planUsage) setImmediate(refresh); // after this response: the keychain read must not block it
-    return report;
+    return { report, invalid: false };
   }
 
   @Controller()
@@ -229,8 +244,9 @@ function reportController(app: App, options: ServeOptions, page: string) {
         warm(app);
         return res.status(202).json({ status: "scanning", progress: app.reports.progress });
       }
-      const report = await build(req.query);
-      return res.type("application/json").send(JSON.stringify(report ? reportView(report, app.now()) : null));
+      const built = await build(req.query);
+      if (built.invalid) return res.status(400).json({ error: "Unknown provider source." });
+      return res.type("application/json").send(JSON.stringify(built.report ? reportView(built.report, app.now()) : null));
     }
 
     @Get("/api/resets")
@@ -282,8 +298,9 @@ function reportController(app: App, options: ServeOptions, page: string) {
         warm(app);
         return res.type("text/html").send(loadingPage()); // the first scan takes minutes: show progress
       }
-      const report = await build(req.query);
-      return res.type("text/html").send(report ? renderHtml(report, app.now(), page) : "No assistant turns.");
+      const built = await build(req.query);
+      if (built.invalid) return res.status(400).type("text/plain").send("Unknown provider source.\n");
+      return res.type("text/html").send(built.report ? renderHtml(built.report, app.now(), page) : "No assistant turns.");
     }
   }
   return ReportController;
