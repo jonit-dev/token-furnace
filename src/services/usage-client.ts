@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -198,41 +198,24 @@ export function openCodeWeek(env: Env, now: Date, network: boolean): Promise<Wee
 }
 
 /**
- * The Google AI plan's weekly meter, as agy reads it: the most-used weekly bucket of
- * retrieveUserQuotaSummary. The token is the one agy keeps in the system keyring; an expired token
- * means no call (agy refreshes it on its next run). It goes to cloudcode-pa.googleapis.com only.
+ * The Google AI plan's weekly meter: the most-used weekly group (Gemini, or Claude and GPT) that
+ * agy's own `/usage` prints. It needs no model call; agy uses its own login, so no token leaves it.
  */
 export function agyWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
   const base = new AgySource(env).base();
   return meterWeek(env, now, network, "agy-usage.json", base, () => {
-    if (!existsSync(base)) return null; // no agy here: its keyring login is not ours to use
-    const login = jsonAuth(agyKeyring());
-    const token = login?.token?.access_token;
-    if (typeof token !== "string" || !token || !(new Date(login.token.expiry) > now)) return null;
-    return (async () => {
-      const response = await fetch("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", {
-        method: "POST", body: "{}",
-        // The endpoint answers only clients that name themselves as Antigravity.
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "antigravity/token-furnace" },
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) return null;
-      const body = (await response.json()) as Record<string, any>;
-      const weekly = (Array.isArray(body?.groups) ? body.groups : []).flatMap((g: any) => g?.buckets ?? [])
-        .filter((b: any) => b?.window === "weekly" && typeof b.remainingFraction === "number" && typeof b.resetTime === "string")
-        .sort((a: any, b: any) => a.remainingFraction - b.remainingFraction)[0];
-      return weekly ? { utilization: Math.max(0, (1 - weekly.remainingFraction) * 100), resets_at: weekly.resetTime } : null;
-    })();
+    if (!existsSync(base)) return null; // no agy here
+    return new Promise((done) => execFile("agy", ["-p", "/usage", "--print-timeout", "30s"], { timeout: 45_000 },
+      (error, out) => done(error ? null : agyUsage(String(out)))));
   });
 }
 
-/** agy's login JSON from the Linux secret service or the macOS Keychain (service gemini, account antigravity). */
-function agyKeyring(): string | null {
-  for (const [cmd, args] of [["secret-tool", ["lookup", "service", "gemini", "username", "antigravity"]],
-    ["security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]]] as const) {
-    try { return execFileSync(cmd, args, { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }); } catch { /* next store */ }
-  }
-  return null;
+/** `/usage` rows are tab-separated: group, limit name, percent remaining, reset time. */
+export function agyUsage(text: string): MeterData | null {
+  return text.split("\n").map((line) => line.split("\t"))
+    .filter((c) => c.length >= 4 && /weekly/i.test(c[1]) && /^\d+(\.\d+)?%$/.test(c[2].trim()))
+    .map((c) => ({ utilization: 100 - parseFloat(c[2]), resets_at: c[3].trim() }))
+    .sort((a, b) => b.utilization - a.utilization)[0] ?? null;
 }
 
 /** The saved meter. A file from before history existed still holds one reading: the last fetch. */

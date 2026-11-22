@@ -101,10 +101,9 @@ No OpenCode configuration is changed by Auto Fixes.
 The Antigravity CLI keeps one SQLite file per conversation in `~/.gemini/antigravity-cli/conversations`
 (set `AGY_HOME` to override `~/.gemini/antigravity-cli`). Each model call is one turn; files are opened read-only.
 
-The Google AI plan (Pro or Ultra) meter comes from `retrieveUserQuotaSummary` on `cloudcode-pa.googleapis.com`,
-with the login agy keeps in the system keyring (`secret-tool` on Linux, Keychain on macOS). An expired login
-makes no call; agy refreshes it on its next run. Google meters only its Claude and GPT model group weekly,
-so only those turns calibrate the weekly quota. Gemini models have per-model 5-hour limits, which are not displayed.
+The Google AI plan (Pro or Ultra) meter comes from agy's own `/usage` (`agy -p /usage`, no model call),
+at most once every 5 minutes. The weekly quota shows the most-used weekly group (Gemini models, or Claude and GPT models).
+The 5-hour limits are not displayed.
 
 ## Context targets
 
@@ -156,7 +155,7 @@ injects an escalation prompt at the 4th, 7th, and 10th edit.
 - Transcript data stays on this machine. The tool sends no telemetry.
 - The local cache stores metadata only: session titles, token counts, timestamps, models, tool
   names, and file paths. It never stores message text.
-- Plan usage can contact Anthropic with a local Claude Code login, the OpenCode Go usage endpoint with a local Go key, or Google with agy's keyring login. Keys go only to their own provider; `--no-plan-usage` disables network calls.
+- Plan usage can contact Anthropic with a local Claude Code login, the OpenCode Go usage endpoint with a local Go key, or run `agy -p /usage` (agy contacts Google with its own login). Keys go only to their own provider; `--no-plan-usage` disables network calls.
 - The server binds to `127.0.0.1` only. It rejects a `Host` header that is not loopback.
 
 ## Cache

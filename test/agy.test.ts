@@ -4,16 +4,19 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 
-const keyring = vi.hoisted(() => ({ value: "" }));
+const usage = vi.hoisted(() => ({ out: null as string | null, calls: 0 }));
 vi.mock("node:child_process", async (load) => ({
   ...(await load<typeof import("node:child_process")>()),
-  execFileSync: (cmd: string) => { if (cmd === "secret-tool" && keyring.value) return keyring.value; throw new Error("no keyring"); },
+  execFile: (_cmd: string, _args: string[], _opts: object, done: (error: Error | null, out: string) => void) => {
+    usage.calls++;
+    setImmediate(() => usage.out === null ? done(new Error("agy failed"), "") : done(null, usage.out));
+  },
 }));
 
 import { compose } from "../src/compose";
 import { SqliteSessionRepository } from "../src/repo/sqlite-repo";
 import { AgySource } from "../src/sources/agy";
-import { agyWeek } from "../src/services/usage-client";
+import { agyUsage, agyWeek } from "../src/services/usage-client";
 
 /** Protobuf wire encoding: enough to write agy's rows. */
 const varint = (n: number): number[] => { const out: number[] = []; while (n >= 128) { out.push((n % 128) | 128); n = Math.floor(n / 128); } out.push(n); return out; };
@@ -51,7 +54,7 @@ function fixture() {
   const env = { HOME: root, AGY_HOME: base, XDG_CACHE_HOME: root, TOKEN_FURNACE_NOW: now.toISOString(), TOKEN_FURNACE_WORKERS: "0" };
   return { env, id, source: new AgySource(env) };
 }
-afterEach(() => { keyring.value = ""; vi.unstubAllGlobals(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { usage.out = null; usage.calls = 0; for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 it("reads one turn per model call with usage, tools, reads, prompt wakes, title and project", () => {
   const { id, source } = fixture();
@@ -65,32 +68,38 @@ it("reads one turn per model call with usage, tools, reads, prompt wakes, title 
   expect(parsed.turns[1]).toMatchObject({ model: "claude-opus-5-5-high", tools: ["edit_file"], reads: 0, wakes: [] });
 });
 
-it("reads the Google plan's weekly meter with agy's keyring login and counts only its metered models", async () => {
+/** agy 1.5.14 `/usage` output, verbatim apart from the dates. */
+const USAGE = (resets: string) => [
+  `Gemini Models\tWeekly Limit Remaining\t76%\t${resets}`,
+  `Gemini Models\tFive Hour Limit Remaining\t2%\t${resets}`,
+  `Claude and GPT models\tWeekly Limit Remaining\t100%\t${resets}`,
+  "",
+].join("\n");
+
+it("reads the most-used weekly group from agy /usage, never a 5-hour limit", () => {
+  expect(agyUsage(USAGE("2026-11-28T16:13:10Z"))).toEqual({ utilization: 24, resets_at: "2026-11-28T16:13:10Z" });
+  expect(agyUsage("Usage of agy:\n  --add-dir")).toBeNull();
+});
+
+it("shows the Google plan meter in the agy weekly quota", async () => {
   const { env } = fixture();
   const resets = new Date(+now + 3 * 86_400_000).toISOString();
-  keyring.value = JSON.stringify({ token: { access_token: "tok", expiry: new Date(+now + 3_600_000).toISOString() } });
-  const fetch = vi.fn(async () => new Response(JSON.stringify({ groups: [{ buckets: [
-    { window: "5h", remainingFraction: 0.1, resetTime: resets },
-    { window: "weekly", remainingFraction: 0.75, resetTime: resets },
-  ] }] })));
-  vi.stubGlobal("fetch", fetch);
+  usage.out = USAGE(resets);
   const week = await agyWeek(env, now, true);
-  expect(fetch).toHaveBeenCalledOnce();
-  expect(fetch.mock.calls[0]).toMatchObject([expect.stringContaining("retrieveUserQuotaSummary"), { headers: { Authorization: "Bearer tok" } }]);
-  expect(week).toMatchObject({ used: 25, resets: new Date(resets) });
+  expect(usage.calls).toBe(1);
+  expect(week).toMatchObject({ used: 24, resets: new Date(resets) });
 
   const app = compose(env);
   await app.reports.refresh();
   const raw = app.reports.getRaw(7, "agy", { weeklyBudget: null, now, agyWeek: week });
-  expect(raw?.burns.agy?.week?.used).toBe(25);
-  expect(raw?.burns.agy?.week?.burndown.at(-1)?.[1]).toBe(25);
+  expect(raw?.burns.agy?.week?.used).toBe(24);
   (app.repo as SqliteSessionRepository).close();
 });
 
-it("makes no call when agy's login has expired", async () => {
+it("keeps no reading when agy fails, and runs nothing without an agy install", async () => {
   const { env } = fixture();
-  keyring.value = JSON.stringify({ token: { access_token: "tok", expiry: new Date(+now - 1).toISOString() } });
-  const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
   expect(await agyWeek(env, now, true)).toBeNull();
-  expect(fetch).not.toHaveBeenCalled();
+  expect(usage.calls).toBe(1);
+  expect(await agyWeek({ ...env, AGY_HOME: join(env.HOME, "missing") }, now, true)).toBeNull();
+  expect(usage.calls).toBe(1);
 });
