@@ -23,4 +23,11 @@ export const PROVIDERS = {
     parserVersion: 5,
     compaction: `model_auto_compact_token_limit = ${CONTEXT_TARGET.codex} in ~/.codex/config.toml`,
   },
+  agy: {
+    label: "Antigravity",
+    rules: "AGENTS.md",
+    cacheWrites: false,
+    parserVersion: 1,
+    compaction: "Use /compact in agy to start a smaller context.",
+  },
 } as const;

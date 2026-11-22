@@ -10,6 +10,7 @@ const PROVIDERS: { value: PublicSettings["conditions"]["usage"]["provider"]; lab
   { value: "claude", label: "Claude" },
   { value: "codex", label: "Codex" },
   { value: "opencode", label: "OpenCode Go" },
+  { value: "agy", label: "Google AI (Antigravity)" },
 ];
 
 /** Where the alerts go and when they fire. Credentials are stored on the machine, never here. */

@@ -14,6 +14,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Report, Source } from "../core/model";
+import { PROVIDERS } from "../core/providers";
 import { isSessionSpike } from "../core/analyze/burn";
 import { eventKey, type ResetsFeed, type ResetEvent } from "./resets-client";
 import { usageCachePath } from "./usage-client";
@@ -189,7 +190,7 @@ const secret = (value: unknown, fallback: string): string =>
   typeof value === "string" && value !== "" ? value.trim() : fallback;
 
 const provider = (value: unknown, fallback: Source | "any"): Source | "any" =>
-  value === "claude" || value === "codex" || value === "opencode" || value === "any" ? value : fallback;
+  value === "any" || (typeof value === "string" && value in PROVIDERS) ? value as Source | "any" : fallback;
 
 const object = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -315,7 +316,7 @@ function readState(env: Env): NotifyState {
   // Legacy single boolean (or missing) means every provider starts armed.
   if (typeof saved.usageArmed === "boolean" || saved.usageArmed === undefined) {
     if (saved.usageArmed !== false) state.usageArmed = {};
-    else state.usageArmed = { claude: false, codex: false, opencode: false };
+    else state.usageArmed = Object.fromEntries(Object.keys(PROVIDERS).map((s) => [s, false]));
   } else {
     const arms = object(saved.usageArmed);
     for (const [key, value] of Object.entries(arms ?? {})) {
@@ -442,7 +443,7 @@ export async function runAlerts(env: Env, input: AlertInput): Promise<{ alerts: 
   const threshold = settings.conditions.usage.percent;
   const wanted = settings.conditions.usage.provider;
   if (settings.conditions.usage.enabled) {
-    for (const source of ["claude", "codex", "opencode"] as Source[]) {
+    for (const source of Object.keys(PROVIDERS) as Source[]) {
       if (wanted !== "any" && wanted !== source) continue;
       const used = input.usage[source];
       if (typeof used !== "number" || !Number.isFinite(used)) continue;

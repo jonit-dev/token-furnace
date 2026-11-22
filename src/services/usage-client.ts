@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { AgySource } from "../sources/agy";
 import { OpenCodeSource } from "../sources/opencode";
 import type { Week } from "../core/model";
 import type { Env } from "../sources/agent-source";
@@ -119,55 +120,41 @@ function writeJson(path: string, value: unknown): void {
   }
 }
 
-type GoReading = { fetched: number; lastTry: number; data: Record<string, any> | null; history: [number, number][] };
-const goReadings = new Map<string, GoReading>();
+type MeterReading = { fetched: number; lastTry: number; data: Record<string, any> | null; history: [number, number][] };
+type MeterData = { utilization: number; resets_at: string };
+const meterReadings = new Map<string, MeterReading>();
 /** A week of 5-minute readings is about 2,000; the cap only guards a runaway file. */
 const HISTORY_CAP = 4096;
 
-/** Go supplies its actual weekly meter; local token totals only calibrate the burn estimate. */
-export async function openCodeWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
-  const source = new OpenCodeSource(env);
-  const path = join(dirname(usageCachePath(env)), "opencode-usage.json");
-  const key = source.base();
+/**
+ * A plan that reports its own weekly meter (OpenCode Go, Google AI via agy). The reading and its
+ * history live in `file` next to usage.json, keyed by `key` (the agent's data dir). `call` returns
+ * null when there is no login (no network call), else a promise of the meter or null on failure.
+ */
+async function meterWeek(env: Env, now: Date, network: boolean, file: string, key: string,
+  call: () => Promise<MeterData | null> | null): Promise<Week | null> {
+  const path = join(dirname(usageCachePath(env)), file);
   const saved = readJson(path);
   const mine = saved?.source === key;
-  const reading: GoReading = goReadings.get(key) ?? { fetched: saved?.fetched ?? 0, lastTry: 0,
+  const reading: MeterReading = meterReadings.get(path + key) ?? { fetched: saved?.fetched ?? 0, lastTry: 0,
     data: mine ? saved?.seven_day ?? null : null, history: mine ? savedHistory(saved) : [] };
   const at = now.getTime() / 1000;
   if (network && (!reading.data || at - reading.fetched >= REUSE_SECONDS) && at - reading.lastTry >= RETRY_SECONDS) {
-    const auth = jsonAuth(source.readFile("auth.json"));
-    // The login OpenCode itself uses (auth.json) owns the sessions we read, so it goes first. The
-    // env key is another possible account: a fallback only, never the one that hides the login.
-    const tokens = [...new Set([auth?.["opencode-go"]?.key, env.OPENCODE_API_KEY])]
-      .filter((t): t is string => typeof t === "string" && t !== "");
-    if (tokens.length) {
+    const pending = call();
+    if (pending) {
       reading.lastTry = at;
-      goReadings.set(key, reading);
-      for (const token of tokens) {
-        try {
-          const response = await fetch("https://opencode.ai/zen/go/v1/usage", {
-            headers: { Authorization: `Bearer ${token}`, "User-Agent": "token-furnace" },
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!response.ok) continue;
-          const body = await response.json() as Record<string, any>;
-          const weekly = body?.usage?.weekly;
-          if (typeof weekly?.percent === "number" && Number.isFinite(weekly.percent) && weekly.percent >= 0) {
-            const data = { utilization: weekly.percent, resets_at: weekly.resetsAt };
-            // Within one week the meter only rises. A lower reading is another account (the env key
-            // fallback) or a glitch, so it must not replace the plan's reading.
-            const same = reading.data?.resets_at === data.resets_at;
-            if (toWeek(data, now) && !(same && weekly.percent < reading.data!.utilization)) {
-              // A new reset is a new week: its meter starts over.
-              if (!same) reading.history = [];
-              reading.history = [...reading.history, [now.getTime(), weekly.percent] as [number, number]].slice(-HISTORY_CAP);
-              reading.data = data; reading.fetched = at;
-              if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0"))
-                writeJson(path, { source: key, fetched: at, seven_day: data, history: reading.history });
-            }
-          }
-          break;
-        } catch { /* Keep the last unexpired reading when offline or rate limited. */ }
+      meterReadings.set(path + key, reading);
+      const data = await pending.catch(() => null); // offline or rate limited: keep the last reading
+      // Within one week the meter only rises. A lower reading is another account (the env key
+      // fallback) or a glitch, so it must not replace the plan's reading.
+      const same = data && reading.data?.resets_at === data.resets_at;
+      if (data && toWeek(data, now) && !(same && data.utilization < reading.data!.utilization)) {
+        // A new reset is a new week: its meter starts over.
+        if (!same) reading.history = [];
+        reading.history = [...reading.history, [now.getTime(), data.utilization] as [number, number]].slice(-HISTORY_CAP);
+        reading.data = data; reading.fetched = at;
+        if (!(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0"))
+          writeJson(path, { source: key, fetched: at, seven_day: data, history: reading.history });
       }
     }
   }
@@ -180,6 +167,72 @@ export async function openCodeWeek(env: Env, now: Date, network: boolean): Promi
   let top = 0;
   const readings = valid.sort((a, b) => a[0] - b[0]).filter(r => r[1] >= top && ((top = r[1]), true));
   return { ...week, readings };
+}
+
+/** Go supplies its actual weekly meter; local token totals only calibrate the burn estimate. */
+export function openCodeWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
+  const source = new OpenCodeSource(env);
+  return meterWeek(env, now, network, "opencode-usage.json", source.base(), () => {
+    const auth = jsonAuth(source.readFile("auth.json"));
+    // The login OpenCode itself uses (auth.json) owns the sessions we read, so it goes first. The
+    // env key is another possible account: a fallback only, never the one that hides the login.
+    const tokens = [...new Set([auth?.["opencode-go"]?.key, env.OPENCODE_API_KEY])]
+      .filter((t): t is string => typeof t === "string" && t !== "");
+    if (!tokens.length) return null;
+    return (async () => {
+      for (const token of tokens) {
+        try {
+          const response = await fetch("https://opencode.ai/zen/go/v1/usage", {
+            headers: { Authorization: `Bearer ${token}`, "User-Agent": "token-furnace" },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!response.ok) continue;
+          const weekly = ((await response.json()) as Record<string, any>)?.usage?.weekly;
+          return typeof weekly?.percent === "number" && Number.isFinite(weekly.percent) && weekly.percent >= 0
+            ? { utilization: weekly.percent, resets_at: weekly.resetsAt } : null;
+        } catch { /* try the next token */ }
+      }
+      return null;
+    })();
+  });
+}
+
+/**
+ * The Google AI plan's weekly meter, as agy reads it: the most-used weekly bucket of
+ * retrieveUserQuotaSummary. The token is the one agy keeps in the system keyring; an expired token
+ * means no call (agy refreshes it on its next run). It goes to cloudcode-pa.googleapis.com only.
+ */
+export function agyWeek(env: Env, now: Date, network: boolean): Promise<Week | null> {
+  const base = new AgySource(env).base();
+  return meterWeek(env, now, network, "agy-usage.json", base, () => {
+    if (!existsSync(base)) return null; // no agy here: its keyring login is not ours to use
+    const login = jsonAuth(agyKeyring());
+    const token = login?.token?.access_token;
+    if (typeof token !== "string" || !token || !(new Date(login.token.expiry) > now)) return null;
+    return (async () => {
+      const response = await fetch("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", {
+        method: "POST", body: "{}",
+        // The endpoint answers only clients that name themselves as Antigravity.
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "antigravity/token-furnace" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) return null;
+      const body = (await response.json()) as Record<string, any>;
+      const weekly = (Array.isArray(body?.groups) ? body.groups : []).flatMap((g: any) => g?.buckets ?? [])
+        .filter((b: any) => b?.window === "weekly" && typeof b.remainingFraction === "number" && typeof b.resetTime === "string")
+        .sort((a: any, b: any) => a.remainingFraction - b.remainingFraction)[0];
+      return weekly ? { utilization: Math.max(0, (1 - weekly.remainingFraction) * 100), resets_at: weekly.resetTime } : null;
+    })();
+  });
+}
+
+/** agy's login JSON from the Linux secret service or the macOS Keychain (service gemini, account antigravity). */
+function agyKeyring(): string | null {
+  for (const [cmd, args] of [["secret-tool", ["lookup", "service", "gemini", "username", "antigravity"]],
+    ["security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]]] as const) {
+    try { return execFileSync(cmd, args, { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }); } catch { /* next store */ }
+  }
+  return null;
 }
 
 /** The saved meter. A file from before history existed still holds one reading: the last fetch. */

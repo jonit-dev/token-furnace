@@ -10,7 +10,7 @@ export interface Headless {
 }
 
 const RUNNERS = new Set(["node", "nodejs", "bun", "deno"]);
-const FLAGS = { claude: ["-p", "--print"], codex: ["exec"], opencode: ["run"] } as const;
+const FLAGS = { claude: ["-p", "--print"], codex: ["exec"], opencode: ["run"], agy: ["-p", "--print", "--prompt"] } as const;
 
 function tokens(line: string): string[] {
   return [...line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);

@@ -13,9 +13,10 @@ import { loadPage, renderHtml } from "./render/html";
 import { loadingPage } from "./render/loading";
 import type { App } from "./compose";
 import type { Source, Week } from "./core/model";
+import { PROVIDERS } from "./core/providers";
 import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { pendingRepairs, runFixConfig } from "./setup/agents";
-import { openCodeWeek, planWeek } from "./services/usage-client";
+import { agyWeek, openCodeWeek, planWeek } from "./services/usage-client";
 import { resetsSnapshot } from "./services/resets-client";
 import {
   deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
@@ -103,20 +104,22 @@ export async function notifyTick(app: App, planUsage = true, weeklyBudget: numbe
   const settings = loadSettings(app.env);
   if (!settings.enabled) return { alerts: [], delivered: [] };
   const snapshot = await resetsSnapshot(now);
-  const [plan, open] = await Promise.all([
+  const [plan, open, agy] = await Promise.all([
     planWeek(app.env, now, planUsage),
     openCodeWeek(app.env, now, planUsage),
+    agyWeek(app.env, now, planUsage),
   ]);
   const codex = app.sources.find((source) => source.name === "codex")?.week?.(now) ?? null;
   const usage: Record<string, number | null> = {
     claude: plan?.used ?? null,
     codex: codex?.used ?? null,
     opencode: open?.used ?? null,
+    agy: agy?.used ?? null,
   };
   let report = null;
   if (settings.conditions.sessionSpike) {
     await app.reports.refresh();
-    report = app.reports.getReport(7, "all", { now, weeklyBudget, planWeek: plan, opencodeWeek: open });
+    report = app.reports.getReport(7, "all", { now, weeklyBudget, planWeek: plan, opencodeWeek: open, agyWeek: agy });
   }
   return runAlerts(app.env, { now, feed: snapshot.feed, fresh: !snapshot.stale, usage, settings, report });
 }
@@ -161,7 +164,7 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   /** Refresh after the response. One call at a time; the client's own gate stops a second call. */
   const refresh = (): void => {
-    fetching ??= Promise.all([planWeek(app.env, app.now(), true), openCodeWeek(app.env, app.now(), true)])
+    fetching ??= Promise.all([planWeek(app.env, app.now(), true), openCodeWeek(app.env, app.now(), true), agyWeek(app.env, app.now(), true)])
       .then(([week]) => {
         if (week && week.resets > app.now()) quota = week;
       })
@@ -175,12 +178,13 @@ function reportController(app: App, options: ServeOptions, page: string) {
   async function build(query: Record<string, unknown>) {
     const now = app.now();
     const days = positiveInt(query.days, options.days);
-    const source = query.source === "claude" || query.source === "codex" || query.source === "opencode" ? query.source : options.source;
+    const source = typeof query.source === "string" && query.source in PROVIDERS ? query.source as Source : options.source;
     rescan(app); // the answer is the report we have now; the next poll sees the new scan
     const report = app.reports.getRaw(days, source, {
       weeklyBudget: options.weeklyBudget,
       planWeek: await plan(now),
       opencodeWeek: await openCodeWeek(app.env, now, false),
+      agyWeek: await agyWeek(app.env, now, false),
       headless: options.processes ? await headlessAgents() : undefined,
       now,
     });

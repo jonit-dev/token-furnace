@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { Source } from "../../src/core/model";
+import { PROVIDERS } from "../../src/core/providers";
 
 export type Tab = "dashboard" | "checkup" | "sessions" | "tips" | "resets" | "notifications";
 
@@ -86,7 +87,7 @@ export const useUi = create<UiState>()(persist((set) => ({
   merge: (saved, current) => {
     const state = saved as { pins?: UiState["pins"]; doneTips?: unknown; sessionNames?: unknown } | undefined;
     const pins = state?.pins;
-    const valid = (value: unknown): value is Source => value === "claude" || value === "codex" || value === "opencode";
+    const valid = (value: unknown): value is Source => typeof value === "string" && value in PROVIDERS;
     const source = valid(pins?.source) ? pins.source : undefined;
     const hourlySource = valid(pins?.hourlySource) || pins?.hourlySource === "all" ? pins.hourlySource : undefined;
     const doneTips = Array.isArray(state?.doneTips)

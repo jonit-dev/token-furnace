@@ -41,6 +41,7 @@ export function harnessEnv(root: string, now: Date): NodeJS.ProcessEnv {
     CODEX_HOME: join(root, "codex"),
     OPENCODE_DATA_DIR: join(root, "opencode"),
     OPENCODE_API_KEY: undefined,
+    AGY_HOME: join(root, "agy"),
     XDG_CACHE_HOME: root,
     TF_PARITY_NOW: now.toISOString(),
   };

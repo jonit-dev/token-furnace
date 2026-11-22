@@ -71,7 +71,7 @@ export interface Week {
   resets: Date;
   /** Percent of the weekly limit already spent. */
   used: number;
-  /** The plan's own meter over this week, oldest first: [epoch ms, percent]. Only OpenCode keeps one. */
+  /** The plan's own meter over this week, oldest first: [epoch ms, percent]. Only OpenCode and agy keep one. */
   readings?: [number, number][];
 }
 
@@ -127,6 +127,7 @@ export interface ReportInput {
   planWeek: Week | null;
   codexWeek: Week | null;
   opencodeWeek?: Week | null;
+  agyWeek?: Week | null;
   /** Last calibrated plan size in weighted tokens, per source: sizes a week with no local spend yet. */
   limits?: Partial<Record<Source, number>>;
 }

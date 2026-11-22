@@ -111,7 +111,7 @@ export function Leaks({ issues, hours }: { issues: Report["issues"]; hours: numb
 export function Checks({ rows, hours, days }: { rows: Report["baseline"]; hours: number; days: number }) {
   if (!rows.length) return null;
   // Evaluate per provider: group each agent's rows together, worst level first.
-  const srcOrder: Record<string, number> = { claude: 0, codex: 1, opencode: 2, all: 3 };
+  const srcOrder: Record<string, number> = { claude: 0, codex: 1, opencode: 2, agy: 3, all: 4 };
   const sorted = [...rows].sort(
     (a, b) =>
       (srcOrder[a.source] ?? 3) - (srcOrder[b.source] ?? 3) ||

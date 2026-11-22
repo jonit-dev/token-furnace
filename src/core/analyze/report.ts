@@ -71,7 +71,7 @@ export function buildReport(input: ReportInput): RawReport | null {
   const sessions24 = new Map<string, [number, number, number, number]>();
   const signals24 = new Map<string, [number, WakeCounts]>();
   const per = new Map<Source, PerSource>();
-  const weeks: Record<Source, Week | null> = { claude: input.planWeek, codex: input.codexWeek, opencode: input.opencodeWeek ?? null };
+  const weeks: Record<Source, Week | null> = { claude: input.planWeek, codex: input.codexWeek, opencode: input.opencodeWeek ?? null, agy: input.agyWeek ?? null };
   const weekNow = new Map<Source, number>();
 
   let total = 0;
@@ -143,7 +143,10 @@ export function buildReport(input: ReportInput): RawReport | null {
           bumpMap(lastHour, source, weighted);
           hourCost += weighted;
         }
-        const quotaEligible = source !== "opencode" || item.model.startsWith("opencode-go/");
+        // Only the plan's metered models move its meter: OpenCode Go models, and agy's Claude and GPT
+        // group (Google meters Gemini models per 5 hours only, with no weekly limit).
+        const quotaEligible = source === "opencode" ? item.model.startsWith("opencode-go/")
+          : source === "agy" ? /^(claude|gpt)/.test(item.model) : true;
         if (quotaEligible) {
           if (item.when >= hour1Cut) bumpMap(quotaHour, source, weighted);
           for (const [h, cut] of gainCuts) if (item.when >= cut) bumpGain(recent, source, h, weighted);

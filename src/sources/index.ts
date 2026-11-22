@@ -1,4 +1,5 @@
 import { OpenCodeSource } from "./opencode";
+import { AgySource } from "./agy";
 import { ClaudeSource } from "./claude";
 import { CodexSource } from "./codex";
 import type { AgentSource, Env } from "./agent-source";
@@ -10,6 +11,7 @@ export function createSources(env: Env): AgentSource[] {
     claude: new ClaudeSource(env),
     codex: new CodexSource(env),
     opencode: new OpenCodeSource(env),
+    agy: new AgySource(env),
   };
   return Object.values(sources);
 }

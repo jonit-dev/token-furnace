@@ -4,7 +4,7 @@
 [![Node.js](https://img.shields.io/node/v/token-furnace)](https://www.npmjs.com/package/token-furnace)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Where the token budget actually went. `token-furnace` reads your local Claude Code, Codex and OpenCode
+Where the token budget actually went. `token-furnace` reads your local Claude Code, Codex, OpenCode and Antigravity (`agy`)
 transcripts, finds token leaks, and shows the result in your terminal, as JSON for agents, and in a
 local dashboard. Transcript data never leaves your machine.
 
@@ -18,7 +18,7 @@ Each card has a target. A red dot means the target is missed and a green dot mea
 
 ## Quick start
 
-Requires **Node.js 22.13 or newer** and local Claude Code, Codex or OpenCode transcripts.
+Requires **Node.js 22.13 or newer** and local Claude Code, Codex, OpenCode or Antigravity (`agy`) transcripts.
 
 The CLI and local dashboard use Node.js APIs on Linux, macOS and Windows. Setup and
 configuration repair use the OS home directory when `HOME` is unset; custom agent directories
@@ -41,7 +41,7 @@ npx token-furnace@latest serve
 ```
 
 Visit **http://127.0.0.1:8765**. The first scan measures local usage; later scans reuse a metadata cache.
-Choose Claude Code, Codex or OpenCode independently for each chart, and pin a selection to remember it on reload.
+Choose Claude Code, Codex, OpenCode or Antigravity independently for each chart, and pin a selection to remember it on reload.
 
 Export a report for scripts or sharing:
 
@@ -63,7 +63,7 @@ npm install -g token-furnace
 
 | Command | Result |
 |---|---|
-| `token-furnace [days] [--source claude\|codex\|opencode]` | Ranked verdict on stdout. `days` defaults to 7. Exits 1 on leaks or no data. |
+| `token-furnace [days] [--source claude\|codex\|opencode\|agy]` | Ranked verdict on stdout. `days` defaults to 7. Exits 1 on leaks or no data. |
 | `token-furnace --full` | Full text report. |
 | `token-furnace --json` | The `Report` JSON on stdout, for agents and scripts. Exits 0 even when leaks are present. |
 | `token-furnace --html <path>` | Writes a static HTML report with the report JSON inlined. It does not change the exit code. |
@@ -78,7 +78,7 @@ Options:
 - `--weekly-budget <M>` — weekly budget in millions of weighted tokens. `TOKEN_FURNACE_WEEKLY_BUDGET`
   sets the same value.
 - `--no-cache` — parse every file and write no cache.
-- `--no-plan-usage` — never fetch Anthropic or OpenCode Go usage. A saved reading is still used.
+- `--no-plan-usage` — never fetch Anthropic, OpenCode Go or Google AI usage. A saved reading is still used.
 - `-h`, `--help` — usage text.
 
 ## OpenCode
@@ -96,10 +96,20 @@ local totals; only `opencode-go` sessions calibrate the Go quota. The 5-hour and
 are not displayed. Unknown models keep the existing unpriced-model warning.
 No OpenCode configuration is changed by Auto Fixes.
 
+## Antigravity (agy)
+
+The Antigravity CLI keeps one SQLite file per conversation in `~/.gemini/antigravity-cli/conversations`
+(set `AGY_HOME` to override `~/.gemini/antigravity-cli`). Each model call is one turn; files are opened read-only.
+
+The Google AI plan (Pro or Ultra) meter comes from `retrieveUserQuotaSummary` on `cloudcode-pa.googleapis.com`,
+with the login agy keeps in the system keyring (`secret-tool` on Linux, Keychain on macOS). An expired login
+makes no call; agy refreshes it on its next run. Google meters only its Claude and GPT model group weekly,
+so only those turns calibrate the weekly quota. Gemini models have per-model 5-hour limits, which are not displayed.
+
 ## Context targets
 
 The analysis targets context sizes of **Claude Code 400k** and
-**Codex 300k**, with a **128k OpenCode diagnostic target** (not a model context limit). Checkup, session flags, dashboard KPIs, hourly spend charts, benchmark estimates,
+**Codex 300k**, with a **128k OpenCode** and **256k Antigravity diagnostic target** (not a model context limit). Checkup, session flags, dashboard KPIs, hourly spend charts, benchmark estimates,
 and configuration repair all use these values. A turn exactly at its provider target is within
 target. Mixed-provider charts compare each turn against its own provider target.
 
@@ -146,7 +156,7 @@ injects an escalation prompt at the 4th, 7th, and 10th edit.
 - Transcript data stays on this machine. The tool sends no telemetry.
 - The local cache stores metadata only: session titles, token counts, timestamps, models, tool
   names, and file paths. It never stores message text.
-- Plan usage can contact Anthropic with a local Claude Code login, or the OpenCode Go usage endpoint with a local Go key. Keys go only to their own provider; `--no-plan-usage` disables network calls.
+- Plan usage can contact Anthropic with a local Claude Code login, the OpenCode Go usage endpoint with a local Go key, or Google with agy's keyring login. Keys go only to their own provider; `--no-plan-usage` disables network calls.
 - The server binds to `127.0.0.1` only. It rejects a `Host` header that is not loopback.
 
 ## Cache

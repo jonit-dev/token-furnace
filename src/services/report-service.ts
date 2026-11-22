@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { usageCachePath } from "./usage-client";
 import { buildReport } from "../core/analyze/report";
+import { PROVIDERS } from "../core/providers";
 import { reportView } from "../core/analyze/view";
 import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week } from "../core/model";
 import type { SessionRepository } from "../repo/session-repo";
@@ -16,6 +17,7 @@ export interface ReportOptions {
   /** The subscription window, read by the caller: the saved reading, refreshed from the network when a login exists. */
   planWeek?: Week | null;
   opencodeWeek?: Week | null;
+  agyWeek?: Week | null;
   /** Plan sizes to use for a week with no local spend; the remembered ones fill the rest. */
   limits?: Partial<Record<Source, number>>;
   /** Headless agent runs from the process table, when the caller probed it. */
@@ -175,6 +177,7 @@ export class ReportService {
       config: this.readConfig(live),
       planWeek: opts.planWeek ?? null,
       opencodeWeek: opts.opencodeWeek ?? null,
+      agyWeek: opts.agyWeek ?? null,
       limits: { ...this.readLimits(), ...opts.limits },
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
     });
@@ -200,7 +203,7 @@ export class ReportService {
     try {
       const saved = JSON.parse(readFileSync(this.limitsPath(), "utf8"));
       const out: Partial<Record<Source, number>> = {};
-      for (const source of ["claude", "codex", "opencode"] as const) {
+      for (const source of Object.keys(PROVIDERS) as Source[]) {
         const value = saved?.[source];
         if (typeof value === "number" && Number.isFinite(value) && value > 0) out[source] = value;
       }
@@ -215,7 +218,7 @@ export class ReportService {
     if (this.env.TOKEN_FURNACE_NO_CACHE && this.env.TOKEN_FURNACE_NO_CACHE !== "0") return;
     const stored = this.readLimits();
     const next = { ...stored };
-    for (const source of ["claude", "codex", "opencode"] as const) {
+    for (const source of Object.keys(PROVIDERS) as Source[]) {
       const week = report.burns[source]?.week;
       const size = week?.limit ?? 0;
       if (!(size > 0)) continue; // a week sized from the stored limit equals it: no write
@@ -261,7 +264,7 @@ function fullSessionId(session: SessionInput): string | null {
 /** Hidden runs always add. Visible ones add only past the sessions the transcripts already show. */
 function unseen(found: Headless, active: { source: Source }[]): Partial<Record<Source, number>> {
   const out: Partial<Record<Source, number>> = {};
-  for (const source of ["claude", "codex", "opencode"] as const) {
+  for (const source of Object.keys(PROVIDERS) as Source[]) {
     const seen = active.filter((a) => a.source === source).length;
     const extra = (found.hidden[source] ?? 0) + Math.max((found.visible[source] ?? 0) - seen, 0);
     if (extra) out[source] = extra;
