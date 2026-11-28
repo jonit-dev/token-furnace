@@ -4,9 +4,11 @@
  * under test is exactly that call.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const CLOCK = 1_800_000_000_000;
@@ -29,7 +31,7 @@ function machine(): { claude: string; codex: string; cache: string; env: NodeJS.
   const cache = join(root, "cache");
   mkdirSync(claude, { recursive: true });
   mkdirSync(codex, { recursive: true });
-  mkdirSync(cache, { recursive: true });
+  mkdirSync(join(cache, "token-furnace", "banked"), { recursive: true });
   return {
     claude,
     codex,
@@ -47,14 +49,47 @@ function credentials(claude: string): void {
   writeFileSync(join(claude, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "unit-token" } }));
 }
 
-/** The `usage.json` a previous call wrote: the week and, when asked, the credits beside it. */
-function usageCache(cache: string, cedar?: unknown, fetched = CLOCK / 1000): void {
+/** The credit file this home's reading lives in, as the client names it: one file per home. */
+function bankedFile(cache: string, source: string, home: string): string {
+  let one = home;
+  try {
+    one = realpathSync(home); // the same identity the client uses: symlinks followed
+  } catch {
+    one = resolve(home);
+  }
+  const key = createHash("sha256").update(one).digest("hex").slice(0, 16);
+  return join(cache, "token-furnace", "banked", `${source}-${key}.json`);
+}
+
+/** Claude's credit file for this machine. */
+function claudeFile(env: NodeJS.ProcessEnv, cache: string): string {
+  return bankedFile(cache, "claude", String(env.CLAUDE_CONFIG_DIR));
+}
+
+/** Codex's credit file for this machine. */
+function codexFile(env: NodeJS.ProcessEnv, cache: string): string {
+  return bankedFile(cache, "codex", String(env.CODEX_HOME));
+}
+
+/** A saved reading from a previous call: the week in `usage.json`, the credits in their own file. */
+function usageCache(env: NodeJS.ProcessEnv, cache: string, cedar?: unknown, fetched = CLOCK / 1000): void {
   mkdirSync(join(cache, "token-furnace"), { recursive: true });
   writeFileSync(join(cache, "token-furnace", "usage.json"), JSON.stringify({
     fetched,
     seven_day: { utilization: 42, resets_at: CLOCK / 1000 + 3 * 86_400 },
-    ...(cedar === undefined ? {} : { cedar_ember: cedar }),
   }));
+  if (cedar === undefined) return;
+  mkdirSync(join(cache, "token-furnace", "banked"), { recursive: true });
+  writeFileSync(claudeFile(env, cache), JSON.stringify({ source: "claude-usage", fetched, block: cedar }));
+}
+
+/** Claude's saved credits as the client keeps them, for assertions. */
+function savedClaude(env: NodeJS.ProcessEnv, cache: string): Record<string, any> {
+  try {
+    return JSON.parse(readFileSync(claudeFile(env, cache), "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 function grant(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -93,8 +128,9 @@ function credit(overrides: Record<string, unknown> = {}): Record<string, unknown
 }
 
 /** The cache file as the client writes it: one line per Codex home. */
-function cacheFile(home: string | undefined, line: Record<string, unknown>): string {
-  return JSON.stringify({ [String(home)]: line });
+/** A credit file's content. */
+function cacheFile(line: Record<string, unknown>): string {
+  return JSON.stringify(line);
 }
 
 /** A `codex` on PATH: a node script that answers the handshake with `credits`. */
@@ -126,7 +162,7 @@ afterEach(() => {
 describe("Claude banked resets", () => {
   it("reads the credits saved beside the week, with no request", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, ineligible_reason: null, grants: [grant(), grant({ id: "full-reset-2", ends_at: new Date(CLOCK + 9 * 86_400_000).toISOString() })] });
+    usageCache(env, cache, { eligible: true, ineligible_reason: null, grants: [grant(), grant({ id: "full-reset-2", ends_at: new Date(CLOCK + 9 * 86_400_000).toISOString() })] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -141,7 +177,7 @@ describe("Claude banked resets", () => {
 
   it("marks a grant past its expiry, so an old reading shows nothing to spend", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant({ ends_at: new Date(CLOCK - 1000).toISOString() })] });
+    usageCache(env, cache, { eligible: true, grants: [grant({ ends_at: new Date(CLOCK - 1000).toISOString() })] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -153,7 +189,7 @@ describe("Claude banked resets", () => {
 
   it("says why an account has none, without touching the week", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: false, ineligible_reason: "surface", grants: [] });
+    usageCache(env, cache, { eligible: false, ineligible_reason: "surface", grants: [] });
     const { claudeBankedResets, planWeek } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -165,7 +201,7 @@ describe("Claude banked resets", () => {
 
   it("keeps the week when cedar_ember is missing or malformed", async () => {
     const { cache, env } = machine();
-    usageCache(cache); // a cache file from before the credits existed
+    usageCache(env, cache); // a cache file from before the credits existed
     const { claudeBankedResets, planWeek } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -177,7 +213,7 @@ describe("Claude banked resets", () => {
 
   it("survives a grants array of nonsense, and calls it unreadable rather than empty", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [null, 7, { id: "" }, { id: "x", resets_left: "many" }] });
+    usageCache(env, cache, { eligible: true, grants: [null, 7, { id: "" }, { id: "x", resets_left: "many" }] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -189,7 +225,7 @@ describe("Claude banked resets", () => {
 
   it("calls a list with one unreadable grant unreadable, even beside a good one", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant({ resets_left: 0, paused: true }), { id: "g2", label: "no count" }] });
+    usageCache(env, cache, { eligible: true, grants: [grant({ resets_left: 0, paused: true }), { id: "g2", label: "no count" }] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -198,25 +234,56 @@ describe("Claude banked resets", () => {
     expect(resets.note).toBe("The reset credits could not be read.");
   });
 
+  it("preserves the last balance when Anthropic refuses the CLI version", async () => {
+    const { claude, cache, env } = machine();
+    credentials(claude);
+    const previous = CLOCK / 1000 - 3600;
+    usageCache(env, cache, { eligible: true, grants: [grant()] }, previous);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      seven_day: { utilization: 55, resets_at: CLOCK / 1000 + 86_400 },
+      cedar_ember: { eligible: false, ineligible_reason: "cli_version", grants: [] },
+    }), { status: 200 }));
+    const { claudeBankedResets, planWeek } = await import("../src/services/usage-client");
+
+    expect(await claudeBankedResets(env, new Date(CLOCK), true)).toMatchObject({
+      state: "ok", availableCount: 1, stale: true, fetchedAt: new Date(previous * 1000).toISOString(),
+    });
+    expect((await planWeek(env, new Date(CLOCK), false))?.used).toBe(55);
+    expect(savedClaude(env, cache).fetched).toBe(previous);
+  });
+
   it("clears the saved credits when a good answer carries none", async () => {
     const { claude, cache, env } = machine();
     credentials(claude);
-    usageCache(cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600); // a good, aged-out reading
+    usageCache(env, cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600); // a good, aged-out reading
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ seven_day: null, cedar_ember: null }), { status: 200 }));
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     expect((await claudeBankedResets(env, new Date(CLOCK), true)).state).toBe("unavailable");
 
-    const saved = JSON.parse(readFileSync(join(cache, "token-furnace", "usage.json"), "utf8"));
-    expect(saved.cedar_ember).toBeUndefined(); // the next process must not resurrect it
+    expect(savedClaude(env, cache).block).toBeNull(); // the next process must not resurrect it
     vi.resetModules();
     const next = await import("../src/services/usage-client");
     expect((await next.claudeBankedResets(env, new Date(CLOCK + 60_000), false)).state).toBe("unavailable");
   });
 
+  it("keeps the week it already has when an answer carries only the credits", async () => {
+    const { claude, cache, env } = machine();
+    credentials(claude);
+    usageCache(env, cache, undefined, CLOCK / 1000 - 3600); // a week on disk, no credits
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ seven_day: null, cedar_ember: { eligible: true, grants: [grant()] } }), { status: 200 }));
+    const { claudeBankedResets, planWeek } = await import("../src/services/usage-client");
+
+    // --no-cache: nothing is written, so the in-memory answer is all this process has.
+    const offline = { ...env, TOKEN_FURNACE_NO_CACHE: "1" };
+    await claudeBankedResets(offline, new Date(CLOCK), true);
+
+    expect((await planWeek(offline, new Date(CLOCK), false))!.used).toBe(42); // the week the answer omitted
+  });
+
   it("calls a grant whose end date is not a date unreadable", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant({ ends_at: "not-a-date" })] });
+    usageCache(env, cache, { eligible: true, grants: [grant({ ends_at: "not-a-date" })] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -227,7 +294,7 @@ describe("Claude banked resets", () => {
 
   it("does not trust an eligibility field that is not Claude's own boolean", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: "false", grants: [grant()] });
+    usageCache(env, cache, { eligible: "false", grants: [grant()] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -238,7 +305,7 @@ describe("Claude banked resets", () => {
 
   it("calls a grant whose usable_now is not Claude's own boolean unreadable", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant({ usable_now: "true" })] });
+    usageCache(env, cache, { eligible: true, grants: [grant({ usable_now: "true" })] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -249,7 +316,7 @@ describe("Claude banked resets", () => {
 
   it("keeps a grant that is spent or paused, with no balance to count", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant({ resets_left: 0 }), grant({ id: "g2", paused: true })] });
+    usageCache(env, cache, { eligible: true, grants: [grant({ resets_left: 0 }), grant({ id: "g2", paused: true })] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -262,7 +329,7 @@ describe("Claude banked resets", () => {
   it("reports no credits when a fresh call stops carrying the field", async () => {
     const { claude, cache, env } = machine();
     credentials(claude);
-    usageCache(cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600); // a good reading, aged out
+    usageCache(env, cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600); // a good reading, aged out
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       seven_day: { utilization: 42, resets_at: new Date(CLOCK + 3 * 86_400_000).toISOString() },
     }), { status: 200 }));
@@ -274,13 +341,23 @@ describe("Claude banked resets", () => {
     expect(resets.state).toBe("unavailable");
     expect(resets.grants).toEqual([]);
     expect(resets.availableCount).toBe(0);
-    const saved = JSON.parse(readFileSync(join(cache, "token-furnace", "usage.json"), "utf8"));
-    expect(saved.cedar_ember).toBeUndefined(); // and the cache agrees with the answer
+    expect(savedClaude(env, cache).block).toBeNull(); // and the cache agrees with the answer
+  });
+
+  it("calls a negative credit count unreadable", async () => {
+    const { cache, env } = machine();
+    usageCache(env, cache, { eligible: true, grants: [grant({ resets_left: -1 })] });
+    const { claudeBankedResets } = await import("../src/services/usage-client");
+
+    const resets = await claudeBankedResets(env, new Date(CLOCK), false);
+
+    expect(resets.state).toBe("unavailable"); // not "ok" with nothing to spend
+    expect(resets.note).toBe("The reset credits could not be read.");
   });
 
   it("says a saved reading is stale once it is older than the reuse window", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600);
+    usageCache(env, cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600);
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -292,7 +369,7 @@ describe("Claude banked resets", () => {
 
   it("calls a list of unreadable grants unavailable, not an account with nothing left", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [{}, null, 7] });
+    usageCache(env, cache, { eligible: true, grants: [{}, null, 7] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -303,7 +380,7 @@ describe("Claude banked resets", () => {
 
   it("survives a cache file whose timestamp is not an instant", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant()] }, 1e20);
+    usageCache(env, cache, { eligible: true, grants: [grant()] }, 1e20);
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -314,7 +391,7 @@ describe("Claude banked resets", () => {
 
   it("survives a clears list of poisoned keys", async () => {
     const { cache, env } = machine();
-    usageCache(cache, { eligible: true, grants: [grant({ clears: [{ toString: null }, "constructor", "seven_day"] })] });
+    usageCache(env, cache, { eligible: true, grants: [grant({ clears: [{ toString: null }, "constructor", "seven_day"] })] });
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -326,7 +403,7 @@ describe("Claude banked resets", () => {
   it("one call refreshes the week and the credits together and saves both", async () => {
     const { claude, cache, env } = machine();
     credentials(claude);
-    usageCache(cache, undefined, CLOCK / 1000 - 3600); // aged out, so the call goes out
+    usageCache(env, cache, undefined, CLOCK / 1000 - 3600); // aged out, so the call goes out
     const { claudeBankedResets, planWeek } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), true);
@@ -338,7 +415,8 @@ describe("Claude banked resets", () => {
     expect(week!.used).toBe(42);
     const saved = JSON.parse(readFileSync(join(cache, "token-furnace", "usage.json"), "utf8"));
     expect(saved.seven_day.utilization).toBe(42);
-    expect(saved.cedar_ember.grants).toHaveLength(1);
+    expect(saved.cedar_ember).toBeUndefined(); // the credits never enter the week's file
+    expect(savedClaude(env, cache).block.grants).toHaveLength(1);
   });
 
   it("reads a cache file whose timestamp is not a number as never fetched", async () => {
@@ -348,8 +426,8 @@ describe("Claude banked resets", () => {
     writeFileSync(join(cache, "token-furnace", "usage.json"), JSON.stringify({
       fetched: { toString: null },
       seven_day: { utilization: 42, resets_at: CLOCK / 1000 + 3 * 86_400 },
-      cedar_ember: { eligible: true, grants: [grant()] },
     }));
+    writeFileSync(claudeFile(env, cache), JSON.stringify({ fetched: { toString: null }, block: { eligible: true, grants: [grant()] } }));
     const { claudeBankedResets, planWeek } = await import("../src/services/usage-client");
 
     const resets = await claudeBankedResets(env, new Date(CLOCK), false);
@@ -363,7 +441,7 @@ describe("Claude banked resets", () => {
   it("saves the credits even when the call carried no weekly reading", async () => {
     const { claude, cache, env } = machine();
     credentials(claude);
-    usageCache(cache, undefined, 0); // a week already saved, no credits
+    usageCache(env, cache, undefined, 0); // a week already saved, no credits
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       seven_day: null,
       cedar_ember: { eligible: true, grants: [grant()] },
@@ -374,7 +452,7 @@ describe("Claude banked resets", () => {
 
     expect(resets.availableCount).toBe(1);
     const saved = JSON.parse(readFileSync(join(cache, "token-furnace", "usage.json"), "utf8"));
-    expect(saved.cedar_ember.grants).toHaveLength(1);
+    expect(savedClaude(env, cache).block.grants).toHaveLength(1);
     expect(saved.seven_day.utilization).toBe(42); // the week the answer omitted is still there
     // And a later --no-plan-usage run reads both halves off the disk.
     vi.resetModules();
@@ -386,12 +464,11 @@ describe("Claude banked resets", () => {
   it("does not let a credit-only answer make an expired week look fresh", async () => {
     const { claude, cache, env } = machine();
     credentials(claude);
-    // The saved week ended an hour ago; the credits in the same file are still good.
-    mkdirSync(join(cache, "token-furnace"), { recursive: true });
+    // The saved week ended an hour ago; the credits read beside it are still good.
+    usageCache(env, cache, { eligible: true, grants: [grant()] }, CLOCK / 1000 - 3600);
     writeFileSync(join(cache, "token-furnace", "usage.json"), JSON.stringify({
       fetched: CLOCK / 1000 - 3600,
       seven_day: { utilization: 90, resets_at: CLOCK / 1000 - 3600 },
-      cedar_ember: { eligible: true, grants: [grant()] },
     }));
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       seven_day: null,
@@ -403,7 +480,7 @@ describe("Claude banked resets", () => {
 
     const saved = JSON.parse(readFileSync(join(cache, "token-furnace", "usage.json"), "utf8"));
     expect(saved.fetched).toBe(CLOCK / 1000 - 3600); // the week's stamp is still the old one
-    expect(saved.cedar_fetched).toBe(CLOCK / 1000); // the credits got their own
+    expect(savedClaude(env, cache).fetched).toBe(CLOCK / 1000); // the credits got their own
     expect(await planWeek(env, new Date(CLOCK + 61_000), false)).toBeNull(); // an ended week is no week
 
     // The next call still goes out for the new week, because the credit answer did not refresh it.
@@ -442,6 +519,128 @@ describe("Codex banked resets", () => {
     expect(resets.availableCount).toBe(0);
   });
 
+  it("answers no_login when the configured Codex home does not exist, even beside a real one", async () => {
+    const { cache, env } = machine();
+    // `codex/missing/..` resolves to a real directory, but the path itself names nothing.
+    const configured = `${env.CODEX_HOME}/missing/..`; // a string join, so `..` stays in the path
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    const resets = await codexBankedResets({ ...env, CODEX_HOME: configured }, new Date(CLOCK), true, runner);
+
+    expect(resets.state).toBe("no_login");
+    expect(runner).not.toHaveBeenCalled();
+    expect(existsSync(join(cache, "token-furnace", "banked")) && readdirSync(join(cache, "token-furnace", "banked")).length).toBe(0);
+  });
+
+  it("does not answer from a credit file that is a link to another home's", async () => {
+    const { cache, env } = machine();
+    const other = join(cache, "other-codex");
+    mkdirSync(other, { recursive: true });
+    // Another home's valid reading, linked from this home's file.
+    writeFileSync(codexFile({ ...env, CODEX_HOME: other } as NodeJS.ProcessEnv, cache), cacheFile({ fetchedAt: CLOCK, triedAt: CLOCK, credits: credits([credit()]), error: null }));
+    symlinkSync(codexFile({ ...env, CODEX_HOME: other } as NodeJS.ProcessEnv, cache), codexFile(env, cache));
+    const runner = vi.fn(async () => credits([credit(), credit({ id: "b" })]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    const resets = await codexBankedResets(env, new Date(CLOCK + 6 * 60_000), true, runner);
+
+    expect(runner).toHaveBeenCalledTimes(1); // the link answered nothing, so this home read for itself
+    expect(resets.availableCount).toBe(2);
+  });
+
+  it("replaces a linked usage.json instead of writing through it", async () => {
+    const { cache, claude, env } = machine();
+    credentials(claude);
+    // A file of somebody else's, linked in as usage.json. Nothing this program does may rewrite it.
+    const shared = join(cache, "..", "shared-usage.json");
+    const theirs = JSON.stringify({ seven_day: { utilization: 42, resets_at: "2027-01-20T00:00:00+00:00" }, note: "someone else's" });
+    writeFileSync(shared, theirs);
+    rmSync(join(cache, "token-furnace", "usage.json"), { force: true });
+    symlinkSync(shared, join(cache, "token-furnace", "usage.json"));
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ seven_day: { utilization: 77, resets_at: new Date(CLOCK + 86_400_000).toISOString() } }), { status: 200 }));
+    const { planWeek } = await import("../src/services/usage-client");
+
+    // The link is still read, so a status line's reading still answers.
+    expect((await planWeek(env, new Date(CLOCK), false))!.used).toBe(42);
+    await planWeek(env, new Date(CLOCK + 3_600_000), true); // a week old enough to refresh
+
+    expect(readFileSync(shared, "utf8")).toBe(theirs); // untouched
+    expect(lstatSync(join(cache, "token-furnace", "usage.json")).isSymbolicLink()).toBe(false); // replaced
+    expect(JSON.parse(readFileSync(join(cache, "token-furnace", "usage.json"), "utf8")).seven_day.utilization).toBe(77);
+  });
+
+  it("does not trust a stamp that is later than now, so a corrected clock still reads", async () => {
+    const { cache, env } = machine();
+    // Written while the clock was a day ahead, then the clock was put right.
+    writeFileSync(codexFile(env, cache), cacheFile({ fetchedAt: CLOCK + 86_400_000, triedAt: CLOCK, credits: credits([credit()]), error: null }));
+    const runner = vi.fn(async () => credits([credit(), credit({ id: "b" })]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    const resets = await codexBankedResets(env, new Date(CLOCK), true, runner);
+
+    expect(runner).toHaveBeenCalledTimes(1); // dated in the future is not fresh
+    expect(resets.availableCount).toBe(2);
+  });
+
+  it("ages a stamp no date can hold, so a corrupt file cannot suppress the read for ever", async () => {
+    const { env, cache } = machine();
+    const at = codexFile(env, cache);
+    writeFileSync(at, cacheFile({ fetchedAt: 1e20, triedAt: 1e20, credits: credits([credit()]), error: null }));
+    const runner = vi.fn(async () => credits([credit(), credit({ id: "b" })]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    const resets = await codexBankedResets(env, new Date(CLOCK), true, runner);
+
+    expect(runner).toHaveBeenCalledTimes(1); // the stamp said nothing, so it read again
+    expect(resets.availableCount).toBe(2);
+    expect(resets.fetchedAt).toBe(new Date(CLOCK).toISOString());
+  });
+
+  it("refuses a cached balance a fresh answer would have been refused for", async () => {
+    const { cache, env } = machine();
+    // Nine credits beside a credit list that is not a list: not a balance, whoever wrote it.
+    writeFileSync(codexFile(env, cache), cacheFile({ fetchedAt: CLOCK, triedAt: CLOCK, credits: { availableCount: 9, credits: "invalid" }, error: null }));
+    const runner = vi.fn(async () => null);
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    const resets = await codexBankedResets(env, new Date(CLOCK + 1_000), false, runner);
+
+    expect(resets.state).toBe("unavailable"); // not "ok" with nine
+    expect(resets.availableCount).toBe(0);
+  });
+
+  it("never blocks on a cache path that is not a regular file", async () => {
+    const { cache, env } = machine();
+    const at = codexFile(env, cache);
+    // A pipe with no writer would hold a synchronous read for ever if it were trusted.
+    execFileSync("mkfifo", [at]);
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    const resets = await codexBankedResets(env, new Date(CLOCK), true, runner);
+
+    expect(resets.state).toBe("ok"); // the pipe answered nothing, so this home read for itself
+    expect(resets.availableCount).toBe(1);
+    expect(lstatSync(at).isFile()).toBe(true); // and its own file replaced the pipe
+  });
+
+  it("replaces a planted symlink at the cache path instead of writing through it", async () => {
+    const { cache, env } = machine();
+    const victim = join(cache, "victim.json");
+    const at = claudeFile(env, cache);
+    writeFileSync(victim, JSON.stringify({ keep: true }));
+    rmSync(at, { force: true });
+    symlinkSync(victim, at);
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    await codexBankedResets(env, new Date(CLOCK), true, runner);
+
+    expect(JSON.parse(readFileSync(victim, "utf8"))).toEqual({ keep: true }); // untouched
+    expect(JSON.parse(readFileSync(codexFile(env, cache), "utf8")).credits.credits).toHaveLength(1);
+  });
+
   it("reads the credits through the runner and marks a past expiry as expired", async () => {
     const { env } = machine();
     const runner = vi.fn(async () => credits([
@@ -473,19 +672,19 @@ describe("Codex banked resets", () => {
 
   it("leaves no half-written file behind, so a cached read still parses", async () => {
     const { cache, env } = machine();
-    const dir = join(cache, "token-furnace");
+    const dir = join(cache, "token-furnace", "banked");
     const runner = vi.fn(async () => credits([credit()]));
     const { codexBankedResets } = await import("../src/services/banked-resets-client");
 
     await codexBankedResets(env, new Date(CLOCK), true, runner);
 
-    expect(readdirSync(dir)).toEqual(["codex-banked-resets.json"]); // the temp file was renamed, not left
-    expect(() => JSON.parse(readFileSync(join(dir, "codex-banked-resets.json"), "utf8"))).not.toThrow();
+    expect(readdirSync(dir)).toEqual([codexFile(env, cache).split("/").pop()]); // the temp file was renamed, not left
+    expect(() => JSON.parse(readFileSync(codexFile(env, cache), "utf8"))).not.toThrow();
   });
 
-  it("keeps its own line when a second Codex home shares the cache file", async () => {
+  it("gives each Codex home a file of its own, so one home cannot disturb another", async () => {
     const { cache, env } = machine();
-    const at = join(cache, "token-furnace", "codex-banked-resets.json");
+    const at = codexFile(env, cache);
     const runner = vi.fn(async () => credits([credit()]));
     const { codexBankedResets } = await import("../src/services/banked-resets-client");
     const second = join(cache, "other-codex");
@@ -499,13 +698,15 @@ describe("Codex banked resets", () => {
 
     expect(resets.state).toBe("ok");
     expect(resets.availableCount).toBe(1); // this home's reading, not the other home's
-    expect(Object.keys(JSON.parse(readFileSync(at, "utf8"))).sort()).toEqual([env.CODEX_HOME, second].sort());
+    expect(bankedFile(cache, "codex", second)).not.toBe(at); // two files, not one
+    expect(JSON.parse(readFileSync(at, "utf8")).credits.credits).toHaveLength(1);
+    expect(JSON.parse(readFileSync(bankedFile(cache, "codex", second), "utf8")).credits.credits).toHaveLength(2);
     expect(runner).toHaveBeenCalledTimes(1); // and its 5-minute reading was reused
   });
 
   it("records a failed read's backoff in the file, so the next process waits too", async () => {
     const { cache, env } = machine();
-    const at = join(cache, "token-furnace", "codex-banked-resets.json");
+    const at = codexFile(env, cache);
     const runner = vi.fn(async () => credits([credit()]));
     const { codexBankedResets } = await import("../src/services/banked-resets-client");
 
@@ -513,37 +714,156 @@ describe("Codex banked resets", () => {
     runner.mockRejectedValueOnce(new Error("timeout"));
     await codexBankedResets(env, new Date(CLOCK + 6 * 60_000), true, runner);
 
-    const saved = JSON.parse(readFileSync(at, "utf8"))[String(env.CODEX_HOME)];
+    const saved = JSON.parse(readFileSync(at, "utf8"));
     expect(saved.triedAt).toBe(CLOCK + 6 * 60_000); // the attempt is on disk
     expect(saved.error).toBe("Codex did not answer the rate-limit read.");
     expect(saved.credits.credits).toHaveLength(1); // and the balance it kept is still there
   });
 
-  it("does not put back credits a newer response from another process cleared", async () => {
+  it("does not let an older answer overwrite a newer credit reading", async () => {
     const { claude, cache, env } = machine();
     credentials(claude);
-    // This call's answer still carries a grant, but a newer one (cedar_fetched ahead of our `at`)
-    // has already been written by the server: ours must not resurrect it.
-    usageCache(cache, undefined, CLOCK / 1000);
-    const file = join(cache, "token-furnace", "usage.json");
-    writeFileSync(file, JSON.stringify({
-      fetched: CLOCK / 1000,
-      seven_day: { utilization: 42, resets_at: CLOCK / 1000 + 3 * 86_400 },
-      cedar_fetched: CLOCK / 1000 + 5,
-    }));
+    usageCache(env, cache, undefined, CLOCK / 1000 - 10); // the week, and no credits yet
+    // Another process has already saved a reading made after the call this one is about to make.
+    const later = CLOCK / 1000 + 5;
+    writeFileSync(claudeFile(env, cache), JSON.stringify({ source: "claude-usage", fetched: later, block: { eligible: true, grants: [grant()] } }));
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       seven_day: { utilization: 42, resets_at: new Date(CLOCK + 3 * 86_400_000).toISOString() },
-      cedar_ember: { eligible: true, grants: [grant()] },
+      cedar_ember: { eligible: true, grants: [grant(), grant({ id: "second" })] },
     }), { status: 200 }));
     const { claudeBankedResets } = await import("../src/services/usage-client");
 
-    await claudeBankedResets(env, new Date(CLOCK), true);
+    const resets = await claudeBankedResets(env, new Date(CLOCK), true);
 
-    const saved = JSON.parse(readFileSync(file, "utf8"));
-    expect(saved.cedar_ember).toBeUndefined(); // the newer reading stands
+    expect(resets.availableCount).toBe(1); // the newer reading answers, not this call's later one
+    expect(savedClaude(env, cache).fetched).toBe(later); // and its file was left alone
     vi.resetModules();
     const next = await import("../src/services/usage-client");
-    expect((await next.claudeBankedResets(env, new Date(CLOCK + 61_000), false)).state).toBe("unavailable");
+    expect((await next.claudeBankedResets(env, new Date(CLOCK + 61_000), false)).availableCount).toBe(1);
+  });
+
+  it("counts another process's failed attempt, so it does not spawn a second later", async () => {
+    const { cache, env } = machine();
+    const at = codexFile(env, cache);
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    await codexBankedResets(env, new Date(CLOCK), true, runner); // this process holds a good reading
+    // Another process fails a read at CLOCK + 6m and records the attempt with the same balance.
+    writeFileSync(at, cacheFile({ fetchedAt: CLOCK, triedAt: CLOCK + 6 * 60_000, credits: credits([credit()]), error: "Codex did not answer the rate-limit read." }));
+
+    await codexBankedResets(env, new Date(CLOCK + 6 * 60_000 + 1_000), true, runner);
+
+    expect(runner).toHaveBeenCalledTimes(1); // the minute has not passed, whatever this process remembers
+  });
+
+  it("shares one read between two spellings of the same home", async () => {
+    const { env } = machine();
+    let release = () => {};
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    const runner = vi.fn(async () => {
+      await gate;
+      return credits([credit()]);
+    });
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+    const rel = relative(process.cwd(), String(env.CODEX_HOME));
+
+    const both = Promise.all([
+      codexBankedResets(env, new Date(CLOCK), true, runner),
+      codexBankedResets({ ...env, CODEX_HOME: rel }, new Date(CLOCK), true, runner),
+    ]);
+    release();
+    const [a, b] = await both;
+
+    expect(runner).toHaveBeenCalledTimes(1); // one home, one read
+    expect([a.availableCount, b.availableCount]).toEqual([1, 1]);
+  });
+
+  it("does not let a slow failure publish an older attempt over a newer one", async () => {
+    const { cache, env } = machine();
+    const at = codexFile(env, cache);
+    // A later attempt is already on disk with the same (old) balance.
+    writeFileSync(at, cacheFile({ fetchedAt: CLOCK - HOUR, triedAt: CLOCK + 5_000, credits: credits([credit()]), error: "Codex did not answer the rate-limit read." }));
+    // This attempt started five seconds earlier and only now gives up.
+    const runner = vi.fn(async () => {
+      throw new Error("timeout");
+    });
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    await codexBankedResets(env, new Date(CLOCK), true, runner);
+
+    expect(JSON.parse(readFileSync(at, "utf8")).triedAt).toBe(CLOCK + 5_000); // the later attempt stands
+  });
+
+  it("treats a symlinked Codex home as the home it points at", async () => {
+    const { codex, cache, env } = machine();
+    const link = join(cache, "..", "codex-link");
+    symlinkSync(codex, link);
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    await codexBankedResets(env, new Date(CLOCK), true, runner);
+    const viaLink = await codexBankedResets({ ...env, CODEX_HOME: link }, new Date(CLOCK + 1_000), true, runner);
+
+    expect(viaLink.availableCount).toBe(1);
+    expect(runner).toHaveBeenCalledTimes(1); // one home, one read, one reuse window
+    expect(existsSync(bankedFile(cache, "codex", link))).toBe(true);
+    expect(bankedFile(cache, "codex", link)).toBe(codexFile(env, cache));
+  });
+
+  it("treats two spellings of one Codex home as one file", async () => {
+    const { cache, env } = machine();
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+    const rel = relative(process.cwd(), String(env.CODEX_HOME));
+
+    await codexBankedResets(env, new Date(CLOCK), true, runner);
+    await codexBankedResets({ ...env, CODEX_HOME: rel }, new Date(CLOCK + 1_000), true, runner);
+
+    expect(runner).toHaveBeenCalledTimes(1); // same home: the 5-minute reading is reused
+    expect(readdirSync(join(cache, "token-furnace", "banked"))).toHaveLength(1);
+  });
+
+  it("keeps its 5-minute and 1-minute gates under --no-cache, where nothing is on disk", async () => {
+    const { env } = machine();
+    const runner = vi.fn(async () => credits([credit()]));
+    const { codexBankedResets } = await import("../src/services/banked-resets-client");
+
+    await codexBankedResets({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, new Date(CLOCK), true, runner);
+    await codexBankedResets({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, new Date(CLOCK + 1_000), true, runner);
+    expect(runner).toHaveBeenCalledTimes(1); // the reading this process made is still fresh
+
+    runner.mockRejectedValueOnce(new Error("timeout"));
+    const failed = await codexBankedResets({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, new Date(CLOCK + 6 * 60_000), true, runner);
+    expect(failed.availableCount).toBe(1); // and a failure keeps the balance it had
+    await codexBankedResets({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, new Date(CLOCK + 6 * 60_000 + 1_000), true, runner);
+    expect(runner).toHaveBeenCalledTimes(2); // the minute has not passed
+  });
+
+  it("files each Claude profile apart, and treats two spellings of one home as one", async () => {
+    const { claude, cache, env } = machine();
+    credentials(claude);
+    // A second profile with a reading of its own already saved.
+    const other = join(cache, "second-claude");
+    mkdirSync(other, { recursive: true });
+    credentials(other);
+    writeFileSync(bankedFile(cache, "claude", other), JSON.stringify({ source: "claude-usage", fetched: CLOCK / 1000, block: { eligible: true, grants: [grant()] } }));
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      seven_day: null,
+      cedar_ember: { eligible: true, grants: [grant(), grant({ id: "second" })] },
+    }), { status: 200 }));
+    const { claudeBankedResets } = await import("../src/services/usage-client");
+
+    // A relative spelling of the same home is the same home: one file, one answer.
+    const rel = relative(process.cwd(), claude);
+    expect((await claudeBankedResets({ ...env, CLAUDE_CONFIG_DIR: rel }, new Date(CLOCK), true)).availableCount).toBe(2);
+    expect(existsSync(claudeFile(env, cache))).toBe(true);
+
+    // A second profile answers from its own reading, not from the first one's.
+    expect((await claudeBankedResets({ ...env, CLAUDE_CONFIG_DIR: other }, new Date(CLOCK), true)).availableCount).toBe(1);
+    expect(JSON.parse(readFileSync(bankedFile(cache, "claude", other), "utf8")).block.grants).toHaveLength(1);
   });
 
   it("reuses the saved reading for 5 minutes and rereads after that", async () => {
@@ -554,7 +874,7 @@ describe("Codex banked resets", () => {
     await codexBankedResets(env, new Date(CLOCK), true, runner);
     await codexBankedResets(env, new Date(CLOCK + 4 * 60_000), true, runner);
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(existsSync(join(cache, "token-furnace", "codex-banked-resets.json"))).toBe(true);
+    expect(existsSync(codexFile(env, cache))).toBe(true);
 
     // A new process reuses the saved file, then reads again once it ages out.
     vi.resetModules();
@@ -587,9 +907,9 @@ describe("Codex banked resets", () => {
 
   it("never spawns or writes with network false, and answers from the saved file", async () => {
     const { cache, env } = machine();
-    const at = join(cache, "token-furnace", "codex-banked-resets.json");
+    const at = codexFile(env, cache);
     mkdirSync(join(cache, "token-furnace"), { recursive: true });
-    writeFileSync(at, cacheFile(env.CODEX_HOME, { fetchedAt: CLOCK - HOUR, triedAt: CLOCK - HOUR, credits: credits([credit()]), error: null }));
+    writeFileSync(at, cacheFile({ fetchedAt: CLOCK - HOUR, triedAt: CLOCK - HOUR, credits: credits([credit()]), error: null }));
     const before = readFileSync(at, "utf8");
     const runner = vi.fn(async () => credits([credit()]));
     const { codexBankedResets } = await import("../src/services/banked-resets-client");
@@ -610,7 +930,7 @@ describe("Codex banked resets", () => {
     await codexBankedResets({ ...env, TOKEN_FURNACE_NO_CACHE: "1" }, new Date(CLOCK), true, runner);
 
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(existsSync(join(cache, "token-furnace"))).toBe(false);
+    expect(existsSync(codexFile(env, cache))).toBe(false);
   });
 
   it("rejects an answer whose credits are not a list, keeping the balance it had", async () => {
@@ -640,12 +960,12 @@ describe("Codex banked resets", () => {
 
   it("does not let a failed read overwrite a newer reading another process saved", async () => {
     const { cache, env } = machine();
-    const at = join(cache, "token-furnace", "codex-banked-resets.json");
+    const at = codexFile(env, cache);
     mkdirSync(join(cache, "token-furnace"), { recursive: true });
-    writeFileSync(at, cacheFile(env.CODEX_HOME, { fetchedAt: CLOCK - HOUR, triedAt: CLOCK - HOUR, credits: credits([credit()]), error: null }));
+    writeFileSync(at, cacheFile({ fetchedAt: CLOCK - HOUR, triedAt: CLOCK - HOUR, credits: credits([credit()]), error: null }));
     // While this read is open, another process (an MCP client) saves a newer balance; then ours times out.
     const runner = vi.fn(async () => {
-      writeFileSync(at, cacheFile(env.CODEX_HOME, {
+      writeFileSync(at, cacheFile({
         fetchedAt: CLOCK, triedAt: CLOCK, error: null,
         credits: credits([credit(), credit({ id: "RateLimitResetCredit_2" })]),
       }));
@@ -656,55 +976,27 @@ describe("Codex banked resets", () => {
     const resets = await codexBankedResets(env, new Date(CLOCK + 6 * 60_000), true, runner);
 
     expect(resets.availableCount).toBe(2); // the newer reading wins, not this call's older one
-    expect(JSON.parse(readFileSync(at, "utf8"))[String(env.CODEX_HOME)].credits.credits).toHaveLength(2);
+    expect(JSON.parse(readFileSync(at, "utf8")).credits.credits).toHaveLength(2);
   });
 
-  it("does not let another Codex home's file make its own good read look empty", async () => {
+  it("does not let another Codex home's newer file make its own read look empty", async () => {
     const { cache, env } = machine();
-    const at = join(cache, "token-furnace", "codex-banked-resets.json");
-    mkdirSync(join(cache, "token-furnace"), { recursive: true });
-    // The file holds a newer line for a different home.
+    // Another home has a newer reading, in its own file.
     const other = join(cache, "other-codex");
-    writeFileSync(at, cacheFile(other, { fetchedAt: CLOCK + HOUR, triedAt: CLOCK, credits: credits([credit()]), error: null }));
+    writeFileSync(bankedFile(cache, "codex", other), cacheFile({ fetchedAt: CLOCK + HOUR, triedAt: CLOCK, credits: credits([credit()]), error: null }));
     const runner = vi.fn(async () => credits([credit(), credit({ id: "RateLimitResetCredit_2" })]));
     const { codexBankedResets } = await import("../src/services/banked-resets-client");
 
     const resets = await codexBankedResets(env, new Date(CLOCK), true, runner);
 
-    expect(resets.state).toBe("ok"); // this home's own read stands, whatever the other line says
+    expect(resets.state).toBe("ok"); // this home's own read stands, whatever the other file says
     expect(resets.availableCount).toBe(2);
-    expect(Object.keys(JSON.parse(readFileSync(at, "utf8"))).sort()).toEqual([env.CODEX_HOME, other].sort());
-  });
-
-  it("leaves the file to a writer that holds the lock, then takes it when the lock is stale", async () => {
-    const { cache, env } = machine();
-    const dir = join(cache, "token-furnace");
-    const at = join(dir, "codex-banked-resets.json");
-    const runner = vi.fn(async () => credits([credit(), credit({ id: "b" })]));
-    const { codexBankedResets } = await import("../src/services/banked-resets-client");
-
-    // Another process is mid-write: this one must not publish over it.
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(`${at}.lock`, "");
-    writeFileSync(at, cacheFile(env.CODEX_HOME, { fetchedAt: CLOCK, triedAt: CLOCK, credits: credits([credit()]), error: null }));
-    const held = await codexBankedResets(env, new Date(CLOCK), true, runner);
-    expect(held.availableCount).toBe(1); // the reading on disk, not this call's later one
-
-    // The caller is not handed the reading this call had already put in memory.
-    expect(held.stale).toBe(false); // the file's reading, not a half-updated entry
-
-    // A writer that died leaves the lock behind; it is old enough now to be taken.
-    utimesSync(`${at}.lock`, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
-    vi.resetModules();
-    const next = await import("../src/services/banked-resets-client");
-    const took = await next.codexBankedResets(env, new Date(CLOCK + 6 * 60_000), true, runner);
-    expect(took.availableCount).toBe(2);
-    expect(existsSync(`${at}.lock`)).toBe(false); // and the lock is released
+    expect(JSON.parse(readFileSync(codexFile(env, cache), "utf8")).fetchedAt).toBe(CLOCK);
   });
 
   it("picks up a reading another process wrote after it first looked", async () => {
     const { cache, env } = machine();
-    const at = join(cache, "token-furnace", "codex-banked-resets.json");
+    const at = codexFile(env, cache);
     const runner = vi.fn(async () => null);
     const { codexBankedResets } = await import("../src/services/banked-resets-client");
 
@@ -713,7 +1005,7 @@ describe("Codex banked resets", () => {
 
     // Another process (an MCP client) saves a reading; this one must see it without a restart.
     mkdirSync(join(cache, "token-furnace"), { recursive: true });
-    writeFileSync(at, cacheFile(env.CODEX_HOME, { fetchedAt: CLOCK, triedAt: CLOCK, credits: credits([credit()]), error: null }));
+    writeFileSync(at, cacheFile({ fetchedAt: CLOCK, triedAt: CLOCK, credits: credits([credit()]), error: null }));
     const resets = await codexBankedResets(env, new Date(CLOCK), false, runner);
 
     expect(resets.state).toBe("ok");

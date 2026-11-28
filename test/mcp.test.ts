@@ -81,7 +81,7 @@ describe("the banked_resets tool", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent); // the text is the payload
     expect(result.structuredContent.fetchedAt).toBe(NOW.toISOString());
     expect(Object.keys(result.structuredContent.providers).sort()).toEqual(["agy", "claude", "codex", "opencode"]);
-    expect(result.structuredContent.providers.claude).toMatchObject({ state: "unavailable", availableCount: 0 });
+    expect(result.structuredContent.providers.claude).toMatchObject({ state: "no_login", availableCount: 0 });
     expect(result.structuredContent.providers.codex).toMatchObject({ state: "no_login", availableCount: 0 });
     expect(result.structuredContent.providers.opencode.state).toBe("unsupported");
     expect(result.structuredContent.providers.agy.state).toBe("unsupported");

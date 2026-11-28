@@ -5,12 +5,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { CodexSource } from "../sources/codex";
 import type { Env } from "../sources/agent-source";
 import type { BankedResetGrant, BankedResetsSnapshot, ProviderBankedResets, Source } from "../core/model";
-import { claudeBankedResets, count, soonest, usageCachePath } from "./usage-client";
+import { aged, bankedCachePath, claudeBankedResets, count, homeIdentity, millis, savedJson, saveJson, soonest, stampAt } from "./usage-client";
 
 /** A reading is reused for 5 minutes, and a failed one is retried after a minute. */
 const REUSE_MS = 300_000;
@@ -27,9 +26,9 @@ const UNSUPPORTED: Partial<Record<Source, string>> = {
   agy: "Google AI issues global resets rather than account credits.",
 };
 
-/** The Codex reading lives next to usage.json. */
-export function codexCachePath(env: Env): string {
-  return join(dirname(usageCachePath(env)), "codex-banked-resets.json");
+/** The Codex reading for one home: a file of its own, so no other home can touch it. */
+export function codexCachePath(env: Env, base: string): string {
+  return bankedCachePath(env, "codex", base);
 }
 
 /**
@@ -51,14 +50,11 @@ export async function bankedResetsSnapshot(env: Env, now: Date, network: boolean
 /** What one `codex app-server` round-trip yields: the raw `rateLimitResetCredits` block. */
 export type CodexRunner = (env: Env, base: string) => Promise<unknown | null>;
 
-/** A reading, with the cache file's mtime so another process's newer reading is never missed. */
-type Cache = { fetchedAt: number; triedAt: number; credits: unknown; error: string | null; mtimeMs: number };
+/** A reading: when it was fetched, when it was last attempted, and what came back. */
+type Cache = { fetchedAt: number; triedAt: number; credits: unknown; error: string | null };
 
-/** One line of the cache file. The file is a map keyed by Codex home, so two homes never share a reading. */
-type Saved = { fetchedAt?: unknown; triedAt?: unknown; credits?: unknown; error?: unknown };
-
-/** The reading in this process, one per Codex home, and the read each home has open. */
-const readings = new Map<string, Cache>();
+/** What the last completed read in this process produced, which --no-cache never writes down. */
+const settled = new Map<string, Cache>();
 const inflight = new Map<string, Promise<void>>();
 
 /**
@@ -68,60 +64,91 @@ const inflight = new Map<string, Promise<void>>();
  * by every caller. No Codex home on this machine means no spawn at all.
  */
 export async function codexBankedResets(env: Env, now: Date, network: boolean, runner: CodexRunner = codexAppServer): Promise<ProviderBankedResets> {
-  const base = new CodexSource(env).base();
-  if (!existsSync(base)) return blank("codex app-server", "no_login", "No Codex login on this machine.");
+  const configured = new CodexSource(env).base();
+  // The configured path itself has to exist: `.../missing/..` names a directory that does, but the
+  // path that was configured does not, and Codex could not read a login through it either.
+  if (!existsSync(configured)) return blank("codex app-server", "no_login", "No Codex login on this machine.");
+  const base = homeIdentity(configured); // one home, however it is spelled
 
-  const path = codexCachePath(env);
-  const entry = reading(base, path);
+  const path = codexCachePath(env, base);
   const at = now.getTime();
-  if (!network) return view(entry, now);
-  let read = false;
-  if (!inflight.has(base) && at - entry.triedAt >= (entry.error ? RETRY_MS : REUSE_MS)) {
-    entry.triedAt = at;
-    read = true;
-    inflight.set(base, runner(env, base)
-      .then((answer) => {
-        // An answer without a credits block is not a reading: keep the last one and retry soon.
-        const credits = block(answer);
-        entry.credits = credits ?? entry.credits;
-        entry.error = credits ? null : "Codex did not answer the rate-limit read.";
-        entry.fetchedAt = credits ? at : entry.fetchedAt;
-      })
-      .catch(() => {
-        entry.error = "Codex did not answer the rate-limit read.";
-      })
-      .finally(() => {
-        inflight.delete(base);
-      }));
+  // The gate sees the reading this process already has, so --no-cache cannot loop: a call it just
+  // made (or just failed) is not repeated a second later.
+  const saved = newest(base, reading(path, at), at);
+  if (!network) return view(saved, now);
+  // An attempt stamped in the future is an attempt that has just happened, so it gates like one.
+  const tried = Math.min(saved.triedAt, at);
+  // A balance with no usable stamp is not reusable either: it says nothing about when it was read.
+  if (!inflight.has(base) && (aged(at, tried, saved.error ? RETRY_MS : REUSE_MS) || (!saved.error && !saved.fetchedAt))) {
+    inflight.set(base, refresh(env, base, path, saved, at, runner).finally(() => inflight.delete(base)));
   }
   await inflight.get(base); // this call's read, or the one already open
-  const latest = read && !(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0") ? save(path, base, entry) : entry;
-  return view(latest, now);
+  return view(newest(base, reading(path, at), at), now);
 }
 
 /**
- * The reading for one Codex home: this process's while the cache file is untouched, else the file.
- * A server and an MCP client share that file, so the older writer must see the newer reading.
- * ponytail: mtime + size, so two writes inside one millisecond can still miss; use a sequence file if it ever matters.
+ * One read of the balance, then the reading this process keeps: what came back, or the error that
+ * it did not. A failed read keeps the last balance and is retried after a minute.
  */
-function reading(base: string, path: string): Cache {
-  const mtimeMs = mtimeOf(path);
-  const known = readings.get(base);
-  if (known && known.mtimeMs === mtimeMs) return known;
-  const entry = fromFile(saved(path), base, mtimeMs);
-  readings.set(base, entry);
-  return entry;
+async function refresh(env: Env, base: string, path: string, saved: Cache, at: number, runner: CodexRunner): Promise<void> {
+  const entry: Cache = { ...saved, triedAt: at }; // this attempt, kept even when the read fails
+  try {
+    // An answer without a credits block is not a reading: keep the last one and retry soon.
+    const credits = block(await runner(env, base));
+    entry.credits = credits ?? entry.credits;
+    entry.error = credits ? null : "Codex did not answer the rate-limit read.";
+    entry.fetchedAt = credits ? at : entry.fetchedAt;
+  } catch {
+    entry.error = "Codex did not answer the rate-limit read.";
+  }
+  // One file per home, so the only other writer is a second refresh of this same account: a
+  // reading the file already has that is at least as new as this one is what the caller shows.
+  // An attempt is a reading too, so a slow failure cannot publish an older stamp over a newer one.
+  const write = !(env.TOKEN_FURNACE_NO_CACHE && env.TOKEN_FURNACE_NO_CACHE !== "0");
+  const disk = reading(path, at);
+  if (ahead(disk, entry)) {
+    // The balance on disk is newer and stays. This attempt still happened, so it is worth recording —
+    // unless the file already holds a later attempt, whose stamp a slow failure must not replace.
+    const kept = entry.triedAt >= disk.triedAt ? { ...disk, triedAt: entry.triedAt, error: entry.error } : disk;
+    if (write && kept !== disk) {
+      saveJson(path, { source: "codex-app-server", fetchedAt: kept.fetchedAt, triedAt: kept.triedAt, credits: kept.credits, error: kept.error });
+    }
+    settled.set(base, kept);
+    return;
+  }
+  if (write) {
+    saveJson(path, { source: "codex-app-server", fetchedAt: entry.fetchedAt, triedAt: entry.triedAt, credits: entry.credits, error: entry.error });
+  }
+  settled.set(base, entry);
 }
 
-/** This home's line in a cache file, or an empty reading when it has none yet. */
-function fromFile(file: Record<string, any> | null, base: string, mtimeMs: number): Cache {
-  const saved = (file?.[base] ?? null) as Saved | null;
+/**
+ * The newer of what this process holds and what is on disk. A failed attempt is a reading too: it
+ * has no new balance, but its `triedAt` is what keeps the next spawn on its one-minute gate.
+ */
+function newest(base: string, disk: Cache, now: number): Cache {
+  const mine = settled.get(base);
+  // A reading this process made under a clock that has since been corrected back is not "newer".
+  if (!mine || mine.fetchedAt > now + 60_000 || mine.triedAt > now + 60_000) return disk;
+  return ahead(mine, disk) ? mine : disk;
+}
+
+/** True when `a` is at least as new a reading as `b`: a later balance, or a later attempt at one. */
+function ahead(a: Cache, b: Cache): boolean {
+  return a.fetchedAt === b.fetchedAt ? a.triedAt >= b.triedAt : a.fetchedAt > b.fetchedAt;
+}
+
+/** This home's reading from its file, or an empty reading when it has none yet, or one from a clock
+ * this process cannot compare with. */
+function reading(path: string, now = Number.MAX_SAFE_INTEGER): Cache {
+  const saved = savedJson(path);
   return {
-    fetchedAt: count(saved?.fetchedAt),
-    triedAt: count(saved?.triedAt),
-    credits: saved?.credits ?? null,
+    fetchedAt: stampAt(millis(saved?.fetchedAt), now, 60_000), // milliseconds
+    triedAt: stampAt(millis(saved?.triedAt), now, 60_000),
+    // A file is not trusted either: a cached block that a fresh answer would have been refused for
+    // must not answer with a balance the page can count.
+    credits: block(saved?.credits),
     error: typeof saved?.error === "string" ? saved.error : null,
-    mtimeMs,
   };
 }
 
@@ -132,19 +159,10 @@ function instant(ms: number): string | null {
   return Number.isNaN(at.getTime()) ? null : at.toISOString();
 }
 
-function mtimeOf(path: string): number {
-  try {
-    const stat = statSync(path);
-    return stat.mtimeMs + stat.size;
-  } catch {
-    return 0; // no cache file: nothing to reload
-  }
-}
-
 /** The reading as the page uses it. A reading with no credits block yet is unavailable, not zero. */
 function view(entry: Cache, now: Date): ProviderBankedResets {
   const fetchedAt = instant(entry.fetchedAt);
-  const stale = entry.error !== null || !entry.fetchedAt || now.getTime() - entry.fetchedAt >= REUSE_MS;
+  const stale = entry.error !== null || aged(now.getTime(), entry.fetchedAt, REUSE_MS);
   const credits = entry.credits && typeof entry.credits === "object" ? (entry.credits as Record<string, any>) : null;
   if (!credits) {
     return { ...blank("codex app-server", "unavailable", entry.error ?? "No reset-credit reading yet."), fetchedAt, stale };
@@ -219,94 +237,6 @@ function iso(value: unknown): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   const at = new Date(value * 1000);
   return Number.isNaN(at.getTime()) ? null : at.toISOString();
-}
-
-/** The whole cache file: one line per Codex home. */
-function saved(path: string): Record<string, any> | null {
-  return readJson(path);
-}
-
-function readJson(path: string): Record<string, any> | null {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return typeof parsed === "object" && parsed !== null ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Save the reading and hand back what the caller should show. A file another process wrote with a
- * newer reading wins: its balance is not this call's to overwrite with one read before it.
- */
-function save(path: string, base: string, entry: Cache): Cache {
-  // One writer at a time: the read, the merge and the rename happen under a lock file, so a
-  // refresh that started before another process's cannot publish its older balance over it.
-  const lock = lockFile(path);
-  if (lock === null) {
-    // Another process is writing: its reading stands, so read the file again rather than the entry
-    // this call has already changed in memory.
-    readings.delete(base);
-    return reading(base, path);
-  }
-  let latest = entry;
-  try {
-    const file = saved(path);
-    // Belt and braces: even under the lock, a newer reading already on disk wins.
-    if (count((file?.[base] as Saved | undefined)?.fetchedAt) > latest.fetchedAt) {
-      latest = { ...fromFile(file, base, latest.mtimeMs), triedAt: latest.triedAt, error: latest.error };
-    }
-    persist(path, { ...file, [base]: { fetchedAt: latest.fetchedAt, triedAt: latest.triedAt, credits: latest.credits, error: latest.error } });
-  } finally {
-    closeSync(lock);
-    try {
-      unlinkSync(`${path}.lock`);
-    } catch {
-      // A lock we cannot remove is stale after a few seconds, and the next writer takes it then.
-    }
-  }
-  latest.mtimeMs = mtimeOf(path); // what the next call compares against, written or not
-  readings.set(base, latest);
-  return latest;
-}
-
-/**
- * Hold the cache file for a moment. `O_EXCL` is atomic, so only one process gets the lock. A lock
- * left by a writer that died is taken over by renaming it away: rename is atomic and its target is
- * this process's own path, so two takers cannot both succeed and neither can delete a live lock.
- */
-function lockFile(path: string): number | null {
-  const lock = `${path}.lock`;
-  try {
-    mkdirSync(dirname(lock), { recursive: true });
-    return openSync(lock, "wx");
-  } catch {
-    try {
-      if (Date.now() - statSync(lock).mtimeMs < 5_000) return null; // a live writer
-      const moved = `${lock}.${process.pid}.stale`;
-      renameSync(lock, moved); // one winner; the loser gets ENOENT and backs off
-      unlinkSync(moved);
-      return openSync(lock, "wx");
-    } catch {
-      return null;
-    }
-  }
-}
-
-/**
- * Write the cache through a file of this process's own and rename it into place: a reader never
- * sees half a snapshot, and two writers cannot leave each other's tail bytes behind. Other homes'
- * lines in the file are kept as they were.
- */
-function persist(path: string, file: Record<string, unknown>): void {
-  const temp = `${path}.${process.pid}.tmp`;
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(temp, JSON.stringify(file));
-    renameSync(temp, path);
-  } catch {
-    // A cache we cannot write is a slow refresh, not a wrong reading.
-  }
 }
 
 /**
