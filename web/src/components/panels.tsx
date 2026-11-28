@@ -2,12 +2,13 @@ import { CONTEXT_TARGET_LABEL, MAX_OVER_TARGET_SHARE } from "../../../src/core/c
 import { sessionFixPrompt } from "../../../src/core/analyze/issues";
 import { isSessionSpike } from "../../../src/core/analyze/burn";
 import { useId, useState, type ReactNode } from "react";
-import type { Burn, Report, Source } from "../../../src/core/model";
-import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, toDate } from "./format";
+import type { BankedResetsSnapshot, Burn, Report, Source } from "../../../src/core/model";
+import { dayTime, fmt, hoursLabel, kpiFmt, quota, sharePct, SHORT, sourceLabel, stamp, toDate } from "./format";
 import { Bar, Card, CopyButton, MetricInfo, SourceBadge, SourceSelect, Spark, Tile, WeekBar } from "./ui";
 import { Gauge, Hourly, WeeklyQuota, Burndown } from "./charts";
 import { Icon } from "./icons";
 import { Modal } from "./modal";
+import { bankedTotals } from "./resets";
 import { sessionKey, useUi } from "../store";
 
 export function ActNow({ r }: { r: Partial<Report> }) {
@@ -38,6 +39,23 @@ export function ActNow({ r }: { r: Partial<Report> }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** A way into the banked resets from the quota header, when the account still holds credits. */
+function BankedLink({ banked }: { banked?: BankedResetsSnapshot }) {
+  const { count, nextExpiresAt, soon } = bankedTotals(banked);
+  if (!count) return null;
+  return (
+    <a
+      href="#resets"
+      className={`flex items-center gap-1 text-xs hover:underline ${soon ? "text-accent" : "text-muted"}`}
+      title={nextExpiresAt ? `Next banked reset expires ${stamp(nextExpiresAt)}` : "Banked resets"}
+    >
+      <Icon name="Check" size={12} />
+      {count} banked reset{count === 1 ? "" : "s"}
+      {soon ? " · expiring soon" : ""}
+    </a>
   );
 }
 
@@ -629,14 +647,20 @@ export function Dashboard({
           </div>
         </Card>
         {weekly ? (
-          <Card title="Weekly quota" sub="Each provider’s weekly quota · shared calendar and percentage scale" icon="ChartLine" className="lg:col-span-2">
+          <Card title="Weekly quota" sub="Each provider’s weekly quota · shared calendar and percentage scale" icon="ChartLine"
+            className="lg:col-span-2" right={<BankedLink banked={r.bankedResets} />}>
             <WeeklyQuota burns={weeklyBurns} />
           </Card>
         ) : (
           <Card
             title="Burndown"
             icon="ChartLine"
-            right={<span className="text-xs text-muted">no quota reading</span>}
+            right={
+              <span className="flex items-center gap-3">
+                <span className="text-xs text-muted">no quota reading</span>
+                <BankedLink banked={r.bankedResets} />
+              </span>
+            }
             className="lg:col-span-2"
           >
             <Burndown rows={r.burndown ?? []} budget={r.budget}  />

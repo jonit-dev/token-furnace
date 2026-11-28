@@ -5,7 +5,7 @@ import { usageCachePath } from "./usage-client";
 import { buildReport } from "../core/analyze/report";
 import { PROVIDERS } from "../core/providers";
 import { reportView } from "../core/analyze/view";
-import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week } from "../core/model";
+import type { ConfigInput, ParsedFile, RawReport, Report, ScanProgress, SessionInput, Source, Week, BankedResetsSnapshot } from "../core/model";
 import type { SessionRepository } from "../repo/session-repo";
 import { SessionAgents } from "./session-agents";
 import { ParsePool } from "./parse-pool";
@@ -18,6 +18,8 @@ export interface ReportOptions {
   planWeek?: Week | null;
   opencodeWeek?: Week | null;
   agyWeek?: Week | null;
+  /** The account's own reset credits, read by the caller from its saved or live reading. */
+  bankedResets?: BankedResetsSnapshot;
   /** Plan sizes to use for a week with no local spend; the remembered ones fill the rest. */
   limits?: Partial<Record<Source, number>>;
   /** Headless agent runs from the process table, when the caller probed it. */
@@ -178,6 +180,7 @@ export class ReportService {
       planWeek: opts.planWeek ?? null,
       opencodeWeek: opts.opencodeWeek ?? null,
       agyWeek: opts.agyWeek ?? null,
+      bankedResets: opts.bankedResets,
       limits: { ...this.readLimits(), ...opts.limits },
       codexWeek: live.includes("codex") ? (this.sources.find((s) => s.name === "codex")?.week?.(now) ?? null) : null,
     });

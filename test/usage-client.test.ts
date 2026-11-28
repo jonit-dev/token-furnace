@@ -69,7 +69,7 @@ describe("planWeek cache opt-out", () => {
     expect(week).not.toBeNull();
     expect(week!.used).toBe(37);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("https://api.anthropic.com/api/oauth/usage");
+    expect(fetchMock.mock.calls[0][0]).toBe("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1");
     expect(existsSync(join(cacheDir, "token-furnace"))).toBe(false);
   });
 

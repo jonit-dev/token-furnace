@@ -93,7 +93,9 @@ describe("first scan", () => {
 
     const report = await get("/api/report");
     expect(report.status).toBe(200);
-    expect(JSON.parse(report.body)).toEqual(tsReport(env, now, 7, null, "all"));
+    // The personal banked resets come from the machine's own cache, not from the report build.
+    const { bankedResets: _banked, ...rest } = JSON.parse(report.body);
+    expect(rest).toEqual(tsReport(env, now, 7, null, "all"));
     const page = await get("/");
     expect(page.body).toContain("window.__REPORT__ = {");
   });

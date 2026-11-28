@@ -64,22 +64,40 @@ describe("serve", () => {
   it("returns the Report on /api/report", async () => {
     const response = await get("/api/report");
     expect(response.status).toBe(200);
-    expect(JSON.parse(response.body)).toEqual(tsReport(env, now, 7, null, "all"));
-    // No plan-usage call by default; the saved reading gives Claude a week, rate_limits gives Codex's.
     const report = JSON.parse(response.body);
+    expect(sansBanked(report)).toEqual(tsReport(env, now, 7, null, "all"));
+    // No plan-usage call by default; the saved reading gives Claude a week, rate_limits gives Codex's.
     expect(report.burns.claude.weekBurndown).not.toBeNull();
     expect(report.burns.codex.weekBurndown).not.toBeNull();
   });
 
   it("takes days and source from the query", async () => {
     const response = await get("/api/report?days=2&source=claude");
-    expect(JSON.parse(response.body)).toEqual(tsReport(env, now, 2, null, "claude"));
+    expect(sansBanked(JSON.parse(response.body))).toEqual(tsReport(env, now, 2, null, "claude"));
   });
 
   it("rejects a Host that is not this loopback server", async () => {
     expect((await get("/api/report", `evil.example:${live.port}`)).status).toBe(403);
     expect((await get("/", `evil.example:${live.port}`)).status).toBe(403);
     expect((await get("/dashboard.html", `evil.example:${live.port}`)).status).toBe(403);
+    expect((await get("/api/banked-resets", `evil.example:${live.port}`)).status).toBe(403);
+  });
+
+  it("answers /api/banked-resets from the saved reading, never from a fetch", async () => {
+    // The fixture's usage.json has a week and no credits beside it, and Codex has no saved credits.
+    const response = await get("/api/banked-resets");
+    expect(response.status).toBe(200);
+    const snapshot = JSON.parse(response.body);
+    expect(snapshot.fetchedAt).toBe(now.toISOString());
+    expect(snapshot.providers.claude).toMatchObject({ state: "unavailable", availableCount: 0, grants: [] });
+    expect(snapshot.providers.codex).toMatchObject({ state: "unavailable", availableCount: 0, grants: [] });
+    expect(snapshot.providers.opencode.state).toBe("unsupported");
+    expect(snapshot.providers.agy.state).toBe("unsupported");
+  });
+
+  it("carries the same snapshot on /api/report", async () => {
+    const report = JSON.parse((await get("/api/report")).body);
+    expect(report.bankedResets).toEqual(JSON.parse((await get("/api/banked-resets")).body));
   });
 
   it("accepts localhost on the same port", async () => {
@@ -103,9 +121,9 @@ describe("quota refresh", () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 
-  /** Wait, with a bound, until a check passes. */
+  /** Wait, with a bound, until a check passes. A refresh may wait on a subprocess, so this sleeps. */
   async function until(check: () => boolean): Promise<void> {
-    for (let i = 0; i < 500 && !check(); i++) await new Promise((next) => setImmediate(next));
+    for (let i = 0; i < 600 && !check(); i++) await new Promise((next) => setTimeout(next, 5));
     expect(check()).toBe(true);
   }
 
@@ -228,11 +246,101 @@ describe("quota refresh", () => {
     release(sevenDay(55, at));
     expect(await reportUntil(server, 55)).toBe(55);
   });
+
+  it("refreshes the saved credits in the background, without holding the answer", async () => {
+    const { at, env } = quotaRoot(420_000);
+    const fetchMock = vi.fn(async () => creditsBody(at));
+    vi.stubGlobal("fetch", fetchMock);
+    const server = await boot(env);
+
+    const first = JSON.parse((await read(server, "/api/banked-resets")).body);
+    expect(first.providers.claude.state).toBe("unavailable"); // nothing saved yet: the answer did not wait
+    await until(() => fetchMock.mock.calls.length === 1);
+
+    let later = first;
+    for (let i = 0; i < 500 && later.providers.claude.state !== "ok"; i++) {
+      await new Promise((next) => setTimeout(next, 5));
+      later = JSON.parse((await read(server, "/api/banked-resets")).body);
+    }
+    expect(later.providers.claude).toMatchObject({ state: "ok", availableCount: 1 });
+    expect(later.providers.claude.grants[0].title).toBe("One full limit reset");
+  });
+
+  it("never refreshes the credits under --no-plan-usage", async () => {
+    const { env } = quotaRoot(480_000);
+    const fetchMock = vi.fn(async () => creditsBody(new Date()));
+    vi.stubGlobal("fetch", fetchMock);
+    const server = await startServer(compose(env), { days: 7, source: "all", weeklyBudget: null, planUsage: false, port: 0 });
+    servers.push(server);
+
+    await read(server, "/api/banked-resets");
+    await read(server, "/api/report");
+    await new Promise((next) => setTimeout(next, 50));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reads only the credits: no provider usage command runs for /api/banked-resets", async () => {
+    const { root, env } = quotaRoot(540_000);
+    mkdirSync(join(root, "agy"), { recursive: true }); // Antigravity is installed here
+    const bin = mkdtempSync(join(tmpdir(), "tf-agy-bin-"));
+    const marker = join(root, "agy-ran");
+    const agy = join(bin, "agy");
+    writeFileSync(agy, `#!/bin/sh\necho ran >> "$TOKEN_FURNACE_AGY_MARKER"\n`, { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    process.env.TOKEN_FURNACE_AGY_MARKER = marker;
+    try {
+      const server = await boot({ ...env, AGY_HOME: join(root, "agy") });
+
+      await read(server, "/api/banked-resets");
+      await new Promise((next) => setTimeout(next, 80)); // let anything scheduled run
+      expect(existsSync(marker)).toBe(false);
+
+      // The report still refreshes the quota, which is the only place that command belongs.
+      await read(server, "/api/report");
+      await until(() => existsSync(marker));
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      process.env.PATH = path;
+      delete process.env.TOKEN_FURNACE_AGY_MARKER;
+    }
+  });
 });
 
 function sevenDay(utilization: number, now: Date): Response {
   const resets = now.getTime() / 1000 + 3 * 86_400;
   return new Response(JSON.stringify({ seven_day: { utilization, resets_at: resets } }), { status: 200 });
+}
+
+/** The report without the personal banked resets, which the route adds from the saved reading. */
+function sansBanked(report: Record<string, unknown>): Record<string, unknown> {
+  const { bankedResets: _banked, ...rest } = report;
+  return rest;
+}
+
+/** The usage call's body with one Claude credit beside the week. */
+function creditsBody(now: Date): Response {
+  const resets = now.getTime() / 1000 + 3 * 86_400;
+  return new Response(JSON.stringify({
+    seven_day: { utilization: 12, resets_at: resets },
+    cedar_ember: {
+      eligible: true,
+      ineligible_reason: null,
+      grants: [{
+        id: "full-reset-1",
+        label: "One full limit reset",
+        resets_total: 1,
+        resets_left: 1,
+        starts_at: new Date(now.getTime() - 86_400_000).toISOString(),
+        ends_at: new Date(now.getTime() + 5 * 86_400_000).toISOString(),
+        clears: ["seven_day"],
+        usable_now: true,
+        paused: false,
+        unavailable_reason: null,
+      }],
+    },
+  }), { status: 200, headers: { "content-type": "application/json" } });
 }
 describe("configuration repair endpoint", () => {
   it("rejects unconfirmed or cross-origin writes and applies the shared CLI repair after confirmation", async () => {

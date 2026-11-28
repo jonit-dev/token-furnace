@@ -18,6 +18,7 @@ import { CONFIG_REPAIRS, type ConfigRepairId } from "./core/config-repairs";
 import { pendingRepairs, runFixConfig } from "./setup/agents";
 import { agyWeek, openCodeWeek, planWeek } from "./services/usage-client";
 import { resetsSnapshot } from "./services/resets-client";
+import { bankedResetsSnapshot } from "./services/banked-resets-client";
 import {
   deliver, loadSettings, mergeSettings, publicSettings, runAlerts, saveSettings,
   type DeliveryResult,
@@ -157,6 +158,7 @@ function reportController(app: App, options: ServeOptions, page: string) {
   // real utilization without a disk write, and it expires when its week resets.
   let quota: Week | null = null;
   let fetching: Promise<void> | null = null;
+  let banking: Promise<void> | null = null;
 
   /** The reading for this request: the snapshot while its week runs, else the saved file. No network. */
   const plan = (now: Date): Promise<Week | null> =>
@@ -164,13 +166,30 @@ function reportController(app: App, options: ServeOptions, page: string) {
 
   /** Refresh after the response. One call at a time; the client's own gate stops a second call. */
   const refresh = (): void => {
-    fetching ??= Promise.all([planWeek(app.env, app.now(), true), openCodeWeek(app.env, app.now(), true), agyWeek(app.env, app.now(), true)])
+    fetching ??= Promise.all([
+      planWeek(app.env, app.now(), true),
+      openCodeWeek(app.env, app.now(), true),
+      agyWeek(app.env, app.now(), true),
+    ])
       .then(([week]) => {
         if (week && week.resets > app.now()) quota = week;
       })
       .catch(() => {}) // a failed call keeps the reading
       .finally(() => {
         fetching = null;
+      });
+  };
+
+  /**
+   * The credits refresh on their own: reading them must not spawn a provider's usage command or
+   * spend a quota call. One at a time, and the clients' own gates stop a second read.
+   */
+  const refreshBanked = (): void => {
+    banking ??= bankedResetsSnapshot(app.env, app.now(), true)
+      .then(() => {})
+      .catch(() => {}) // a failed read keeps the saved one
+      .finally(() => {
+        banking = null;
       });
   };
 
@@ -185,10 +204,14 @@ function reportController(app: App, options: ServeOptions, page: string) {
       planWeek: await plan(now),
       opencodeWeek: await openCodeWeek(app.env, now, false),
       agyWeek: await agyWeek(app.env, now, false),
+      bankedResets: await bankedResetsSnapshot(app.env, now, false),
       headless: options.processes ? await headlessAgents() : undefined,
       now,
     });
-    if (options.planUsage) setImmediate(refresh); // after this response: the keychain read must not block it
+    if (options.planUsage) setImmediate(() => {
+      refresh();
+      refreshBanked();
+    }); // after this response: the keychain read must not block it
     return report;
   }
 
@@ -241,6 +264,14 @@ function reportController(app: App, options: ServeOptions, page: string) {
     async resets(@Res() res: Response) {
       // The shared cache answers; a cold one fetches once and every later request reads that.
       const snapshot = await resetsSnapshot(app.now());
+      return res.set("Cache-Control", "no-store").json(snapshot);
+    }
+
+    @Get("/api/banked-resets")
+    async bankedResets(@Res() res: Response) {
+      // The saved reading answers here: a subprocess or a request never holds this response up.
+      const snapshot = await bankedResetsSnapshot(app.env, app.now(), false);
+      if (options.planUsage) setImmediate(refreshBanked);
       return res.set("Cache-Control", "no-store").json(snapshot);
     }
 

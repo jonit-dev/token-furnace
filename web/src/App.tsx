@@ -61,7 +61,7 @@ export function App() {
     ),
     sessions: <Sessions r={r} />,
     tips: <Tips />,
-    resets: <Resets />,
+    resets: <Resets banked={r.bankedResets} />,
     notifications: <Notifications />,
   };
   const filePage = location.protocol !== "http:" && location.protocol !== "https:";

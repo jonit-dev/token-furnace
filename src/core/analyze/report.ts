@@ -395,6 +395,7 @@ export function buildReport(input: ReportInput): RawReport | null {
     per_source: {},
     baseline: [],
     burns: {},
+    bankedResets: input.bankedResets,
   };
 
   for (const src of input.live) {

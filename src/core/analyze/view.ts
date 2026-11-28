@@ -157,5 +157,6 @@ export function reportView(report: RawReport, now: Date): Report {
     config: report.config,
     tools: report.tools,
     unpriced: report.unpriced,
+    ...(report.bankedResets ? { bankedResets: report.bankedResets } : {}),
   };
 }

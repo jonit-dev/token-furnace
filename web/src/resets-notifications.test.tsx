@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { useUi } from "./store";
@@ -35,6 +35,44 @@ const SETTINGS = {
   conditions: { newReset: true, sessionSpike: false, upcoming: true, leadMinutes: 60, usage: { enabled: false, percent: 80, provider: "any" } },
 };
 
+const day = 86_400_000;
+
+/** Two Claude credits, the first lapsing inside a week, and one Codex credit. */
+function banked(now: number, overrides: Record<string, unknown> = {}) {
+  return {
+    fetchedAt: new Date(now).toISOString(),
+    providers: {
+      claude: {
+        source: "api.anthropic.com",
+        availableCount: 2,
+        nextExpiresAt: new Date(now + 3 * day).toISOString(),
+        grants: [
+          { id: "full-reset-1", title: "One full limit reset", description: "", status: "available", remaining: 1, total: 1, scope: "Weekly limits", grantedAt: new Date(now - day).toISOString(), expiresAt: new Date(now + 3 * day).toISOString(), next: true },
+          { id: "full-reset-2", title: "One more reset", description: "", status: "available", remaining: 1, total: 1, scope: "Weekly limits", grantedAt: new Date(now - day).toISOString(), expiresAt: new Date(now + 60 * day).toISOString() },
+        ],
+        fetchedAt: new Date(now).toISOString(),
+        stale: false,
+        state: "ok",
+        ...(overrides.claude as object),
+      },
+      codex: {
+        source: "codex app-server",
+        availableCount: 1,
+        nextExpiresAt: new Date(now + 40 * day).toISOString(),
+        grants: [{ id: "RateLimitResetCredit_1", title: "Full reset", description: "Thanks for using Codex!", status: "available", remaining: 1, total: 1, scope: "codexRateLimits", grantedAt: new Date(now - day).toISOString(), expiresAt: new Date(now + 40 * day).toISOString(), next: true }],
+        fetchedAt: new Date(now).toISOString(),
+        stale: false,
+        state: "ok",
+        ...(overrides.codex as object),
+      },
+      opencode: { source: "opencode", availableCount: 0, nextExpiresAt: null, grants: [], fetchedAt: null, stale: false, state: "unsupported" },
+      agy: { source: "agy", availableCount: 0, nextExpiresAt: null, grants: [], fetchedAt: null, stale: false, state: "unsupported" },
+    },
+  };
+}
+
+const BANKED = banked(Date.now());
+
 /** The live-page protocols are what the components use to decide they may talk to the server. */
 const liveOrigin = Object.getOwnPropertyDescriptor(window, "location");
 void liveOrigin;
@@ -51,6 +89,7 @@ beforeEach(() => {
   window.__REPORT__ = null;
   fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/api/banked-resets")) return { ok: true, status: 200, json: async () => BANKED };
     if (url.endsWith("/api/resets")) return { ok: true, status: 200, json: async () => SNAPSHOT };
     if (url.endsWith("/api/notifications/test")) {
       return { ok: false, status: 502, json: async () => ({ ok: false, skipped: false, results: [
@@ -117,6 +156,134 @@ describe("the Resets tab", () => {
     render(<App />);
     await waitFor(() => expect(screen.getAllByText("Resets").length).toBeGreaterThan(0));
     expect(screen.getByRole("link", { name: "Notifications" })).not.toBeNull();
+  });
+});
+
+describe("your banked resets", () => {
+  it("sits above the public feed and lists each credit with its expiry", async () => {
+    render(<Resets />);
+    const heading = await screen.findByText("Your banked resets");
+    expect(screen.getByText("2 reset credits")).not.toBeNull();
+    expect(screen.getByText("1 reset credit")).not.toBeNull(); // Codex
+    expect(screen.getByText("One full limit reset")).not.toBeNull();
+    expect(screen.getByText("Full reset")).not.toBeNull();
+    expect(screen.getAllByText("Next")).toHaveLength(2); // one per provider
+    expect(screen.getAllByText("Weekly limits").length).toBe(3); // scope tags, including Codex's own word
+    // Personal credits come before the public feed.
+    const feed = await screen.findByText("Global resets");
+    expect(heading.compareDocumentPosition(feed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("warns about the credit that lapses within a week", async () => {
+    render(<Resets />);
+    const [soon, later] = await screen.findAllByText(/^Next expires /);
+    expect(soon.textContent).toMatch(/in \d+ d/); // Claude's credit, 3 days out
+    expect(soon.className).toContain("text-accent");
+    expect(later.className).not.toContain("text-accent"); // Codex's, 40 days out
+    expect(screen.getAllByText(/^Expires .*in \d+ d$/)[0].className).toContain("text-accent");
+  });
+
+  it("shows why a provider has nothing to spend", async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/api/banked-resets")) {
+        return { ok: true, status: 200, json: async () => banked(Date.now(), {
+          claude: { state: "unavailable", availableCount: 0, grants: [], nextExpiresAt: null, note: "This account has no personal reset credits." },
+          codex: { state: "no_login", availableCount: 0, grants: [], nextExpiresAt: null, note: "No Codex login on this machine." },
+        }) };
+      }
+      return { ok: true, status: 200, json: async () => SNAPSHOT };
+    });
+    render(<Resets />);
+
+    expect(await screen.findByText("Not available")).not.toBeNull();
+    expect(screen.getByText("No login")).not.toBeNull();
+    expect(screen.getByText("This account has no personal reset credits.")).not.toBeNull();
+    expect(screen.getByText("No Codex login on this machine.")).not.toBeNull();
+  });
+
+  it("shows an expired credit struck through and marks a stale reading", async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/api/banked-resets")) {
+        return { ok: true, status: 200, json: async () => banked(Date.now(), {
+          codex: { stale: true, availableCount: 0, nextExpiresAt: null, grants: [
+            { id: "RateLimitResetCredit_1", title: "Full reset", description: "", status: "expired", remaining: 1, total: 1, scope: "codexRateLimits", grantedAt: null, expiresAt: new Date(Date.now() - day).toISOString() },
+          ] },
+        }) };
+      }
+      return { ok: true, status: 200, json: async () => SNAPSHOT };
+    });
+    render(<Resets />);
+
+    expect(await screen.findByText("No credits left")).not.toBeNull();
+    expect(screen.getByText(/^Expired /)).not.toBeNull();
+    expect(screen.getByText(/This reading is stale/)).not.toBeNull();
+  });
+
+  it("keeps the report's own snapshot on a file: page and asks the server for nothing", async () => {
+    vi.stubGlobal("location", { protocol: "file:", hash: "" });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<Resets banked={banked(Date.now()) as never} />);
+
+    expect(screen.getByText("Your banked resets")).not.toBeNull();
+    expect(screen.getByText("2 reset credits")).not.toBeNull();
+    expect(screen.getByText(/Start the live dashboard with token-furnace serve to read the reset feed/)).not.toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("stops counting a credit whose expiry has passed, even in an old saved snapshot", async () => {
+    // A saved file:// report: the reading still says "available", but the expiry is in the past.
+    vi.stubGlobal("location", { protocol: "file:", hash: "" });
+    vi.stubGlobal("fetch", vi.fn());
+    const stale = banked(Date.now(), {
+      claude: {
+        availableCount: 1,
+        nextExpiresAt: new Date(Date.now() - day).toISOString(),
+        grants: [{
+          id: "full-reset-1", title: "One full limit reset", description: "", status: "available",
+          remaining: 1, total: 1, scope: "Weekly limits", grantedAt: null,
+          expiresAt: new Date(Date.now() - day).toISOString(), next: true,
+        }],
+      },
+    });
+    render(<Resets banked={stale as never} />);
+
+    const claude = screen.getByText("One full limit reset").closest("section")!;
+    expect(within(claude).getByText("No credits left")).not.toBeNull(); // its only credit has lapsed
+    expect(within(claude).getByText(/^Expired /)).not.toBeNull(); // and the row says so
+    expect(within(claude).queryByText("Next")).toBeNull();
+    expect(screen.queryByText(/in 0 h/)).toBeNull();
+  });
+
+  it("counts the resets a single grant still holds, as the API does", async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/api/banked-resets")) {
+        return { ok: true, status: 200, json: async () => banked(Date.now(), {
+          claude: {
+            availableCount: 3, nextExpiresAt: new Date(Date.now() + 3 * day).toISOString(),
+            grants: [{
+              id: "full-reset-1", title: "Three full resets", description: "", status: "available",
+              remaining: 3, total: 3, scope: "Weekly limits", grantedAt: null,
+              expiresAt: new Date(Date.now() + 3 * day).toISOString(), next: true,
+            }],
+          },
+        }) } ;
+      }
+      return { ok: true, status: 200, json: async () => SNAPSHOT };
+    });
+    render(<Resets />);
+
+    expect(await screen.findByText("3 reset credits")).not.toBeNull(); // not one row
+    expect(screen.getByText(/3\/3 left/)).not.toBeNull();
+  });
+
+  it("says so when there is no reading at all", async () => {
+    fetchMock.mockImplementation(async () => ({ ok: true, status: 200, json: async () => null }));
+    render(<Resets />);
+    expect(await screen.findByText(/No banked-reset reading yet/)).not.toBeNull();
   });
 });
 

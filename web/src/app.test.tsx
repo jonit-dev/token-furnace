@@ -248,6 +248,49 @@ describe("App", () => {
     }
   });
 
+  it("links to the banked resets from the quota header once a credit is held", () => {
+    window.__REPORT__ = {
+      ...fixtureReport,
+      bankedResets: {
+        fetchedAt: new Date().toISOString(),
+        providers: {
+          claude: {
+            source: "api.anthropic.com", availableCount: 2, nextExpiresAt: new Date(Date.now() + 9 * 86_400_000).toISOString(),
+            grants: [], fetchedAt: null, stale: false, state: "ok",
+          },
+          opencode: { source: "opencode", availableCount: 0, nextExpiresAt: null, grants: [], fetchedAt: null, stale: false, state: "unsupported" },
+        },
+      },
+    };
+    render(<App />);
+
+    const link = screen.getByRole("link", { name: /2 banked resets/ }) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("#resets");
+    expect(link.textContent).not.toContain("expiring soon"); // nine days out
+  });
+
+  it("flags a banked credit that lapses within a week, and stays quiet without one", () => {
+    render(<App />);
+    expect(screen.queryByRole("link", { name: /banked reset/ })).toBeNull(); // the fixture holds none
+    cleanup();
+
+    window.__REPORT__ = {
+      ...fixtureReport,
+      bankedResets: {
+        fetchedAt: new Date().toISOString(),
+        providers: {
+          codex: {
+            source: "codex app-server", availableCount: 1, nextExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+            grants: [], fetchedAt: null, stale: false, state: "ok",
+          },
+        },
+      },
+    };
+    render(<App />);
+    const link = screen.getByRole("link", { name: /1 banked reset · expiring soon/ });
+    expect(link.className).toContain("text-accent");
+  });
+
   it("switches the burn source when both sources are present", () => {
     render(<App />);
     const selector = screen.getByRole("combobox", { name: "Combustion rate provider" }) as HTMLSelectElement;

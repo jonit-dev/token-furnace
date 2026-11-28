@@ -75,6 +75,49 @@ export interface Week {
   readings?: [number, number][];
 }
 
+/**
+ * One banked reset credit the account holds, read from the provider. Read-only: Token Furnace
+ * shows what is left and when it lapses, and never redeems one.
+ */
+export interface BankedResetGrant {
+  id: string;
+  /** The provider's own headline, e.g. "Full reset". */
+  title: string;
+  description: string;
+  /** "available", "redeeming", "redeemed", "expired", or the provider's own word. */
+  status: string;
+  /** Resets left of the ones the grant allows; 1 of 1 for a single credit. */
+  remaining: number;
+  total: number;
+  /** What the credit clears: the plan window, or the model it is tied to. */
+  scope: string;
+  grantedAt: string | null;
+  expiresAt: string | null;
+  /** True for the available credit that lapses first. */
+  next?: boolean;
+}
+
+/** What one provider reports about the account's own reset credits. */
+export interface ProviderBankedResets {
+  source: string;
+  /** Credits the account can spend now. */
+  availableCount: number;
+  /** The earliest expiry among them, so the page can warn before one lapses. */
+  nextExpiresAt: string | null;
+  grants: BankedResetGrant[];
+  fetchedAt: string | null;
+  /** True when the reading is older than the reuse window or the last read failed. */
+  stale: boolean;
+  state: "ok" | "no_login" | "unsupported" | "unavailable";
+  note?: string;
+}
+
+/** Personal banked resets, provider by provider. */
+export interface BankedResetsSnapshot {
+  providers: Partial<Record<Source, ProviderBankedResets>>;
+  fetchedAt: string | null;
+}
+
 /** One recommended setting, judged from the config on disk. burn.py:434 */
 export interface ConfigNote {
   name: string;
@@ -128,6 +171,8 @@ export interface ReportInput {
   codexWeek: Week | null;
   opencodeWeek?: Week | null;
   agyWeek?: Week | null;
+  /** The account's own reset credits, already read by the caller. */
+  bankedResets?: BankedResetsSnapshot;
   /** Last calibrated plan size in weighted tokens, per source: sizes a week with no local spend yet. */
   limits?: Partial<Record<Source, number>>;
 }
@@ -323,6 +368,7 @@ export interface RawReport {
   per_source: Partial<Record<Source, RawPerSource>>;
   baseline: BaselineRow[];
   burns: Partial<Record<Source, RawBurn>>;
+  bankedResets?: BankedResetsSnapshot;
 }
 
 /** The JSON the CLI, the server and the dashboard read. burn.py:1415 */
@@ -364,6 +410,7 @@ export interface Report {
   tools: [string, number][];
   /** [share %, worst models] */
   unpriced: [number, [string, number][]] | null;
+  bankedResets?: BankedResetsSnapshot;
 }
 
 /** One ranked leak or config problem, before report_view turns it into an Issue. */

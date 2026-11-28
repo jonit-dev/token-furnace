@@ -72,6 +72,7 @@ npm install -g token-furnace
 | `token-furnace setup [--apply] [--verify] [--rollback] [--aggressive]` | Installer. Dry run unless `--apply`. |
 | `token-furnace fix-config` | Repairs context and worker settings; backs up changed files first. Optional `--include-depth`. |
 | `token-furnace hook churn` | Claude Code PostToolUse churn hook. Reads the payload on stdin. Never blocks. |
+| `token-furnace mcp` | Read-only MCP server on stdio. One tool, `banked_resets`, answering the same snapshot as `GET /api/banked-resets`. |
 
 Options:
 
@@ -80,6 +81,15 @@ Options:
 - `--no-cache` — parse every file and write no cache.
 - `--no-plan-usage` — never fetch Anthropic, OpenCode Go or Google AI usage. A saved reading is still used.
 - `-h`, `--help` — usage text.
+
+## Banked resets
+
+Personal banked reset credits — the unused resets a Claude or Codex account still holds and when
+each one expires — are read-only and reachable three ways: the Resets tab of the dashboard,
+`GET /api/banked-resets` (also on `report.bankedResets` from `GET /api/report` and
+`token-furnace --json`), and the MCP tool `banked_resets` from `token-furnace mcp`. Nothing here
+redeems a credit; that stays in the provider's own surface. OpenCode Go and Antigravity report
+`unsupported` because those providers issue no account credits.
 
 ## OpenCode
 
