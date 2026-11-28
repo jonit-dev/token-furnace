@@ -20,7 +20,9 @@ export function loadPage(): string {
 
 /** The built page with the report embedded, for a static file or the first paint. burn.py:1498 */
 export function renderHtml(report: RawReport, now: Date, page = loadPage()): string {
-  // `</` would end the script tag; Python escapes it the same way.
-  const data = JSON.stringify(reportView(report, now)).replace(/<\//g, "<\\/");
-  return page.replace("/*REPORT*/null", data);
+  // Every `<` goes in as `\u003c`, which JSON reads back as the same character: no text a session
+  // title or a provider's credit title carries can close the script tag or open an HTML comment
+  // that would swallow the page after it.
+  const data = JSON.stringify(reportView(report, now)).replace(/</g, "\\u003c");
+  return page.replace("/*REPORT*/null", () => data);
 }
