@@ -27,6 +27,7 @@ export const CLEARED = [
   "CLAUDE_CODE_SUBAGENT_MODEL",
   "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY",
   "TOKEN_FURNACE_WEEKLY_BUDGET",
+  "TOKEN_FURNACE_NO_CACHE",
 ];
 
 /** A whole-second instant, so Python's datetime.now() and a JS Date agree to the second. */

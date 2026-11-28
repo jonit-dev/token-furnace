@@ -3,7 +3,7 @@
  * which scripts/burn.py wrote on this same fixture before PRD-003 deleted it.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -86,7 +86,17 @@ describe("--json", () => {
     expect(run1.code).toBe(0);
     expect(run1.out.endsWith("\n")).toBe(true);
     expect(run1.out.trimEnd().split("\n")).toHaveLength(1);
-    expect(JSON.parse(run1.out)).toEqual(tsReport(env(leaksRoot), now, 7, null, "all"));
+    const { bankedResets: _banked, ...rest } = JSON.parse(run1.out);
+    expect(rest).toEqual(tsReport(env(leaksRoot), now, 7, null, "all"));
+  });
+
+  it("carries the personal banked resets, with the unsupported providers named", async () => {
+    const run1 = await run(["--json", "--no-plan-usage"], leaksRoot);
+    const snapshot = JSON.parse(run1.out).bankedResets;
+    expect(Object.keys(snapshot.providers).sort()).toEqual(["agy", "claude", "codex", "opencode"]);
+    expect(snapshot.providers.opencode.state).toBe("unsupported");
+    expect(snapshot.providers.agy.state).toBe("unsupported");
+    expect(snapshot.providers.claude.state).toBe("unavailable"); // no saved credits on this fixture
   });
 
   it("writes the no-data notice to stderr, so stdout stays the Report alone", async () => {
@@ -168,7 +178,7 @@ describe("network", () => {
     const run1 = await run(["--json"], root);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, { headers: Record<string, string> }];
-    expect(url).toBe("https://api.anthropic.com/api/oauth/usage");
+    expect(url).toBe("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1");
     expect(init.headers.Authorization).toBe("Bearer tok-1");
     expect(JSON.parse(run1.out).burns.claude.used).toBe(55);
     // The answer is saved, so the next run in the 5-minute window makes no call.
@@ -242,7 +252,48 @@ describe("usage errors", () => {
     const run1 = await run(["--help"], leaksRoot);
     expect(run1.code).toBe(0);
     expect(run1.out).toContain("Usage: token-furnace");
+    expect(run1.out).toContain("token-furnace mcp");
     expect((await run(["x"], leaksRoot)).code).toBe(2);
     expect((await run(["--source", "gemini"], leaksRoot)).code).toBe(2);
+  });
+
+  it("honours TOKEN_FURNACE_NO_CACHE without the flag", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tf-env-nocache-"));
+    buildFull(root, now);
+    writeJson(join(root, ".credentials.json"), { claudeAiOauth: { accessToken: "tok" } });
+    mkdirSync(join(root, "codex"), { recursive: true }); // a Codex home, so its credits would be cached
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ seven_day: { utilization: 55, resets_at: now.getTime() + 3 * 86_400_000 } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // No App passed in: this is the CLI's own compose(), which is what reads the environment.
+    const own = env(root);
+    const keys = Object.keys(own).concat("TOKEN_FURNACE_NO_CACHE");
+    const saved = new Map(keys.map((key) => [key, process.env[key]]));
+    for (const [key, value] of Object.entries({ ...own, TOKEN_FURNACE_NO_CACHE: "1", TOKEN_FURNACE_WORKERS: "0" })) {
+      if (value !== undefined) process.env[key] = value;
+    }
+    try {
+      expect(await main(["--json"])).toBe(0);
+    } finally {
+      for (const key of keys) {
+        const value = saved.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      vi.unstubAllGlobals();
+    }
+    expect(existsSync(join(root, "token-furnace", "usage.json"))).toBe(false);
+    expect(existsSync(join(root, "token-furnace", "codex-banked-resets.json"))).toBe(false);
+  });
+
+  it("takes no arguments for the MCP server, which owns stdout", async () => {
+    const stderr = process.stderr.write;
+    let err = "";
+    process.stderr.write = ((chunk: string) => ((err += chunk), true)) as typeof process.stderr.write;
+    try {
+      expect(await main(["mcp", "--json"])).toBe(2);
+    } finally {
+      process.stderr.write = stderr;
+    }
+    expect(err).toContain("Usage: token-furnace mcp");
   });
 });

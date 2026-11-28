@@ -17,6 +17,8 @@ import { printDoctor, printText } from "./render/text";
 import { serve } from "./server";
 import type { RawReport, ScanProgress, Source } from "./core/model";
 import { agyWeek, openCodeWeek, planWeek } from "./services/usage-client";
+import { bankedResetsSnapshot } from "./services/banked-resets-client";
+import { mcp } from "./mcp";
 import { runChurnHook, readStdin } from "./setup/churn-hook";
 import { runFixConfig, runSetup } from "./setup/agents";
 
@@ -25,6 +27,7 @@ const USAGE = `Usage: token-furnace [days] [options]
        token-furnace setup [--apply] [--rollback] [--aggressive] [--verify]
        token-furnace fix-config
        token-furnace hook churn
+       token-furnace mcp
 
 Where the token budget actually went. Reads local Claude Code and Codex transcripts.
 
@@ -38,6 +41,7 @@ Where the token budget actually went. Reads local Claude Code and Codex transcri
   --no-plan-usage      never fetch subscription usage from Anthropic, OpenCode Go or Google (a saved reading is still used)
   --no-cache           parse every file, write no cache
   serve [--port 8765]  live report on http://127.0.0.1:<port>, refreshed in the background
+  mcp                  read-only MCP server on stdio (tool: banked_resets)
   fix-config          repair context and worker settings (backs up first; --include-depth optional)
   -h, --help           this text
 `;
@@ -64,6 +68,18 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
       return 2;
     }
     return runFixConfig(app?.env ?? process.env, process.stdout, { includeDepth: argv[1] === "--include-depth" });
+  }
+  if (argv[0] === "mcp") {
+    if (argv.length > 1) {
+      process.stderr.write("Usage: token-furnace mcp\n");
+      return 2;
+    }
+    // The credits need no transcripts: no scan, no cache database, nothing but the reading.
+    const env = app?.env ?? process.env;
+    const clock = app?.now ?? (() => new Date(env.TOKEN_FURNACE_NOW || Date.now()));
+    // stdout is the MCP channel: nothing else may write there.
+    await mcp(env, clock, process.stdin, (line) => process.stdout.write(`${line}\n`));
+    return 0;
   }
   if (argv[0] === "setup") {
     const setupArgs = parseArgs({
@@ -123,7 +139,8 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
   }
 
   if (!app) {
-    app = compose(process.env, { noCache: Boolean(parsed.values["no-cache"]) });
+    // Undefined, not false: an absent --no-cache leaves TOKEN_FURNACE_NO_CACHE in charge.
+    app = compose(process.env, { noCache: parsed.values["no-cache"] ? true : undefined });
   }
 
   const serveMode = parsed.positionals[0] === "serve";
@@ -167,12 +184,18 @@ export async function main(argv: string[] = process.argv.slice(2), app?: App): P
 
   const now = app.now();
   await app.reports.refresh(stderrProgress());
-  const [plan, goPlan, agyPlan] = await Promise.all([planWeek(app.env, now, options.planUsage), openCodeWeek(app.env, now, options.planUsage), agyWeek(app.env, now, options.planUsage)]);
+  const [plan, goPlan, agyPlan, banked] = await Promise.all([
+    planWeek(app.env, now, options.planUsage),
+    openCodeWeek(app.env, now, options.planUsage),
+    agyWeek(app.env, now, options.planUsage),
+    bankedResetsSnapshot(app.env, now, options.planUsage),
+  ]);
   const report = app.reports.getRaw(options.days, options.source, {
     weeklyBudget: options.weeklyBudget,
     planWeek: plan,
     opencodeWeek: goPlan,
     agyWeek: agyPlan,
+    bankedResets: banked,
     now,
   });
   if (!report) {
